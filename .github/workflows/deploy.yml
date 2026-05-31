@@ -8,13 +8,13 @@
 #   HETZNER_USER        SSH user (e.g. deploy or root)
 #   HETZNER_SSH_KEY     private SSH key (PEM, no passphrase) for that user
 #   HETZNER_SSH_PORT    optional, defaults to 22
-#   HETZNER_DEPLOY_DIR  optional, defaults to /opt/loontail/network-service
+#   HETZNER_DEPLOY_DIR  optional, defaults to /opt/loontail/minecraft-network-service
 # GITHUB_TOKEN is provided automatically; it both pushes to GHCR and is used
 # (ephemerally) by the server to pull the image during this run.
 #
 # --- One-time server setup -------------------------------------------------
 #   1. Install Docker Engine + the compose plugin, plus curl.
-#   2. Create the deploy dir:   mkdir -p /opt/loontail/network-service
+#   2. Create the deploy dir:   mkdir -p /opt/loontail/minecraft-network-service
 #   3. Create .env.prod there (chmod 600) from .env.example, with a strong
 #      POSTGRES_PASSWORD and a matching DATABASE_URL, e.g.:
 #        POSTGRES_PASSWORD=<strong-secret>
@@ -90,7 +90,7 @@ jobs:
           SSH_USER: ${{ secrets.HETZNER_USER }}
           SSH_PORT: ${{ secrets.HETZNER_SSH_PORT != '' && secrets.HETZNER_SSH_PORT || '22' }}
           SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
-          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/network-service' }}
+          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/minecraft-network-service' }}
           IMAGE: ${{ needs.build-and-push.outputs.image }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
