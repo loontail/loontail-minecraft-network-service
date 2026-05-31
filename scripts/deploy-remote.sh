@@ -70,9 +70,11 @@ compose pull
 echo "Starting containers ..."
 compose up -d --remove-orphans
 
+# Probe inside the container (the app always listens on 8080 there), so this
+# works regardless of which host port the service is published on.
 echo "Waiting for /health ..."
 for _ in $(seq 1 30); do
-  if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+  if compose exec -T service curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
     echo "Service healthy: $IMAGE"
     docker image prune -f >/dev/null 2>&1 || true
     exit 0
