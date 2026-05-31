@@ -22,6 +22,14 @@ if [ ! -f .env.prod ]; then
   exit 1
 fi
 
+# Pin the deployed image in .env.prod so manual `docker compose up` works
+# without needing LOONTAIL_IMAGE in the shell environment.
+if grep -q '^LOONTAIL_IMAGE=' .env.prod; then
+  sed -i "s|^LOONTAIL_IMAGE=.*|LOONTAIL_IMAGE=${IMAGE}|" .env.prod
+else
+  echo "LOONTAIL_IMAGE=${IMAGE}" >> .env.prod
+fi
+
 compose() {
   docker compose -f docker-compose.prod.yml --env-file .env.prod "$@"
 }
