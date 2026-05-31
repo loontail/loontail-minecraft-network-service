@@ -88,9 +88,9 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.HETZNER_HOST }}
           SSH_USER: ${{ secrets.HETZNER_USER }}
-          SSH_PORT: ${{ secrets.HETZNER_SSH_PORT || '22' }}
+          SSH_PORT: ${{ secrets.HETZNER_SSH_PORT != '' && secrets.HETZNER_SSH_PORT || '22' }}
           SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
-          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/network-service' }}
+          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/network-service' }}
           IMAGE: ${{ needs.build-and-push.outputs.image }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
