@@ -1,0 +1,116 @@
+# Build the service image, push it to GHCR, and roll it out on Hetzner.
+#
+# Flow: push to main -> build & push ghcr.io/<owner>/<repo>:sha-<commit> -> SSH
+# to the server, pull the pinned image, `docker compose up -d`, verify /health.
+#
+# --- Required repository secrets -------------------------------------------
+#   HETZNER_HOST        server IP or hostname
+#   HETZNER_USER        SSH user (e.g. deploy or root)
+#   HETZNER_SSH_KEY     private SSH key (PEM, no passphrase) for that user
+#   HETZNER_SSH_PORT    optional, defaults to 22
+#   HETZNER_DEPLOY_DIR  optional, defaults to /opt/loontail/network-service
+# GITHUB_TOKEN is provided automatically; it both pushes to GHCR and is used
+# (ephemerally) by the server to pull the image during this run.
+#
+# --- One-time server setup -------------------------------------------------
+#   1. Install Docker Engine + the compose plugin, plus curl.
+#   2. Create the deploy dir:   mkdir -p /opt/loontail/network-service
+#   3. Create .env.prod there (chmod 600) from .env.example, with a strong
+#      POSTGRES_PASSWORD and a matching DATABASE_URL, e.g.:
+#        POSTGRES_PASSWORD=<strong-secret>
+#        DATABASE_URL=postgres://loontail:<strong-secret>@postgres:5432/loontail_network
+#        CORS_ALLOWED_ORIGINS=https://your-domain
+#   docker-compose.prod.yml is shipped automatically on every deploy.
+
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: image
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"            # GHCR requires a lowercase path
+          echo "name=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
+          echo "ref=ghcr.io/${repo}:sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Hetzner
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ship compose file & roll out over SSH
+        env:
+          SSH_HOST: ${{ secrets.HETZNER_HOST }}
+          SSH_USER: ${{ secrets.HETZNER_USER }}
+          SSH_PORT: ${{ secrets.HETZNER_SSH_PORT || '22' }}
+          SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/network-service' }}
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Ephemeral key + TOFU host-key pinning for this run.
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh_opts=(-i ~/.ssh/id_deploy -p "$SSH_PORT" -o StrictHostKeyChecking=yes)
+          target="$SSH_USER@$SSH_HOST"
+
+          # Ensure the deploy dir exists and ship the latest prod compose file.
+          ssh "${ssh_opts[@]}" "$target" "mkdir -p '$DEPLOY_DIR'"
+          scp "${ssh_opts[@]}" docker-compose.prod.yml "$target:$DEPLOY_DIR/docker-compose.prod.yml"
+
+          # Roll out. The registry token is piped via stdin (never argv/ps);
+          # the non-secret inputs ride along as a remote command env prefix.
+          { printf 'export REGISTRY_TOKEN=%q\n' "$REGISTRY_TOKEN"; cat scripts/deploy-remote.sh; } \
+            | ssh "${ssh_opts[@]}" "$target" \
+                IMAGE="$IMAGE" REGISTRY_USER="$REGISTRY_USER" DEPLOY_DIR="$DEPLOY_DIR" bash -s

@@ -1,0 +1,14 @@
+# Local development overrides.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Publishes Postgres to the host so you can run `cargo run` / `sqlx` / psql
+# directly against the containerised database.
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  service:
+    environment:
+      RUST_LOG: "debug,sqlx=info,tower_http=debug"

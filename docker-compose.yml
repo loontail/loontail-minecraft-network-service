@@ -1,0 +1,55 @@
+# Loontail Minecraft Network Service — base compose (local + prod MVP).
+# Local:  docker compose up --build
+# Prod:   docker compose --env-file .env.prod up -d --build
+#
+# DNS notes for Hetzner:
+#   - HTTP API (port 8080) may sit behind Cloudflare (orange-cloud OK).
+#   - Relay/tunnel traffic should use a DNS-only record / direct TCP.
+#     Do NOT proxy Minecraft relay traffic through Cloudflare's HTTP proxy.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-loontail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loontail}
+      POSTGRES_DB: ${POSTGRES_DB:-loontail_network}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loontail} -d ${POSTGRES_DB:-loontail_network}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not published by default; only the service needs it. Uncomment to debug.
+    # ports:
+    #   - "5432:5432"
+
+  service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://loontail:loontail@postgres:5432/loontail_network}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      HEARTBEAT_TIMEOUT_SECONDS: ${HEARTBEAT_TIMEOUT_SECONDS:-60}
+      MAX_PLAYERS_PER_WORLD: ${MAX_PLAYERS_PER_WORLD:-5}
+      JOIN_REQUEST_TTL_SECONDS: ${JOIN_REQUEST_TTL_SECONDS:-60}
+      JOIN_TICKET_TTL_SECONDS: ${JOIN_TICKET_TTL_SECONDS:-60}
+      SEARCH_MIN_QUERY_LENGTH: ${SEARCH_MIN_QUERY_LENGTH:-2}
+      SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-20}
+      RUST_LOG: ${RUST_LOG:-info,loontail_minecraft_network_service=debug,sqlx=warn}
+    ports:
+      # HTTP API (and, in this MVP, the relay/signaling WebSocket endpoints).
+      - "${HTTP_PORT:-8080}:8080"
+
+volumes:
+  postgres_data:

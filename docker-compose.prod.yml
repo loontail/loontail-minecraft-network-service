@@ -1,0 +1,54 @@
+# Loontail Minecraft Network Service — production compose (Hetzner).
+#
+# Unlike docker-compose.yml (which BUILDS the service locally), this file PULLS
+# a prebuilt image from GHCR. The image ref is injected by the deploy workflow
+# as LOONTAIL_IMAGE (a pinned ghcr.io/<owner>/<repo>:sha-<commit> tag).
+#
+# Secrets and tunables live in .env.prod on the server (git-ignored, created
+# once by hand). Required keys: POSTGRES_PASSWORD, DATABASE_URL. See .env.example.
+#
+# Usage on the server (the deploy workflow does this for you):
+#   LOONTAIL_IMAGE=ghcr.io/<owner>/<repo>:sha-<commit> \
+#     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-loontail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in .env.prod}
+      POSTGRES_DB: ${POSTGRES_DB:-loontail_network}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loontail} -d ${POSTGRES_DB:-loontail_network}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  service:
+    image: ${LOONTAIL_IMAGE:?LOONTAIL_IMAGE is required (set by the deploy workflow)}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required in .env.prod}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      HEARTBEAT_TIMEOUT_SECONDS: ${HEARTBEAT_TIMEOUT_SECONDS:-60}
+      MAX_PLAYERS_PER_WORLD: ${MAX_PLAYERS_PER_WORLD:-5}
+      JOIN_REQUEST_TTL_SECONDS: ${JOIN_REQUEST_TTL_SECONDS:-60}
+      JOIN_TICKET_TTL_SECONDS: ${JOIN_TICKET_TTL_SECONDS:-60}
+      SEARCH_MIN_QUERY_LENGTH: ${SEARCH_MIN_QUERY_LENGTH:-2}
+      SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-20}
+      RUST_LOG: ${RUST_LOG:-info,loontail_minecraft_network_service=info,sqlx=warn}
+    ports:
+      # HTTP API + relay/signaling WebSocket share this port in the MVP.
+      - "${HTTP_PORT:-8080}:8080"
+
+volumes:
+  postgres_data:
