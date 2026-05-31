@@ -13,6 +13,10 @@
 #   HETZNER_DEPLOY_DIR  defaults to /opt/loontail/minecraft-network-service
 #   DB_USER             defaults to loontail
 #   DB_NAME             defaults to loontail_network
+# NOTE: DB_USER / DB_NAME / DB_PASSWORD take effect only on the FIRST deploy
+# (when Postgres initialises its empty volume). Changing them later requires
+# resetting the volume (`docker compose ... down -v`) or manual SQL — see the
+# WARNING block in scripts/deploy-remote.sh.
 # GITHUB_TOKEN is provided automatically; it both pushes to GHCR and is used
 # (ephemerally) by the server to pull the image during this run.
 #

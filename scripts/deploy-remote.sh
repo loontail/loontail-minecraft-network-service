@@ -12,6 +12,16 @@
 #   DB_PASSWORD    Postgres password (required)
 # All values are written into .env.prod on each deploy so the server stays
 # in sync and manual `docker compose up` works without extra env vars.
+#
+# WARNING — Postgres honours POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD
+# ONLY when it first initialises an empty data volume. Changing DB_USER /
+# DB_NAME / DB_PASSWORD after the first successful deploy will NOT update the
+# existing database; the service then fails with "database ... does not exist"
+# or "password authentication failed". To change them you must either reset the
+# volume (destroys data):
+#     docker compose -f docker-compose.prod.yml --env-file .env.prod down -v
+#     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+# or apply the change inside Postgres by hand (ALTER ROLE / CREATE DATABASE).
 set -euo pipefail
 
 : "${IMAGE:?IMAGE is required}"
@@ -71,5 +81,19 @@ for _ in $(seq 1 30); do
 done
 
 echo "Service did not become healthy within 60s — rolling deploy failed." >&2
-compose logs --tail=120 service >&2 || true
+logs="$(compose logs --tail=120 service 2>&1 || true)"
+printf '%s\n' "$logs" >&2
+
+# The most common cause is a stale Postgres volume initialised with different
+# credentials than the current DB_* secrets (Postgres ignores them after first
+# init). Surface a precise next step instead of a bare timeout.
+if printf '%s' "$logs" | grep -qiE 'does not exist|password authentication failed|role .* does not exist'; then
+  echo "" >&2
+  echo "HINT: Postgres credentials/database do not match the existing data volume." >&2
+  echo "      POSTGRES_USER/DB/PASSWORD only apply on first volume init. If this is" >&2
+  echo "      a fresh deploy with no data, reset the volume and redeploy:" >&2
+  echo "        cd $DEPLOY_DIR" >&2
+  echo "        docker compose -f docker-compose.prod.yml --env-file .env.prod down -v" >&2
+  echo "        docker compose -f docker-compose.prod.yml --env-file .env.prod up -d" >&2
+fi
 exit 1
