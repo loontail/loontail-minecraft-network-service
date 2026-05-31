@@ -4,8 +4,8 @@
 # a prebuilt image from GHCR. The image ref is injected by the deploy workflow
 # as LOONTAIL_IMAGE (a pinned ghcr.io/<owner>/<repo>:sha-<commit> tag).
 #
-# Secrets and tunables live in .env.prod on the server (git-ignored, created
-# once by hand). Required keys: POSTGRES_PASSWORD, DATABASE_URL. See .env.example.
+# Secrets and tunables live in .env.prod on the server (written by the deploy
+# workflow). Required keys: POSTGRES_PASSWORD, DATABASE_URL, NETWORK_DOMAIN.
 #
 # Usage on the server (the deploy workflow does this for you):
 #   LOONTAIL_IMAGE=ghcr.io/<owner>/<repo>:sha-<commit> \
@@ -47,10 +47,31 @@ services:
       SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-20}
       RUST_LOG: ${RUST_LOG:-info,loontail_minecraft_network_service=info,sqlx=warn}
     ports:
-      # HTTP API + relay/signaling WebSocket share this port in the MVP.
-      # Published on host port 80 by default; the app always listens on 8080
-      # inside the container. Override the host port with HTTP_PORT in .env.prod.
-      - "${HTTP_PORT:-80}:8080"
+      # Direct (non-TLS) access / fallback. Caddy fronts the public 80+443 and
+      # proxies to this container over the compose network, so this published
+      # port is only for debugging or talking to the service without TLS.
+      - "${HTTP_PORT:-8080}:8080"
+
+  # TLS-terminating reverse proxy: serves https://$NETWORK_DOMAIN on 80/443 and
+  # forwards to the service (WebSocket relay/signaling included). Certificates
+  # are obtained automatically from Let's Encrypt and persisted in caddy_data.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - service
+    environment:
+      NETWORK_DOMAIN: ${NETWORK_DOMAIN:?NETWORK_DOMAIN is required in .env.prod}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

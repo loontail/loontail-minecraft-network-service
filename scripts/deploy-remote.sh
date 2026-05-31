@@ -10,6 +10,7 @@
 #   DB_USER        Postgres username (default: loontail)
 #   DB_NAME        Postgres database name (default: loontail_network)
 #   DB_PASSWORD    Postgres password (required)
+#   NETWORK_DOMAIN public domain Caddy serves over HTTPS (required)
 # All values are written into .env.prod on each deploy so the server stays
 # in sync and manual `docker compose up` works without extra env vars.
 #
@@ -29,6 +30,7 @@ set -euo pipefail
 : "${REGISTRY_TOKEN:?REGISTRY_TOKEN is required}"
 : "${DEPLOY_DIR:?DEPLOY_DIR is required}"
 : "${DB_PASSWORD:?DB_PASSWORD is required}"
+: "${NETWORK_DOMAIN:?NETWORK_DOMAIN is required}"
 
 DB_USER="${DB_USER:-loontail}"
 DB_NAME="${DB_NAME:-loontail_network}"
@@ -49,11 +51,12 @@ upsert() {
 touch .env.prod
 chmod 600 .env.prod
 
-upsert LOONTAIL_IMAGE  "${IMAGE}"
+upsert LOONTAIL_IMAGE    "${IMAGE}"
 upsert POSTGRES_USER     "${DB_USER}"
 upsert POSTGRES_DB       "${DB_NAME}"
 upsert POSTGRES_PASSWORD "${DB_PASSWORD}"
 upsert DATABASE_URL      "postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}"
+upsert NETWORK_DOMAIN    "${NETWORK_DOMAIN}"
 
 compose() {
   docker compose -f docker-compose.prod.yml --env-file .env.prod "$@"

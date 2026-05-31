@@ -1,0 +1,14 @@
+# Reverse proxy for the Loontail Minecraft Network service.
+#
+# Terminates TLS on 443 (auto-provisions a Let's Encrypt certificate for
+# $NETWORK_DOMAIN) and forwards to the service container on its internal port.
+# `reverse_proxy` upgrades WebSocket connections transparently, so the relay
+# and signaling sockets work over wss:// without extra config.
+#
+# Requirements: ports 80 and 443 reachable from the internet, and the domain's
+# DNS A record pointing at this host (DNS-only / grey-cloud if behind Cloudflare,
+# so ACME succeeds and the WebSocket relay is not proxied by Cloudflare).
+
+{$NETWORK_DOMAIN} {
+	reverse_proxy service:8080
+}

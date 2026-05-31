@@ -101,6 +101,7 @@ jobs:
           DB_USER: ${{ secrets.DB_USER != '' && secrets.DB_USER || 'loontail' }}
           DB_NAME: ${{ secrets.DB_NAME != '' && secrets.DB_NAME || 'loontail_network' }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          NETWORK_DOMAIN: ${{ secrets.NETWORK_DOMAIN != '' && secrets.NETWORK_DOMAIN || 'minecraft-network.loontail.dev' }}
         run: |
           set -euo pipefail
 
@@ -114,9 +115,10 @@ jobs:
           scp_opts=(-i ~/.ssh/id_deploy -P "$SSH_PORT" -o StrictHostKeyChecking=yes)
           target="$SSH_USER@$SSH_HOST"
 
-          # Ensure the deploy dir exists and ship the latest prod compose file.
+          # Ensure the deploy dir exists and ship the prod compose + Caddyfile.
           ssh "${ssh_opts[@]}" "$target" "mkdir -p '$DEPLOY_DIR'"
           scp "${scp_opts[@]}" docker-compose.prod.yml "$target:$DEPLOY_DIR/docker-compose.prod.yml"
+          scp "${scp_opts[@]}" Caddyfile "$target:$DEPLOY_DIR/Caddyfile"
 
           # Roll out. Secrets are piped via stdin (never argv/ps);
           # non-secret inputs ride along as a remote command env prefix.
@@ -125,4 +127,4 @@ jobs:
             cat scripts/deploy-remote.sh; } \
             | ssh "${ssh_opts[@]}" "$target" \
                 IMAGE="$IMAGE" REGISTRY_USER="$REGISTRY_USER" DEPLOY_DIR="$DEPLOY_DIR" \
-                DB_USER="$DB_USER" DB_NAME="$DB_NAME" bash -s
+                DB_USER="$DB_USER" DB_NAME="$DB_NAME" NETWORK_DOMAIN="$NETWORK_DOMAIN" bash -s
