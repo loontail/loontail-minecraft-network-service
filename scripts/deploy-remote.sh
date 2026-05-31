@@ -7,28 +7,43 @@
 #   REGISTRY_USER  GHCR username (the workflow actor)
 #   REGISTRY_TOKEN ephemeral GHCR token (valid only for the deploy run)
 #   DEPLOY_DIR     directory holding docker-compose.prod.yml and .env.prod
-# Secrets/tunables are read from $DEPLOY_DIR/.env.prod (never committed).
+#   DB_USER        Postgres username (default: loontail)
+#   DB_NAME        Postgres database name (default: loontail_network)
+#   DB_PASSWORD    Postgres password (required)
+# All values are written into .env.prod on each deploy so the server stays
+# in sync and manual `docker compose up` works without extra env vars.
 set -euo pipefail
 
 : "${IMAGE:?IMAGE is required}"
 : "${REGISTRY_USER:?REGISTRY_USER is required}"
 : "${REGISTRY_TOKEN:?REGISTRY_TOKEN is required}"
 : "${DEPLOY_DIR:?DEPLOY_DIR is required}"
+: "${DB_PASSWORD:?DB_PASSWORD is required}"
+
+DB_USER="${DB_USER:-loontail}"
+DB_NAME="${DB_NAME:-loontail_network}"
 
 cd "$DEPLOY_DIR"
 
-if [ ! -f .env.prod ]; then
-  echo "Missing $DEPLOY_DIR/.env.prod (one-time server setup — see deploy.yml header)." >&2
-  exit 1
-fi
+# Write/update all deploy-managed keys in .env.prod.
+upsert() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" .env.prod 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env.prod
+  else
+    echo "${key}=${value}" >> .env.prod
+  fi
+}
 
-# Pin the deployed image in .env.prod so manual `docker compose up` works
-# without needing LOONTAIL_IMAGE in the shell environment.
-if grep -q '^LOONTAIL_IMAGE=' .env.prod; then
-  sed -i "s|^LOONTAIL_IMAGE=.*|LOONTAIL_IMAGE=${IMAGE}|" .env.prod
-else
-  echo "LOONTAIL_IMAGE=${IMAGE}" >> .env.prod
-fi
+# Create .env.prod if it doesn't exist yet (fully managed by CI).
+touch .env.prod
+chmod 600 .env.prod
+
+upsert LOONTAIL_IMAGE  "${IMAGE}"
+upsert POSTGRES_USER     "${DB_USER}"
+upsert POSTGRES_DB       "${DB_NAME}"
+upsert POSTGRES_PASSWORD "${DB_PASSWORD}"
+upsert DATABASE_URL      "postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}"
 
 compose() {
   docker compose -f docker-compose.prod.yml --env-file .env.prod "$@"
