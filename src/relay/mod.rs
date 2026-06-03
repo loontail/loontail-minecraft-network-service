@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -75,18 +76,25 @@ struct RelaySessionRow {
 
 #[derive(Debug, Deserialize)]
 pub struct RelayQuery {
-    pub token: String,
+    /// Optional `?token=` fallback; the Bearer header is preferred.
+    pub token: Option<String>,
     pub role: String,
 }
 
-/// `GET /relay/:relaySessionId?token=&role=host|guest` — upgrade to the relay
-/// tunnel WebSocket.
+/// `GET /relay/:relaySessionId?role=host|guest` — upgrade to the relay tunnel
+/// WebSocket. Auth comes from the `Authorization: Bearer` header (like REST),
+/// with a `?token=` fallback; `role` stays in the query.
 pub async fn relay_ws(
     State(state): State<AppState>,
     Path(relay_session_id): Path<Uuid>,
     Query(query): Query<RelayQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    let token = auth::bearer_token_from_headers(&headers)
+        .or(query.token)
+        .ok_or(AppError::Unauthorized)?;
+
     let relay = sqlx::query_as::<_, RelaySessionRow>(
         r#"
         SELECT world_session_id, host_user_id, guest_user_id, join_ticket_id, status
@@ -104,13 +112,13 @@ pub async fn relay_ws(
 
     match query.role.as_str() {
         "host" => {
-            let user = auth::user_from_token(&state.pool, &query.token).await?;
+            let user = auth::user_from_token(&state.pool, &token).await?;
             if user.id != relay.host_user_id {
                 return Err(AppError::Forbidden);
             }
         }
         "guest" => {
-            validate_guest_ticket(&state, &relay, &query.token).await?;
+            validate_guest_ticket(&state, &relay, &token).await?;
         }
         _ => return Err(AppError::BadRequest("role must be host or guest".into())),
     }

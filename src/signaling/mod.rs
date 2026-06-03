@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::auth;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::join_requests::JoinTicketDto;
 use crate::models::UserDto;
 use crate::state::AppState;
@@ -145,17 +146,23 @@ impl Default for SignalingHub {
 
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
-    pub token: String,
+    /// Optional `?token=` fallback; the Bearer header is preferred.
+    pub token: Option<String>,
 }
 
-/// `GET /signaling?token=` — upgrade to the per-user signaling WebSocket.
+/// `GET /signaling` — upgrade to the per-user signaling WebSocket. Auth comes
+/// from the `Authorization: Bearer` header (like REST), with a `?token=` fallback.
 pub async fn signaling_ws(
     State(state): State<AppState>,
     Query(query): Query<TokenQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
     // Authenticate before upgrading so failures are plain HTTP responses.
-    let user = auth::user_from_token(&state.pool, &query.token).await?;
+    let token = auth::bearer_token_from_headers(&headers)
+        .or(query.token)
+        .ok_or(AppError::Unauthorized)?;
+    let user = auth::user_from_token(&state.pool, &token).await?;
     let user_id = user.id;
     crate::metrics::Metrics::incr(&state.metrics.signaling_connections);
 

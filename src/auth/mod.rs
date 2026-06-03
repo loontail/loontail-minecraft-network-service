@@ -1,6 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::http::HeaderMap;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -28,7 +29,8 @@ pub fn hash_token(token: &str) -> String {
 
 /// Resolve a network session token to its owning user, enforcing that the
 /// session is unexpired and not revoked. Used by both the HTTP extractor and
-/// the WebSocket endpoints (which carry the token as a query parameter).
+/// the WebSocket endpoints, which authenticate the upgrade request from the same
+/// `Authorization: Bearer` header (with a `?token=` query fallback).
 pub async fn user_from_token(pool: &PgPool, token: &str) -> AppResult<User> {
     let token_hash = hash_token(token);
     let user = sqlx::query_as::<_, User>(
@@ -48,8 +50,11 @@ pub async fn user_from_token(pool: &PgPool, token: &str) -> AppResult<User> {
     user.ok_or(AppError::Unauthorized)
 }
 
-fn bearer_token(parts: &Parts) -> Option<String> {
-    let header = parts.headers.get(AUTHORIZATION)?.to_str().ok()?;
+/// Extract a Bearer token from request headers. Shared by the HTTP `AuthUser`
+/// extractor and the WebSocket handlers, so a WS upgrade authenticates exactly
+/// like a REST call — keeping the token out of the URL (and the access log).
+pub fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
     let token = header.strip_prefix("Bearer ").or_else(|| header.strip_prefix("bearer "))?;
     let token = token.trim();
     if token.is_empty() {
@@ -57,6 +62,10 @@ fn bearer_token(parts: &Parts) -> Option<String> {
     } else {
         Some(token.to_string())
     }
+}
+
+fn bearer_token(parts: &Parts) -> Option<String> {
+    bearer_token_from_headers(&parts.headers)
 }
 
 /// Extractor that authenticates a request from its `Authorization: Bearer`

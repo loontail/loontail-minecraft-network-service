@@ -160,6 +160,9 @@ pub async fn update(
             );
             let _ = crate::presence::broadcast_presence(&state, guest).await;
         }
+        // Also nudge the host's own friends: a friend-of-friends toggle changes
+        // whether they can ask to join, so their view must re-evaluate too.
+        let _ = crate::presence::broadcast_presence(&state, world.host_user_id).await;
     }
 
     Ok(Json(updated))
