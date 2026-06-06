@@ -70,6 +70,10 @@ pub struct JoinTicketDto {
     /// The world's invite policy at join time, so the guest knows whether it may
     /// invite its own friends (friend-of-friend) into this world.
     pub invite_policy: String,
+    /// The host's reported Minecraft version + mod loader, so the guest can refuse to connect
+    /// to an incompatible world (the authoritative compatibility gate). Null if unreported.
+    pub host_minecraft_version: Option<String>,
+    pub host_loader: Option<String>,
 }
 
 /// Whether `requester` is a friend of someone currently AND LIVELY connected to
@@ -124,11 +128,20 @@ pub(crate) async fn issue_ticket_and_relay(
 
     let mut tx = state.pool.begin().await?;
 
-    let invite_policy: String =
-        sqlx::query_scalar("SELECT invite_policy FROM world_sessions WHERE id = $1")
-            .bind(world_session_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // The world's invite policy plus the host's reported version/loader (for the guest's
+    // authoritative compatibility gate), read together in one round-trip inside the tx.
+    let (invite_policy, host_minecraft_version, host_loader): (String, Option<String>, Option<String>) =
+        sqlx::query_as(
+            r#"
+            SELECT ws.invite_policy, p.minecraft_version, p.loader
+            FROM world_sessions ws
+            LEFT JOIN presence p ON p.user_id = ws.host_user_id
+            WHERE ws.id = $1
+            "#,
+        )
+        .bind(world_session_id)
+        .fetch_one(&mut *tx)
+        .await?;
 
     let ticket_id = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -169,6 +182,8 @@ pub(crate) async fn issue_ticket_and_relay(
         host_user_id: host_id,
         expires_at,
         invite_policy,
+        host_minecraft_version,
+        host_loader,
     })
 }
 

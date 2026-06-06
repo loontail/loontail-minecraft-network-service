@@ -218,6 +218,10 @@ struct FriendPresenceRow {
     status: Option<String>,
     last_heartbeat_at: Option<DateTime<Utc>>,
     current_world_session_id: Option<Uuid>,
+    /// The friend's last-reported Minecraft version + mod loader, used by the client to gate
+    /// joins/invites (both must match to play together).
+    minecraft_version: Option<String>,
+    loader: Option<String>,
     /// Set when this friend is an active guest in an open friend-of-friends
     /// world — the world the viewer (their friend) may ask to join.
     guest_world_id: Option<Uuid>,
@@ -230,6 +234,10 @@ pub struct FriendPresence {
     pub user: UserDto,
     pub status: UserStatus,
     pub current_world_session_id: Option<Uuid>,
+    /// The friend's reported Minecraft version + mod loader, so a client can gate joins/invites
+    /// against its own (both must match). Null until the friend bootstraps with the field.
+    pub minecraft_version: Option<String>,
+    pub loader: Option<String>,
 }
 
 /// Shared query: a user's friends with their effective presence.
@@ -245,6 +253,8 @@ pub async fn friends_with_presence(state: &AppState, user_id: Uuid) -> AppResult
             p.status,
             p.last_heartbeat_at,
             p.current_world_session_id,
+            p.minecraft_version,
+            p.loader,
             g.guest_world_id
         FROM friendships f
         JOIN users u
@@ -300,6 +310,8 @@ pub async fn friends_with_presence(state: &AppState, user_id: Uuid) -> AppResult
                 },
                 status,
                 current_world_session_id,
+                minecraft_version: row.minecraft_version,
+                loader: row.loader,
             }
         })
         .collect();
