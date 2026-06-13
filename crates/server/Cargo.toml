@@ -1,0 +1,30 @@
+[package]
+name = "loontail-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — binary that composes the domains and serves HTTP/WS"
+
+[[bin]]
+name = "loontail-launcher-api"
+path = "src/main.rs"
+
+[dependencies]
+loontail-core = { workspace = true }
+loontail-network = { workspace = true }
+loontail-yggdrasil = { workspace = true }
+loontail-textures = { workspace = true }
+loontail-catalog = { workspace = true }
+loontail-bundles = { workspace = true }
+loontail-admin = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+dotenvy = { workspace = true }

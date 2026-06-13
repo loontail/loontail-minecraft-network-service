@@ -1,0 +1,23 @@
+[package]
+name = "loontail-yggdrasil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — Yggdrasil online-mode auth/session/meta with RSA-SHA1 texture signing"
+
+[dependencies]
+loontail-core = { workspace = true }
+loontail-yggdrasil-protocol = { workspace = true }
+
+axum = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+rsa = { workspace = true }
+sha1 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }

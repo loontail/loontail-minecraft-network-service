@@ -4,17 +4,24 @@ FROM rust:1-slim-bookworm AS builder
 
 WORKDIR /app
 
-# Cache dependencies: copy manifests first, build a throwaway lib.
+# Cache dependencies: copy the workspace manifests first, build throwaway libs
+# so the dependency graph is compiled before the real sources land.
 COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src \
-    && echo "fn main() {}" > src/main.rs \
-    && cargo build --release \
-    && rm -rf src
+COPY crates/core/Cargo.toml ./crates/core/Cargo.toml
+COPY crates/network/Cargo.toml ./crates/network/Cargo.toml
+COPY crates/server/Cargo.toml ./crates/server/Cargo.toml
+RUN mkdir -p crates/core/src crates/network/src crates/server/src \
+    && echo "" > crates/core/src/lib.rs \
+    && echo "" > crates/network/src/lib.rs \
+    && echo "fn main() {}" > crates/server/src/main.rs \
+    && cargo build --release --workspace \
+    && rm -rf crates/core/src crates/network/src crates/server/src
 
 # Build the real sources.
 COPY migrations ./migrations
-COPY src ./src
-RUN touch src/main.rs && cargo build --release
+COPY crates ./crates
+RUN find crates -name '*.rs' -exec touch {} + \
+    && cargo build --release --bin loontail-launcher-api
 
 # --- Runtime stage -------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -25,7 +32,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/loontail-minecraft-network-service /usr/local/bin/loontail-minecraft-network-service
+COPY --from=builder /app/target/release/loontail-launcher-api /usr/local/bin/loontail-launcher-api
 # Migrations are embedded in the binary, but ship them for reference/tooling.
 COPY migrations ./migrations
 
@@ -37,4 +44,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=5 \
     CMD curl -fsS http://localhost:8080/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/loontail-minecraft-network-service"]
+ENTRYPOINT ["/usr/local/bin/loontail-launcher-api"]

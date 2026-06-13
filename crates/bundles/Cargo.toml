@@ -1,0 +1,20 @@
+[package]
+name = "loontail-bundles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — bundle registry (builds/artifacts, ZIP ingest, manifest, on-disk layout)"
+
+[dependencies]
+loontail-core = { workspace = true }
+
+axum = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+zip = { workspace = true }

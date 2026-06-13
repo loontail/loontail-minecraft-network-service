@@ -1,0 +1,15 @@
+[package]
+name = "loontail-yggdrasil-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — pure Yggdrasil protocol primitives (uuid, png validation, textures payload). No axum/sqlx/rsa."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }

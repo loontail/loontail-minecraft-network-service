@@ -1,20 +1,28 @@
-[package]
-name = "loontail-minecraft-network-service"
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/yggdrasil-protocol",
+    "crates/network",
+    "crates/yggdrasil",
+    "crates/textures",
+    "crates/catalog",
+    "crates/bundles",
+    "crates/admin",
+    "crates/server",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "Loontail Minecraft Network Service — backend for users, friends, presence, world sessions, join flow and relay/tunnel"
 license = "MIT"
 
-[[bin]]
-name = "loontail-minecraft-network-service"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws", "macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
     "tls-rustls",
@@ -26,17 +34,32 @@ sqlx = { version = "0.8", features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "2"
-anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
 dotenvy = "0.15"
 futures-util = "0.3"
+sha1 = "0.10"
+argon2 = "0.5"
+rsa = { version = "0.9", features = ["sha1", "sha2"] }
+base64 = "0.22"
+zip = "2"
+
+# Internal crates
+loontail-core = { path = "crates/core" }
+loontail-yggdrasil-protocol = { path = "crates/yggdrasil-protocol" }
+loontail-network = { path = "crates/network" }
+loontail-yggdrasil = { path = "crates/yggdrasil" }
+loontail-textures = { path = "crates/textures" }
+loontail-catalog = { path = "crates/catalog" }
+loontail-bundles = { path = "crates/bundles" }
+loontail-admin = { path = "crates/admin" }
 
 [profile.release]
 opt-level = 3

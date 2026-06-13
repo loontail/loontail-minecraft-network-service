@@ -1,0 +1,20 @@
+[package]
+name = "loontail-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — network domain (friends, presence, world sessions, join flow, relay, signaling)"
+
+[dependencies]
+loontail-core = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
