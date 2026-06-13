@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { useCreateUser } from "@/features/users/api";
 import type { AdminUser } from "@/shared/types";
 
@@ -256,15 +257,12 @@ export function CreateUserDialog() {
                       </FormDescription>
                     </div>
                     <FormControl>
-                      <input
+                      <Switch
                         id="create-user-is-admin"
-                        type="checkbox"
-                        className="size-4 shrink-0 cursor-pointer rounded border-edge-md bg-surface-2 accent-cta"
-                        checked={field.value}
-                        onChange={(event) => field.onChange(event.target.checked)}
-                        onBlur={field.onBlur}
-                        ref={field.ref}
                         name={field.name}
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        aria-label="Administrator"
                       />
                     </FormControl>
                   </FormItem>

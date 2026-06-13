@@ -78,6 +78,11 @@ export interface CreateApiTokenRequest {
   scopes?: string[];
 }
 
+export interface UpdateApiTokenRequest {
+  name: string;
+  scopes: string[];
+}
+
 /// The raw token is returned exactly once on creation.
 export interface CreatedApiToken {
   id: string;

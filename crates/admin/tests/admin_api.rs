@@ -459,6 +459,32 @@ async fn api_token_create_and_verify(pool: PgPool) {
     assert_eq!(list[0]["name"], "launcher");
     assert!(list[0].get("token").is_none());
 
+    // Update its name + scopes (the secret value is untouched and still verifies).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/api-tokens/{id}"))
+                .header(COOKIE, session.cookie_header())
+                .header("x-csrf-token", &session.csrf)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "name": "launcher-prod", "scopes": ["*"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let updated = body_json(resp).await;
+    assert_eq!(updated["name"], "launcher-prod");
+    assert_eq!(updated["scopes"], json!(["*"]));
+    assert_eq!(
+        verify_api_token(&state, &raw).await.unwrap().to_string(),
+        id
+    );
+
     // Delete it.
     let resp = app
         .oneshot(

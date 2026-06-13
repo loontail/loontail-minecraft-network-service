@@ -4,6 +4,7 @@ import {
   Copy,
   KeyRound,
   Loader2,
+  Pencil,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -17,7 +18,6 @@ import { PageHeader } from "@/components/shared/PageHeader";
 import { TableSkeleton } from "@/components/shared/TableSkeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -40,15 +40,29 @@ import {
   useApiTokens,
   useCreateApiToken,
   useDeleteApiToken,
+  useUpdateApiToken,
 } from "@/features/apiTokens/api";
 import { formatDateTime, formatRelative } from "@/shared/lib/format";
 import type { ApiToken, CreatedApiToken } from "@/shared/types";
 
-function parseScopes(raw: string): string[] {
-  return raw
-    .split(",")
-    .map((scope) => scope.trim())
-    .filter(Boolean);
+import { ScopeEditor, WILDCARD } from "./apiTokens/ScopeEditor";
+
+function ScopeBadges({ scopes }: { scopes: string[] }) {
+  if (scopes.length === 0) {
+    return <span className="text-text-faint">Unscoped</span>;
+  }
+  if (scopes.includes(WILDCARD)) {
+    return <Badge>Full access</Badge>;
+  }
+  return (
+    <div className="flex flex-wrap gap-1">
+      {scopes.map((scope) => (
+        <Badge key={scope} variant="outline">
+          {scope}
+        </Badge>
+      ))}
+    </div>
+  );
 }
 
 function RevealedToken({ token }: { token: CreatedApiToken }) {
@@ -92,11 +106,7 @@ function RevealedToken({ token }: { token: CreatedApiToken }) {
             onClick={copy}
             aria-label="Copy token"
           >
-            {copied ? (
-              <Check className="size-4" />
-            ) : (
-              <Copy className="size-4" />
-            )}
+            {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
           </Button>
         </div>
       </div>
@@ -107,13 +117,13 @@ function RevealedToken({ token }: { token: CreatedApiToken }) {
 function CreateTokenDialog() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [scopes, setScopes] = useState("");
+  const [scopes, setScopes] = useState<string[]>([]);
   const [created, setCreated] = useState<CreatedApiToken | null>(null);
   const createToken = useCreateApiToken();
 
   function reset() {
     setName("");
-    setScopes("");
+    setScopes([]);
     setCreated(null);
     createToken.reset();
   }
@@ -131,7 +141,7 @@ function CreateTokenDialog() {
       return;
     }
     createToken.mutate(
-      { name: name.trim(), scopes: parseScopes(scopes) },
+      { name: name.trim(), scopes },
       { onSuccess: (token) => setCreated(token) },
     );
   }
@@ -157,38 +167,28 @@ function CreateTokenDialog() {
             </DialogFooter>
           </>
         ) : (
-          <form onSubmit={handleSubmit}>
+          <form onSubmit={handleSubmit} className="flex flex-col gap-5">
             <DialogHeader>
               <DialogTitle>Create API token</DialogTitle>
               <DialogDescription>
                 Tokens authenticate launcher catalog and manifest reads.
               </DialogDescription>
             </DialogHeader>
-            <div className="mt-4 space-y-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="token-name">Name</Label>
-                <Input
-                  id="token-name"
-                  value={name}
-                  autoFocus
-                  placeholder="Launcher production"
-                  onChange={(event) => setName(event.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="token-scopes">Scopes</Label>
-                <Input
-                  id="token-scopes"
-                  value={scopes}
-                  placeholder="catalog:read, bundles:read"
-                  onChange={(event) => setScopes(event.target.value)}
-                />
-                <p className="text-caption text-text-mute">
-                  Comma-separated. Leave empty for an unscoped token.
-                </p>
-              </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="token-name">Name</Label>
+              <Input
+                id="token-name"
+                value={name}
+                autoFocus
+                placeholder="Launcher production"
+                onChange={(event) => setName(event.target.value)}
+              />
             </div>
-            <DialogFooter className="mt-6">
+            <div className="space-y-1.5">
+              <Label>Scopes</Label>
+              <ScopeEditor value={scopes} onChange={setScopes} />
+            </div>
+            <DialogFooter>
               <Button
                 type="button"
                 variant="outline"
@@ -214,25 +214,96 @@ function CreateTokenDialog() {
   );
 }
 
+function EditTokenDialog({
+  token,
+  open,
+  onOpenChange,
+}: {
+  token: ApiToken;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [name, setName] = useState(token.name);
+  const [scopes, setScopes] = useState<string[]>(token.scopes);
+  const updateToken = useUpdateApiToken();
+
+  function handleOpenChange(next: boolean) {
+    if (next) {
+      setName(token.name);
+      setScopes(token.scopes);
+    }
+    onOpenChange(next);
+  }
+
+  function handleSubmit(event: React.SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!name.trim()) {
+      return;
+    }
+    updateToken.mutate(
+      { id: token.id, name: name.trim(), scopes },
+      { onSuccess: () => onOpenChange(false) },
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+          <DialogHeader>
+            <DialogTitle>Token settings</DialogTitle>
+            <DialogDescription>
+              Rename “{token.name}” or change which scopes it grants. The secret
+              value is not affected.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-token-name">Name</Label>
+            <Input
+              id="edit-token-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Scopes</Label>
+            <ScopeEditor value={scopes} onChange={setScopes} />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={updateToken.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={!name.trim() || updateToken.isPending}
+            >
+              {updateToken.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : null}
+              Save changes
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function TokenRow({ token }: { token: ApiToken }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const deleteToken = useDeleteApiToken();
 
   return (
     <TableRow>
       <TableCell className="font-medium text-text-hi">{token.name}</TableCell>
       <TableCell>
-        {token.scopes.length === 0 ? (
-          <span className="text-text-faint">Unscoped</span>
-        ) : (
-          <div className="flex flex-wrap gap-1">
-            {token.scopes.map((scope) => (
-              <Badge key={scope} variant="outline">
-                {scope}
-              </Badge>
-            ))}
-          </div>
-        )}
+        <ScopeBadges scopes={token.scopes} />
       </TableCell>
       <TableCell className="text-text-mute">
         {token.lastUsedAt ? formatRelative(token.lastUsedAt) : "Never"}
@@ -241,14 +312,29 @@ function TokenRow({ token }: { token: ApiToken }) {
         {formatDateTime(token.createdAt)}
       </TableCell>
       <TableCell className="text-right">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={`Delete ${token.name}`}
-          onClick={() => setConfirmOpen(true)}
-        >
-          <Trash2 className="size-4" />
-        </Button>
+        <div className="flex items-center justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={`Edit ${token.name}`}
+            onClick={() => setEditOpen(true)}
+          >
+            <Pencil className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={`Delete ${token.name}`}
+            onClick={() => setConfirmOpen(true)}
+          >
+            <Trash2 className="size-4" />
+          </Button>
+        </div>
+        <EditTokenDialog
+          token={token}
+          open={editOpen}
+          onOpenChange={setEditOpen}
+        />
         <ConfirmDialog
           open={confirmOpen}
           onOpenChange={setConfirmOpen}
@@ -280,11 +366,13 @@ export function ApiTokensPage() {
         actions={<CreateTokenDialog />}
       />
 
-      <Card>
-        <CardContent>
-          {tokens.isLoading ? (
-            <TableSkeleton rows={4} columns={4} />
-          ) : tokens.isError ? (
+      <div className="rounded-lg border border-edge bg-card">
+        {tokens.isLoading ? (
+          <div className="p-4">
+            <TableSkeleton rows={4} columns={5} />
+          </div>
+        ) : tokens.isError ? (
+          <div className="p-6">
             <EmptyState
               icon={KeyRound}
               title="Could not load tokens"
@@ -295,32 +383,34 @@ export function ApiTokensPage() {
                 </Button>
               }
             />
-          ) : rows.length === 0 ? (
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="p-6">
             <EmptyState
               icon={KeyRound}
               title="No API tokens yet"
               description="Create a token to let a launcher read the catalog and bundle manifests."
             />
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Scopes</TableHead>
-                  <TableHead>Last used</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead className="w-12" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((token) => (
-                  <TokenRow key={token.id} token={token} />
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead>Name</TableHead>
+                <TableHead>Scopes</TableHead>
+                <TableHead>Last used</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((token) => (
+                <TokenRow key={token.id} token={token} />
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
     </div>
   );
 }

@@ -17,7 +17,7 @@ pub mod startup;
 pub mod tokens;
 pub mod users;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{get, patch, post};
 use axum::Router;
 
 use loontail_core::AppState;
@@ -54,7 +54,10 @@ pub fn routes() -> Router<AppState> {
         .route("/users/{id}/revoke-tokens", post(users::revoke_tokens))
         // api tokens
         .route("/api-tokens", get(tokens::list).post(tokens::create))
-        .route("/api-tokens/{id}", delete(tokens::delete))
+        .route(
+            "/api-tokens/{id}",
+            patch(tokens::update).delete(tokens::delete),
+        )
         // analytics
         .route("/analytics/overview", get(analytics::overview))
         .route("/analytics/timeseries", get(analytics::timeseries));

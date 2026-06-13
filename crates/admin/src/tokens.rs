@@ -12,7 +12,9 @@ use loontail_core::auth::{generate_token, hash_token, verify_csrf, AdminUser};
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::AppState;
 
-use crate::dto::{Ack, ApiTokenDto, CreateApiTokenRequest, CreatedApiTokenDto};
+use crate::dto::{
+    Ack, ApiTokenDto, CreateApiTokenRequest, CreatedApiTokenDto, UpdateApiTokenRequest,
+};
 
 #[derive(sqlx::FromRow)]
 struct ApiTokenRow {
@@ -86,6 +88,37 @@ pub async fn create(
         created_at: row.created_at,
         token: raw,
     }))
+}
+
+/// `PATCH /admin/api-tokens/{id}` — change a token's name and scopes; the secret
+/// value is never altered.
+pub async fn update(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateApiTokenRequest>,
+) -> AppResult<Json<ApiTokenDto>> {
+    verify_csrf(&headers)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+
+    let row = sqlx::query_as::<_, ApiTokenRow>(
+        r#"
+        UPDATE api_tokens SET name = $2, scopes = $3 WHERE id = $1
+        RETURNING id, name, scopes, created_at, last_used_at
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(&body.scopes)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("api token not found".into()))?;
+
+    Ok(Json(ApiTokenDto::from(row)))
 }
 
 /// `DELETE /admin/api-tokens/{id}`.

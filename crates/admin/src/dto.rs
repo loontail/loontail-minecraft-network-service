@@ -151,6 +151,15 @@ pub struct CreateApiTokenRequest {
     pub scopes: Vec<String>,
 }
 
+/// Update an existing token's name and scopes (the secret is never changed).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApiTokenRequest {
+    pub name: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
 /// The create-token response carries the raw token exactly once.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

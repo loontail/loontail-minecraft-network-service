@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -282,18 +283,19 @@ function ClientDialog({
                 onChange={(event) => field("bundleSlug", event.target.value)}
               />
             </div>
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 text-body text-text">
-                <input
-                  type="checkbox"
-                  checked={form.available}
-                  onChange={(event) =>
-                    field("available", event.target.checked)
-                  }
-                  className="size-4 accent-cta"
-                />
-                Available
-              </label>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-edge bg-surface-1 px-3 py-2.5 sm:col-span-2">
+              <div className="grid gap-0.5">
+                <Label htmlFor="client-available">Available</Label>
+                <span className="text-caption text-text-faint">
+                  Whether the launcher offers this client for install.
+                </span>
+              </div>
+              <Switch
+                id="client-available"
+                checked={form.available}
+                onCheckedChange={(value) => field("available", value)}
+                aria-label="Available"
+              />
             </div>
           </div>
           <DialogFooter className="mt-6">

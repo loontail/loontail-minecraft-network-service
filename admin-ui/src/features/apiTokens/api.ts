@@ -8,6 +8,7 @@ import type {
   ApiToken,
   CreateApiTokenRequest,
   CreatedApiToken,
+  UpdateApiTokenRequest,
 } from "@/shared/types";
 
 export const apiTokenKeys = {
@@ -34,6 +35,20 @@ export function useCreateApiToken() {
     },
     onError: (error) =>
       toast.error(errorMessage(error, "Failed to create token")),
+  });
+}
+
+export function useUpdateApiToken() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...input }: UpdateApiTokenRequest & { id: string }) =>
+      api.patch<ApiToken>(`/admin/api-tokens/${id}`, input),
+    onSuccess: (token) => {
+      qc.invalidateQueries({ queryKey: apiTokenKeys.all });
+      toast.success(`Token "${token.name}" updated`);
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Failed to update token")),
   });
 }
 
