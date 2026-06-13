@@ -324,3 +324,49 @@ async fn search_users_paginates_and_filters(pool: PgPool) {
     assert_eq!(by_email.total, 1);
     assert_eq!(by_email.users[0].username, "Unrelated");
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn search_users_treats_like_metacharacters_literally(pool: PgPool) {
+    // A user whose name actually contains a percent sign, plus a decoy that does
+    // not. An escaped '%' must match ONLY the literal-percent user, not act as a
+    // wildcard that sweeps in the decoy.
+    admin_create_user(
+        &pool,
+        AdminCreateUser {
+            username: "ab%cd".into(),
+            email: "pct@example.com".into(),
+            password: "pw".into(),
+            minecraft_uuid: None,
+            is_admin: false,
+        },
+    )
+    .await
+    .unwrap();
+    admin_create_user(
+        &pool,
+        AdminCreateUser {
+            username: "abXcd".into(),
+            email: "decoy@example.com".into(),
+            password: "pw".into(),
+            minecraft_uuid: None,
+            is_admin: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    // "%" interpolated into the pattern must be escaped: it matches the literal
+    // percent user only, never the "abXcd" decoy (which an unescaped wildcard
+    // would have matched).
+    let pct = search_users(&pool, "b%c", 1).await.unwrap();
+    assert_eq!(pct.total, 1, "literal % must not behave as a wildcard");
+    assert_eq!(pct.users[0].username, "ab%cd");
+
+    // An underscore is likewise literal: it matches nothing here (no username
+    // contains one), rather than the single-char wildcard it is in LIKE.
+    let underscore = search_users(&pool, "ab_cd", 1).await.unwrap();
+    assert_eq!(
+        underscore.total, 0,
+        "literal _ must not behave as a single-char wildcard"
+    );
+}

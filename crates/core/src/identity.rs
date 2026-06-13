@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{normalize_username, User};
+use crate::models::{escape_like_pattern, normalize_username, User};
 
 /// Hash a plaintext password with Argon2id (default params). The returned PHC
 /// string embeds the algorithm, params, and a per-password random salt.
@@ -457,12 +457,20 @@ pub async fn search_users(pool: &PgPool, q: &str, page: i64) -> AppResult<UserPa
     const PAGE_SIZE: i64 = 25;
     let page = page.max(1);
     let offset = (page - 1) * PAGE_SIZE;
-    let pattern = format!("%{}%", q.trim().to_lowercase());
+    let trimmed = q.trim();
+
+    if trimmed.is_empty() {
+        return search_users_all(pool, page, offset, PAGE_SIZE).await;
+    }
+
+    // why: escape LIKE metacharacters so a literal % or _ in the query matches
+    // literally instead of acting as a wildcard (and can't force a full scan).
+    let pattern = format!("%{}%", escape_like_pattern(&trimmed.to_lowercase()));
 
     let total = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*) FROM users
-        WHERE $1 = '%%' OR normalized_username LIKE $1 OR lower(email) LIKE $1
+        WHERE normalized_username LIKE $1 ESCAPE '\' OR lower(email) LIKE $1 ESCAPE '\'
         "#,
     )
     .bind(&pattern)
@@ -472,7 +480,7 @@ pub async fn search_users(pool: &PgPool, q: &str, page: i64) -> AppResult<UserPa
     let users = sqlx::query_as::<_, User>(
         r#"
         SELECT * FROM users
-        WHERE $1 = '%%' OR normalized_username LIKE $1 OR lower(email) LIKE $1
+        WHERE normalized_username LIKE $1 ESCAPE '\' OR lower(email) LIKE $1 ESCAPE '\'
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3
         "#,
@@ -488,6 +496,33 @@ pub async fn search_users(pool: &PgPool, q: &str, page: i64) -> AppResult<UserPa
         total,
         page,
         page_size: PAGE_SIZE,
+    })
+}
+
+/// The empty-query branch of [`search_users`]: list every user, paginated.
+async fn search_users_all(
+    pool: &PgPool,
+    page: i64,
+    offset: i64,
+    page_size: i64,
+) -> AppResult<UserPage> {
+    let total = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users")
+        .fetch_one(pool)
+        .await?;
+
+    let users = sqlx::query_as::<_, User>(
+        "SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+    )
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(UserPage {
+        users,
+        total,
+        page,
+        page_size,
     })
 }
 

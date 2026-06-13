@@ -43,8 +43,12 @@ async fn handle_signaling(socket: WebSocket, state: AppState, user_id: Uuid) {
     let (conn_id, mut rx) = state.realtime.signaling.add(user_id);
 
     // Coming online: mark live and tell this user's friends to refresh.
-    let _ = presence::mark_online(&state, user_id).await;
-    let _ = presence::broadcast_presence(&state, user_id).await;
+    if let Err(e) = presence::mark_online(&state, user_id).await {
+        tracing::warn!(error = %e, %user_id, "failed to mark user online on signaling connect");
+    }
+    if let Err(e) = presence::broadcast_presence(&state, user_id).await {
+        tracing::warn!(error = %e, %user_id, "failed to broadcast presence on signaling connect");
+    }
 
     loop {
         tokio::select! {
@@ -76,7 +80,11 @@ async fn handle_signaling(socket: WebSocket, state: AppState, user_id: Uuid) {
 
     // Last connection closed: go offline and tell friends to refresh.
     if !state.realtime.signaling.is_online(user_id) {
-        let _ = presence::mark_offline(&state, user_id).await;
-        let _ = presence::broadcast_presence(&state, user_id).await;
+        if let Err(e) = presence::mark_offline(&state, user_id).await {
+            tracing::warn!(error = %e, %user_id, "failed to mark user offline on signaling disconnect");
+        }
+        if let Err(e) = presence::broadcast_presence(&state, user_id).await {
+            tracing::warn!(error = %e, %user_id, "failed to broadcast presence on signaling disconnect");
+        }
     }
 }

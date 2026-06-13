@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use loontail_core::auth::AuthUser;
 use loontail_core::error::{AppError, AppResult};
-use loontail_core::models::{normalize_username, User, UserDto, UserStatus};
+use loontail_core::models::{escape_like_pattern, normalize_username, User, UserDto, UserStatus};
 use loontail_core::AppState;
 use loontail_core::Metrics;
 
@@ -168,7 +168,9 @@ pub async fn search(
         )));
     }
 
-    let pattern = format!("%{}%", normalize_username(needle));
+    // why: escape LIKE metacharacters so a literal % or _ in the query matches
+    // literally instead of acting as a wildcard (and can't force a full scan).
+    let pattern = format!("%{}%", escape_like_pattern(&normalize_username(needle)));
     let me_id = auth.id();
 
     let rows = sqlx::query_as::<_, SearchRow>(
@@ -192,7 +194,7 @@ pub async fn search(
                 WHERE r.from_user_id = $1 AND r.to_user_id = u.id AND r.status = 'pending'
             ) AS has_outgoing_request
         FROM users u
-        WHERE u.normalized_username LIKE $2
+        WHERE u.normalized_username LIKE $2 ESCAPE '\'
           AND u.id <> $1
         ORDER BY u.normalized_username
         LIMIT $3

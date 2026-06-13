@@ -292,6 +292,30 @@ async fn search_finds_other_users_by_username(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn search_treats_like_wildcards_literally(pool: PgPool) {
+    let alice = seed_user(
+        &pool,
+        &app(pool.clone()),
+        "55555555-5555-5555-5555-555555555551",
+        "searcher",
+    )
+    .await;
+    let app = app(pool.clone());
+    // A username that genuinely contains a percent sign, plus a decoy that would
+    // be swept in by an unescaped wildcard.
+    seed_user(&pool, &app, "55555555-5555-5555-5555-555555555552", "ab%cd").await;
+    seed_user(&pool, &app, "55555555-5555-5555-5555-555555555553", "abxcd").await;
+
+    // The '%' must match literally: only "ab%cd" comes back, never "abxcd".
+    let resp = authed(&app, &alice, "GET", "/users/search?q=b%25c", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let arr = body_json(resp).await;
+    let arr = arr.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "literal % must not behave as a wildcard");
+    assert_eq!(arr[0]["username"], "ab%cd");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn friend_request_accept_makes_both_friends(pool: PgPool) {
     let app = app(pool.clone());
     let a = seed_user(

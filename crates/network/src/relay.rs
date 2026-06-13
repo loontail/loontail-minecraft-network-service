@@ -178,7 +178,9 @@ async fn handle_relay(
             // The guest is now an active member: their friends should see them
             // in-world (for friend-of-friends worlds) in real time.
             if let Some(guest) = guest_user_id {
-                let _ = presence::broadcast_presence(&state, guest).await;
+                if let Err(e) = presence::broadcast_presence(&state, guest).await {
+                    tracing::warn!(error = %e, user_id = %guest, "failed to broadcast guest presence on relay admit");
+                }
             }
 
             pipe(peer.socket, socket, &state).await;
@@ -189,7 +191,9 @@ async fn handle_relay(
             mark_relay_closed(&state, relay_session_id).await;
             // The guest left: refresh their friends' view back to plain online.
             if let Some(guest) = guest_user_id {
-                let _ = presence::broadcast_presence(&state, guest).await;
+                if let Err(e) = presence::broadcast_presence(&state, guest).await {
+                    tracing::warn!(error = %e, user_id = %guest, "failed to broadcast guest presence on relay close");
+                }
             }
         }
         None => {

@@ -284,8 +284,12 @@ async fn accept_internal(
     // presence update to each side's friends (which now include each other)
     // guarantees the new friend appears immediately on both, without reopening
     // the menu.
-    let _ = presence::broadcast_presence(state, from_user_id).await;
-    let _ = presence::broadcast_presence(state, to_user_id).await;
+    if let Err(e) = presence::broadcast_presence(state, from_user_id).await {
+        tracing::warn!(error = %e, user_id = %from_user_id, "failed to broadcast presence after friend request accept");
+    }
+    if let Err(e) = presence::broadcast_presence(state, to_user_id).await {
+        tracing::warn!(error = %e, user_id = %to_user_id, "failed to broadcast presence after friend request accept");
+    }
 
     Ok(dto)
 }

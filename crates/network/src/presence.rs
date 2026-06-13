@@ -205,7 +205,9 @@ pub async fn set_status(
     .await?;
 
     // Push the new status to friends in real time.
-    let _ = broadcast_presence(&state, auth.id()).await;
+    if let Err(e) = broadcast_presence(&state, auth.id()).await {
+        tracing::warn!(error = %e, user_id = %auth.id(), "failed to broadcast presence after status change");
+    }
 
     Ok(Json(StatusResponse { status }))
 }

@@ -1251,6 +1251,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "http-body-util",
  "loontail-core",
  "loontail-yggdrasil-protocol",
  "rand 0.8.6",

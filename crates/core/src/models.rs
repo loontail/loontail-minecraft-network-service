@@ -139,3 +139,34 @@ pub struct JoinTicketDto {
 pub fn normalize_username(username: &str) -> String {
     username.trim().to_lowercase()
 }
+
+/// Escape a user-supplied needle for safe interpolation into a SQL `LIKE`
+/// pattern. The backslash, `%`, and `_` metacharacters are escaped with a
+/// leading `\`, so the caller must pair the pattern with `ESCAPE '\'`. Without
+/// this a literal `%`/`_` in a query would act as a wildcard (matching far more
+/// than intended and able to force a full scan).
+pub fn escape_like_pattern(needle: &str) -> String {
+    let mut escaped = String::with_capacity(needle.len());
+    for ch in needle.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_like_pattern;
+
+    #[test]
+    fn escape_like_pattern_escapes_metacharacters() {
+        assert_eq!(escape_like_pattern("ab"), "ab");
+        assert_eq!(escape_like_pattern("50%"), "50\\%");
+        assert_eq!(escape_like_pattern("a_b"), "a\\_b");
+        assert_eq!(escape_like_pattern("a\\b"), "a\\\\b");
+        // A backslash followed by a metachar both get their own escape.
+        assert_eq!(escape_like_pattern("%_\\"), "\\%\\_\\\\");
+    }
+}
