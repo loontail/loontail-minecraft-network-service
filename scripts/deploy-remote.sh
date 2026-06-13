@@ -8,7 +8,7 @@
 #   REGISTRY_TOKEN ephemeral GHCR token (valid only for the deploy run)
 #   DEPLOY_DIR     directory holding docker-compose.prod.yml and .env.prod
 #   DB_USER        Postgres username (default: loontail)
-#   DB_NAME        Postgres database name (default: loontail_network)
+#   DB_NAME        Postgres database name (default: loontail_launcher)
 #   DB_PASSWORD    Postgres password (required)
 #   NETWORK_DOMAIN public domain Caddy serves over HTTPS (required)
 # All values are written into .env.prod on each deploy so the server stays
@@ -33,7 +33,7 @@ set -euo pipefail
 : "${NETWORK_DOMAIN:?NETWORK_DOMAIN is required}"
 
 DB_USER="${DB_USER:-loontail}"
-DB_NAME="${DB_NAME:-loontail_network}"
+DB_NAME="${DB_NAME:-loontail_launcher}"
 
 cd "$DEPLOY_DIR"
 

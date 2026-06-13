@@ -21,11 +21,11 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-loontail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in .env.prod}
-      POSTGRES_DB: ${POSTGRES_DB:-loontail_network}
+      POSTGRES_DB: ${POSTGRES_DB:-loontail_launcher}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loontail} -d ${POSTGRES_DB:-loontail_network}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loontail} -d ${POSTGRES_DB:-loontail_launcher}"]
       interval: 10s
       timeout: 5s
       retries: 5

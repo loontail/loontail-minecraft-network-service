@@ -12,7 +12,7 @@
 #   HETZNER_SSH_PORT    defaults to 22
 #   HETZNER_DEPLOY_DIR  defaults to /opt/loontail/loontail-launcher-api
 #   DB_USER             defaults to loontail
-#   DB_NAME             defaults to loontail_network
+#   DB_NAME             defaults to loontail_launcher
 # NOTE: DB_USER / DB_NAME / DB_PASSWORD take effect only on the FIRST deploy
 # (when Postgres initialises its empty volume). Changing them later requires
 # resetting the volume (`docker compose ... down -v`) or manual SQL — see the
@@ -99,9 +99,9 @@ jobs:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DB_USER: ${{ secrets.DB_USER != '' && secrets.DB_USER || 'loontail' }}
-          DB_NAME: ${{ secrets.DB_NAME != '' && secrets.DB_NAME || 'loontail_network' }}
+          DB_NAME: ${{ secrets.DB_NAME != '' && secrets.DB_NAME || 'loontail_launcher' }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          NETWORK_DOMAIN: ${{ secrets.NETWORK_DOMAIN != '' && secrets.NETWORK_DOMAIN || 'minecraft-network.loontail.dev' }}
+          NETWORK_DOMAIN: ${{ secrets.NETWORK_DOMAIN != '' && secrets.NETWORK_DOMAIN || 'launcher-api.loontail.dev' }}
         run: |
           set -euo pipefail
 

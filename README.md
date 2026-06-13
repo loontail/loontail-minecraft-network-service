@@ -35,7 +35,7 @@ schema is applied on first boot against the Postgres container — no manual ste
 
 ```bash
 # Postgres is published on 5432 by docker-compose.dev.yml
-DATABASE_URL=postgres://loontail:loontail@localhost:5432/loontail_network cargo run
+DATABASE_URL=postgres://loontail:loontail@localhost:5432/loontail_launcher cargo run
 ```
 
 ## Run on Hetzner
@@ -122,7 +122,7 @@ applied on startup. To apply manually with the sqlx CLI:
 
 ```bash
 cargo install sqlx-cli --no-default-features --features postgres
-DATABASE_URL=postgres://loontail:loontail@localhost:5432/loontail_network sqlx migrate run
+DATABASE_URL=postgres://loontail:loontail@localhost:5432/loontail_launcher sqlx migrate run
 ```
 
 ## Notes / future work

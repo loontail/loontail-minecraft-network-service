@@ -26,7 +26,7 @@ used to be three systems:
 
 ### Locked product decisions (do not relitigate)
 
-1. **Repo**: evolve the existing `loontail-minecraft-network-service` repo in place
+1. **Repo**: evolve the existing `loontail-launcher-api` repo in place
    (keep git history + the working Docker/Caddy/CI/Hetzner pipeline). Restructure
    the single crate into a **Cargo workspace**. The bin crate is named
    `loontail-launcher-api`.
