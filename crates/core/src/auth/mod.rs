@@ -171,6 +171,14 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     })
 }
 
+/// Resolve the raw session token a request presented — `Authorization: Bearer`
+/// first, then the admin session cookie — so a handler can revoke exactly the
+/// token in use regardless of transport.
+pub fn session_token_from_headers(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    bearer_token_from_headers(headers)
+        .or_else(|| cookie_value(headers, cookie_name).map(str::to_string))
+}
+
 /// Where a session token was presented. Cookie-sourced writes require CSRF; Bearer
 /// requests (launcher/agent/tooling) do not.
 #[derive(Clone, Copy, PartialEq, Eq)]

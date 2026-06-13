@@ -47,6 +47,27 @@ async fn seed_admin_token(pool: &PgPool) -> String {
     session.token
 }
 
+/// Seed a plain (non-admin) user and mint a session token — proves the public
+/// reads are gated on `AuthUser` (any session), not `AdminUser`.
+async fn seed_user_token(pool: &PgPool) -> String {
+    let user = admin_create_user(
+        pool,
+        AdminCreateUser {
+            username: "bundleuser".into(),
+            email: "bundleuser@example.com".into(),
+            password: "pw".into(),
+            minecraft_uuid: None,
+            is_admin: false,
+        },
+    )
+    .await
+    .expect("user");
+    let session = issue_session(pool, user.id, std::time::Duration::from_secs(900))
+        .await
+        .expect("session");
+    session.token
+}
+
 /// A small ZIP with files in nested directories, built in memory.
 fn build_test_zip() -> Vec<u8> {
     let mut buf = Vec::new();
@@ -256,6 +277,7 @@ async fn public_manifest_is_served_verbatim(pool: PgPool) {
             Request::builder()
                 .method("GET")
                 .uri(format!("/builds/{slug}/manifest"))
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -290,6 +312,7 @@ async fn static_route_serves_file_bytes(pool: PgPool) {
             Request::builder()
                 .method("GET")
                 .uri(format!("/builds/{slug}/files/config/settings.cfg"))
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -387,6 +410,128 @@ async fn toggle_download_once_reflects_in_manifest(pool: PgPool) {
         .find(|e| e["path"] == "mods/alpha.jar")
         .unwrap();
     assert_eq!(entry["downloadOnce"], true);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn public_reads_require_a_session(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "gated-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    // Manifest without a token: 401.
+    let app = loontail_bundles::routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/builds/{slug}/manifest"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "manifest needs auth"
+    );
+
+    // File without a token: 401.
+    let app = loontail_bundles::static_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/builds/{slug}/files/config/settings.cfg"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "file needs auth");
+
+    // A plain (non-admin) user session is sufficient for both reads.
+    let user_token = seed_user_token(&pool).await;
+    let app = loontail_bundles::static_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/builds/{slug}/files/config/settings.cfg"))
+                .header("authorization", format!("Bearer {user_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "any session may read files");
+}
+
+/// S1 regression: a percent-encoded traversal slug must not escape
+/// `{storage_root}/builds`. axum decodes `Path` params after routing, so
+/// `..%2F..%2F<name>` arrives as `slug = "../../<name>"`. The handler must reject
+/// it (400) or 404 before touching the filesystem — never serve the escaped file.
+#[sqlx::test(migrations = "../../migrations")]
+async fn slug_path_traversal_is_blocked(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+
+    // Plant a secret file ABOVE the builds root that a traversal would expose.
+    let builds_root = tmp.path().join("builds");
+    std::fs::create_dir_all(&builds_root).unwrap();
+    std::fs::write(tmp.path().join("secret.txt"), b"top-secret").unwrap();
+
+    let app = loontail_bundles::routes().with_state(state.clone());
+
+    // Manifest endpoint: `slug = "../../secret"` (no such build) must not 200.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/builds/..%2F..%2Fsecret/manifest")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "traversal slug must not resolve a manifest"
+    );
+
+    // File endpoint: try to read `../../secret.txt` via a traversal slug.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/builds/..%2F..%2Fsecret.txt/files/x")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "traversal slug must not serve a file outside builds/"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_ne!(
+        body.as_ref(),
+        b"top-secret",
+        "the secret file must never be served"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]

@@ -78,6 +78,7 @@ impl From<AppError> for YggError {
             AppError::Unauthorized | AppError::Forbidden => YggError::Forbidden,
             AppError::NotFound(_) => YggError::NotFound,
             AppError::Conflict(_) => YggError::BadRequest("Conflict."),
+            AppError::TooManyRequests => YggError::Forbidden,
             AppError::Database(err) => {
                 tracing::error!(error = %err, "yggdrasil database error");
                 YggError::Internal

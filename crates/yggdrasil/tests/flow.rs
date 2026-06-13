@@ -9,7 +9,9 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
-use loontail_core::config::{AdminConfig, BundlesConfig, Config, TexturesConfig, YggdrasilConfig};
+use loontail_core::config::{
+    AdminConfig, BundlesConfig, Config, RateLimitConfig, TexturesConfig, YggdrasilConfig,
+};
 use loontail_core::identity::{admin_create_user, AdminCreateUser};
 use loontail_core::AppState;
 use loontail_yggdrasil::{init_crypto, routes, GameProfile};
@@ -37,6 +39,10 @@ fn test_config() -> Config {
         invite_ttl: Duration::from_secs(600),
         search_min_query_length: 2,
         search_max_results: 20,
+        rate_limit: RateLimitConfig {
+            max_attempts: 10,
+            window: Duration::from_secs(60),
+        },
         yggdrasil: YggdrasilConfig {
             public_url: PUBLIC_URL.into(),
             key_path: "tests/test-key.pem".into(),

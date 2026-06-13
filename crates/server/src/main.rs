@@ -1,13 +1,19 @@
 mod infra;
+mod ratelimit;
 
 use std::time::Duration;
 
-use axum::http::HeaderValue;
+use axum::http::header::{
+    HeaderName, CONTENT_SECURITY_POLICY, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY,
+    X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+};
+use axum::http::{HeaderValue, Method};
 use axum::routing::get;
-use axum::{Router, ServiceExt};
+use axum::{middleware, Router, ServiceExt};
 use tower::Layer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -63,9 +69,13 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
+    // `into_make_service_with_connect_info` injects the peer `SocketAddr` so the
+    // rate-limit middleware can resolve the client IP via `ConnectInfo`.
     axum::serve(
         listener,
-        ServiceExt::<axum::extract::Request>::into_make_service(app),
+        ServiceExt::<axum::extract::Request>::into_make_service_with_connect_info::<
+            std::net::SocketAddr,
+        >(app),
     )
     .await?;
 
@@ -76,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
 /// domain, with CORS and HTTP tracing.
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config.cors_allowed_origins);
+    let limiter = ratelimit::RateLimiter::from_config(&state.config.rate_limit);
 
     // Group the `/api` subtree: catalog at its root (/clients, /keywords,
     // /servers), yggdrasil nested at its configured prefix, and the bundle
@@ -93,9 +104,13 @@ fn build_router(state: AppState) -> Router {
     // One admin router: admin REST + SPA, with catalog-admin and bundle-admin
     // nested beneath it. Mounted via `nest_service` so the bare `/admin/` path
     // (the SPA shell) resolves; a plain `nest` would 404 that exact path.
-    let admin = loontail_admin::routes()
-        .nest("/catalog", loontail_catalog::admin_routes())
-        .nest("/bundles", loontail_bundles::admin_routes());
+    // Security headers are scoped to this subtree so they never alter
+    // Yggdrasil/bundle/texture file responses served elsewhere.
+    let admin = with_security_headers(
+        loontail_admin::routes()
+            .nest("/catalog", loontail_catalog::admin_routes())
+            .nest("/bundles", loontail_bundles::admin_routes()),
+    );
 
     Router::new()
         .route("/health", get(infra::health))
@@ -108,8 +123,44 @@ fn build_router(state: AppState) -> Router {
         .nest("/bundle-registry", loontail_bundles::static_routes())
         .nest_service("/admin", admin.with_state(state.clone()))
         .with_state(state)
+        // The limiter self-filters to unauthenticated credential paths by URI; it
+        // sits outside the routers so it sees the original request path.
+        .layer(middleware::from_fn_with_state(
+            limiter,
+            ratelimit::rate_limit_middleware,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+}
+
+/// Apply baseline security response headers to `router`. Scoped to the admin
+/// subtree by the caller, since admin serves the only browser-facing HTML; the
+/// CSP `frame-ancestors 'none'` + `X-Frame-Options: DENY` block clickjacking and
+/// `nosniff` blocks MIME confusion without touching binary file responses
+/// (Yggdrasil/bundle/texture) served elsewhere.
+fn with_security_headers(router: Router<AppState>) -> Router<AppState> {
+    let csp: HeaderName = CONTENT_SECURITY_POLICY;
+    router
+        .layer(SetResponseHeaderLayer::overriding(
+            STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            csp,
+            HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'; base-uri 'self'"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
 }
 
 /// Derive the `/api`-relative mount suffix for yggdrasil from its configured
@@ -156,16 +207,45 @@ fn spawn_cleanup_tasks(state: AppState) {
     });
 }
 
+/// Build the CORS layer from the configured origin allowlist.
+///
+/// Hardened against fail-open: methods and headers are explicit allowlists (no
+/// `Any`), credentials are enabled ONLY for an explicit origin allowlist, and
+/// `allow_origin(Any)` is used only when `*` is explicitly configured (in which
+/// case credentials are never combined with it, per the Fetch spec). An empty
+/// list blocks every browser cross-origin caller, which we log at startup.
 fn build_cors(allowed_origins: &[String]) -> CorsLayer {
-    let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    let headers: [HeaderName; 3] = [
+        axum::http::header::AUTHORIZATION,
+        axum::http::header::CONTENT_TYPE,
+        HeaderName::from_static("x-csrf-token"),
+    ];
+    let base = CorsLayer::new()
+        .allow_methods(methods)
+        .allow_headers(headers);
+
     if allowed_origins.iter().any(|origin| origin == "*") {
+        // Wildcard is opt-in only; credentials MUST NOT be combined with `Any`.
         base.allow_origin(Any)
     } else {
+        if allowed_origins.is_empty() {
+            tracing::warn!(
+                "CORS_ALLOWED_ORIGINS is empty; all browser cross-origin requests will be blocked. \
+                 Set it to a comma-separated origin allowlist (or `*` to allow any, credentials disabled)."
+            );
+        }
         let origins: Vec<HeaderValue> = allowed_origins
             .iter()
             .filter_map(|origin| origin.parse().ok())
             .collect();
-        base.allow_origin(origins)
+        base.allow_origin(origins).allow_credentials(true)
     }
 }
 

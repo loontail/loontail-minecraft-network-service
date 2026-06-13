@@ -21,6 +21,12 @@ use axum::Router;
 
 use loontail_core::AppState;
 
+/// Hard cap on a single bundle upload (ZIP archive or individual file): 10 GiB,
+/// matching the archive's uncompressed ceiling. Enforced both as axum's
+/// `DefaultBodyLimit` on the route and as a running byte cap while streaming each
+/// multipart field to disk, so a malicious client cannot exhaust memory or disk.
+pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
 /// Public bundle-registry router. Mounted by the server at `/api/bundle-registry`.
 /// Includes the manifest endpoint and the static file routes so a single mount
 /// covers the whole public surface.
@@ -50,14 +56,17 @@ pub fn admin_routes() -> Router<AppState> {
         )
         .route(
             "/builds/{slug}/upload",
-            post(admin::upload_archive).layer(DefaultBodyLimit::disable()),
+            post(admin::upload_archive).layer(DefaultBodyLimit::max(usize_cap())),
         )
         .route(
             "/builds/{slug}/regenerate",
             post(admin::regenerate_manifest),
         )
         .route("/builds/{slug}/validate", post(admin::validate))
-        .route("/builds/{slug}/files", post(admin::upload_file))
+        .route(
+            "/builds/{slug}/files",
+            post(admin::upload_file).layer(DefaultBodyLimit::max(usize_cap())),
+        )
         .route("/builds/{slug}/folders", post(admin::create_folder))
         .route("/builds/{slug}/files/bulk-delete", post(admin::bulk_delete))
         .route(
@@ -72,6 +81,12 @@ pub fn admin_routes() -> Router<AppState> {
             "/builds/{slug}/files/{entryId}/rehash",
             post(admin::rehash_file),
         )
+}
+
+/// [`MAX_UPLOAD_BYTES`] as a `usize`, saturating on 32-bit targets where 10 GiB
+/// exceeds `usize::MAX` (axum's `DefaultBodyLimit::max` takes a `usize`).
+fn usize_cap() -> usize {
+    usize::try_from(MAX_UPLOAD_BYTES).unwrap_or(usize::MAX)
 }
 
 /// Create the bundle storage root (`{storage_root}/builds`) at startup so the

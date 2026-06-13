@@ -17,6 +17,25 @@ pub fn build_path(storage_root: &str, slug: &str) -> PathBuf {
     builds_root(storage_root).join(slug)
 }
 
+/// Reject a slug that is anything other than a single, inert path segment.
+///
+/// axum percent-decodes `Path` params *after* routing, so a request for
+/// `/builds/..%2F..%2Fx/manifest` yields `slug = "../../x"`. Feeding that into
+/// `build_path` (`builds_root().join(slug)`) would escape `{storage_root}/builds`.
+/// Public handlers must call this before any filesystem join.
+pub fn validate_slug(slug: &str) -> AppResult<()> {
+    if slug.is_empty()
+        || slug == "."
+        || slug == ".."
+        || slug.contains('/')
+        || slug.contains('\\')
+        || slug.contains('\0')
+    {
+        return Err(AppError::BadRequest("invalid slug".into()));
+    }
+    Ok(())
+}
+
 /// `{storage_root}/builds/{slug}/files`.
 pub fn files_path(storage_root: &str, slug: &str) -> PathBuf {
     build_path(storage_root, slug).join("files")
@@ -219,6 +238,17 @@ mod tests {
         assert!(normalize_relative_path("a/../../b", "p").is_err());
         assert!(normalize_relative_path("/abs/path", "p").is_err());
         assert!(normalize_relative_path("", "p").is_err());
+    }
+
+    #[test]
+    fn rejects_traversal_slugs() {
+        assert!(validate_slug("my-build").is_ok());
+        assert!(validate_slug("..").is_err());
+        assert!(validate_slug(".").is_err());
+        assert!(validate_slug("").is_err());
+        assert!(validate_slug("../../etc").is_err());
+        assert!(validate_slug("a/b").is_err());
+        assert!(validate_slug("a\\b").is_err());
     }
 
     #[test]

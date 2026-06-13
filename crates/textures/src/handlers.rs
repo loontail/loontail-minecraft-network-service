@@ -13,7 +13,7 @@ use axum::Json;
 
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::AppState;
-use loontail_core::YggdrasilUser;
+use loontail_core::AuthUser;
 use loontail_yggdrasil_protocol::payload::{
     LookupCape, LookupSkin, SkinVariant, TexturesLookupResponse,
 };
@@ -95,7 +95,7 @@ pub async fn read_png(
 pub async fn upload(
     State(state): State<AppState>,
     Path(kind): Path<String>,
-    user: YggdrasilUser,
+    user: AuthUser,
     multipart: Multipart,
 ) -> AppResult<StatusCode> {
     let kind = Kind::parse(&kind).ok_or_else(|| AppError::NotFound("unknown texture".into()))?;
@@ -219,7 +219,7 @@ pub async fn upload(
 pub async fn delete(
     State(state): State<AppState>,
     Path(kind): Path<String>,
-    user: YggdrasilUser,
+    user: AuthUser,
 ) -> AppResult<StatusCode> {
     let kind = Kind::parse(&kind).ok_or_else(|| AppError::NotFound("unknown texture".into()))?;
 
@@ -264,30 +264,36 @@ struct UploadFields {
 }
 
 /// Drain the multipart body into the `file` bytes and an optional `variant` text,
-/// enforcing the per-upload size cap as bytes are read. Unknown fields are
-/// ignored; the cap guards against an oversized `file` even though the route also
-/// raises axum's default body limit.
+/// enforcing the per-upload size cap as bytes are read. The `file` field is read
+/// chunk-by-chunk and aborted the instant the accumulated size crosses
+/// [`MAX_UPLOAD_BYTES`], so an oversized upload is never fully buffered. The route
+/// also raises axum's default body limit to the same cap as a second line of
+/// defense. Unknown fields are ignored.
 async fn read_upload(mut multipart: Multipart) -> AppResult<UploadFields> {
     let mut file: Option<Bytes> = None;
     let mut variant: Option<String> = None;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|err| AppError::BadRequest(format!("malformed multipart: {err}")))?
     {
         match field.name() {
             Some("file") => {
-                let bytes = field
-                    .bytes()
+                let mut buf: Vec<u8> = Vec::with_capacity(MAX_UPLOAD_BYTES.min(64 * 1024));
+                while let Some(chunk) = field
+                    .chunk()
                     .await
-                    .map_err(|err| AppError::BadRequest(format!("reading file: {err}")))?;
-                if bytes.len() > MAX_UPLOAD_BYTES {
-                    return Err(AppError::BadRequest(format!(
-                        "file exceeds {MAX_UPLOAD_BYTES} bytes"
-                    )));
+                    .map_err(|err| AppError::BadRequest(format!("reading file: {err}")))?
+                {
+                    if buf.len() + chunk.len() > MAX_UPLOAD_BYTES {
+                        return Err(AppError::BadRequest(format!(
+                            "file exceeds {MAX_UPLOAD_BYTES} bytes"
+                        )));
+                    }
+                    buf.extend_from_slice(&chunk);
                 }
-                file = Some(bytes);
+                file = Some(Bytes::from(buf));
             }
             Some("variant") => {
                 let text = field

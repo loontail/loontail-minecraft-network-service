@@ -22,6 +22,9 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
 
+    #[error("too many requests")]
+    TooManyRequests,
+
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 
@@ -58,6 +61,11 @@ impl AppError {
             ),
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message.clone()),
             AppError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message.clone()),
+            AppError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_requests",
+                "too many requests, please retry later".to_string(),
+            ),
             AppError::Database(err) => {
                 tracing::error!(error = %err, "database error");
                 (

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use loontail_core::auth::{
-    bearer_token_from_headers, issue_session, issue_yggdrasil_tokens, revoke_session, AuthUser,
+    issue_session, issue_yggdrasil_tokens, revoke_session, session_token_from_headers, AuthUser,
 };
 use loontail_core::error::AppResult;
 use loontail_core::identity::{authenticate_password, register_user};
@@ -150,7 +150,7 @@ async fn refresh(
     auth: AuthUser,
     headers: HeaderMap,
 ) -> AppResult<Json<AuthResponse>> {
-    if let Some(token) = bearer_token_from_headers(&headers) {
+    if let Some(token) = session_token_from_headers(&headers, &state.config.admin.cookie_name) {
         revoke_session(&state.pool, &token).await?;
     }
     auth_response(&state, auth.user).await
@@ -158,7 +158,7 @@ async fn refresh(
 
 /// `POST /api/auth/logout` — revoke the presenting session token.
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Ack>> {
-    if let Some(token) = bearer_token_from_headers(&headers) {
+    if let Some(token) = session_token_from_headers(&headers, &state.config.admin.cookie_name) {
         revoke_session(&state.pool, &token).await?;
     }
     Ok(Json(Ack { ok: true }))

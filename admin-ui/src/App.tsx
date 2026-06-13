@@ -2,7 +2,6 @@ import { Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { RequireAuth } from "@/components/layout/RequireAuth";
-import { ApiTokensPage } from "@/pages/ApiTokensPage";
 import { BundlesPage } from "@/pages/BundlesPage";
 import { CatalogPage } from "@/pages/CatalogPage";
 import { DashboardPage } from "@/pages/DashboardPage";
@@ -24,7 +23,6 @@ export function App() {
         <Route path="users" element={<UsersPage />} />
         <Route path="catalog" element={<CatalogPage />} />
         <Route path="bundles" element={<BundlesPage />} />
-        <Route path="api-tokens" element={<ApiTokensPage />} />
       </Route>
     </Routes>
   );

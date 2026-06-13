@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use loontail_core::auth::yggdrasil::issue_yggdrasil_tokens;
+use loontail_core::auth::issue_session;
 use loontail_core::config::Config;
 use loontail_core::identity::{admin_create_user, AdminCreateUser};
 use loontail_core::AppState;
@@ -54,7 +54,9 @@ fn test_config() -> Config {
     Config::from_env().unwrap()
 }
 
-/// Seed a confirmed Yggdrasil user and issue a token; return (profile_uuid, token).
+/// Seed a confirmed user and issue a unified session token; return
+/// (profile_uuid, token). Textures now authenticate with the launcher's SESSION
+/// bearer (not the Yggdrasil game token).
 async fn seed_user_with_token(pool: &PgPool, name: &str) -> (String, String) {
     let user = admin_create_user(
         pool,
@@ -68,10 +70,10 @@ async fn seed_user_with_token(pool: &PgPool, name: &str) -> (String, String) {
     )
     .await
     .unwrap();
-    let tokens = issue_yggdrasil_tokens(pool, user.id, None, Duration::from_secs(900), 10)
+    let session = issue_session(pool, user.id, Duration::from_secs(900))
         .await
         .unwrap();
-    (user.profile_uuid.unwrap(), tokens.access_token)
+    (user.profile_uuid.unwrap(), session.token)
 }
 
 /// Build a `multipart/form-data` body with a `file` part and optional `variant`.
@@ -227,6 +229,30 @@ async fn reject_invalid_png_bad_signature(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn reject_oversized_upload(pool: PgPool) {
+    let (router, _root, _s) = app(pool.clone());
+    let (profile_uuid, token) = seed_user_with_token(&pool, "whale").await;
+
+    // A valid PNG header followed by padding that pushes the `file` field past the
+    // 256 KiB cap. The streaming reader (or the route body limit) rejects it before
+    // any row or file is created, so the upload never lands.
+    let mut huge = png(64, 64);
+    huge.resize(loontail_textures::MAX_UPLOAD_BYTES + 1, 0u8);
+    let status = put_texture(&router, "skin", &token, &huge, None).await;
+    assert!(
+        status.is_client_error(),
+        "oversized upload must be rejected, got {status}"
+    );
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skins WHERE profile_uuid = $1")
+        .bind(&profile_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "oversized upload must not create a row");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn replace_skin_unlinks_old_file_and_writes_new(pool: PgPool) {
     let (router, _root, _s) = app(pool.clone());
     let (profile_uuid, token) = seed_user_with_token(&pool, "replacer").await;
@@ -362,5 +388,5 @@ async fn upload_requires_auth(pool: PgPool) {
         .body(Body::from(body))
         .unwrap();
     let status = router.clone().oneshot(req).await.unwrap().status();
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

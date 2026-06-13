@@ -47,6 +47,29 @@ pub fn random_profile_uuid() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
+/// A fixed Argon2id hash used only to equalize verification cost on the
+/// account-not-found / no-stored-password branches of [`authenticate_password`],
+/// so login latency cannot distinguish "no such account" from "wrong password"
+/// (a user-enumeration timing oracle). Computed once.
+fn dummy_password_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY.get_or_init(|| hash_password("timing-equalizer-not-a-real-password").unwrap_or_default())
+}
+
+/// Validate a candidate password at set/registration time: non-empty and bounded
+/// so an absurdly large body can't be force-hashed. Login does NOT re-validate
+/// (it must accept whatever was stored).
+fn check_password_len(password: &str) -> AppResult<()> {
+    if password.is_empty() {
+        return Err(AppError::BadRequest("password is required".into()));
+    }
+    if password.len() > 1024 {
+        return Err(AppError::BadRequest("password is too long".into()));
+    }
+    Ok(())
+}
+
 /// The reconciliation rule as a pure function: derive the `profile_uuid` a user
 /// must carry. When `minecraft_uuid` is known the profile UUID is its undashed
 /// form (deterministic); otherwise a fresh random undashed UUID is minted only if
@@ -258,9 +281,17 @@ pub async fn authenticate_password(
     .fetch_optional(pool)
     .await?;
 
-    let user = user.ok_or(AppError::Forbidden)?;
+    let Some(user) = user else {
+        // why: run the same Argon2 work on the absent-account path so response
+        // latency does not reveal whether the identifier exists.
+        verify_password(password, dummy_password_hash());
+        return Err(AppError::Forbidden);
+    };
 
-    let hash = user.password_hash.as_deref().ok_or(AppError::Forbidden)?;
+    let Some(hash) = user.password_hash.as_deref() else {
+        verify_password(password, dummy_password_hash());
+        return Err(AppError::Forbidden);
+    };
     if !verify_password(password, hash) {
         return Err(AppError::Forbidden);
     }
@@ -313,9 +344,7 @@ pub async fn admin_create_user(pool: &PgPool, input: AdminCreateUser) -> AppResu
     if email.is_empty() {
         return Err(AppError::BadRequest("email is required".into()));
     }
-    if input.password.is_empty() {
-        return Err(AppError::BadRequest("password is required".into()));
-    }
+    check_password_len(&input.password)?;
     let minecraft_uuid = match input.minecraft_uuid.as_deref().map(str::trim) {
         Some(mc) if !mc.is_empty() => Some(mc.to_string()),
         _ => None,
@@ -362,9 +391,7 @@ pub async fn register_user(
     if email.is_empty() {
         return Err(AppError::BadRequest("email is required".into()));
     }
-    if password.is_empty() {
-        return Err(AppError::BadRequest("password is required".into()));
-    }
+    check_password_len(password)?;
     let normalized = normalize_username(username);
     let password_hash = hash_password(password)?;
     let profile_uuid = random_profile_uuid();
@@ -510,9 +537,7 @@ pub async fn update_user(pool: &PgPool, id: Uuid, patch: UpdateUser) -> AppResul
 
 /// Reset a user's password to a fresh Argon2id hash of `new`.
 pub async fn set_password(pool: &PgPool, id: Uuid, new: &str) -> AppResult<()> {
-    if new.is_empty() {
-        return Err(AppError::BadRequest("password is required".into()));
-    }
+    check_password_len(new)?;
     let hash = hash_password(new)?;
     let affected =
         sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")

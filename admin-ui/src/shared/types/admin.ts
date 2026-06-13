@@ -65,33 +65,6 @@ export interface ResetPasswordRequest {
   password: string;
 }
 
-export interface ApiToken {
-  id: string;
-  name: string;
-  scopes: string[];
-  createdAt: string;
-  lastUsedAt: string | null;
-}
-
-export interface CreateApiTokenRequest {
-  name: string;
-  scopes?: string[];
-}
-
-export interface UpdateApiTokenRequest {
-  name: string;
-  scopes: string[];
-}
-
-/// The raw token is returned exactly once on creation.
-export interface CreatedApiToken {
-  id: string;
-  name: string;
-  scopes: string[];
-  createdAt: string;
-  token: string;
-}
-
 export interface AnalyticsOverview {
   playingNow: number;
   onlineInNetwork: number;

@@ -108,14 +108,14 @@ impl SignalingHub {
     pub fn add(&self, user_id: Uuid) -> (Uuid, mpsc::UnboundedReceiver<ServerEvent>) {
         let conn_id = Uuid::new_v4();
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut map = self.connections.lock().unwrap();
+        let mut map = self.connections.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(user_id).or_default().push((conn_id, tx));
         (conn_id, rx)
     }
 
     /// Drop a previously registered connection.
     pub fn remove(&self, user_id: Uuid, conn_id: Uuid) {
-        let mut map = self.connections.lock().unwrap();
+        let mut map = self.connections.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = map.get_mut(&user_id) {
             conns.retain(|(id, _)| *id != conn_id);
             if conns.is_empty() {
@@ -127,7 +127,7 @@ impl SignalingHub {
     /// Deliver an event to all of a user's live connections. Dead senders are
     /// pruned. No-op (and harmless) when the user is offline.
     pub fn send_to(&self, user_id: Uuid, event: ServerEvent) {
-        let mut map = self.connections.lock().unwrap();
+        let mut map = self.connections.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = map.get_mut(&user_id) {
             conns.retain(|(_, tx)| tx.send(event.clone()).is_ok());
             if conns.is_empty() {
@@ -137,12 +137,18 @@ impl SignalingHub {
     }
 
     pub fn connected_users(&self) -> usize {
-        self.connections.lock().unwrap().len()
+        self.connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Whether the user currently has any live signaling connection.
     pub fn is_online(&self, user_id: Uuid) -> bool {
-        self.connections.lock().unwrap().contains_key(&user_id)
+        self.connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&user_id)
     }
 }
 
@@ -176,12 +182,18 @@ impl RelayHub {
 
     /// Park the first party's socket at the rendezvous keyed by relay session.
     pub fn park(&self, relay_session_id: Uuid, peer: PendingPeer) {
-        self.waiting.lock().unwrap().insert(relay_session_id, peer);
+        self.waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(relay_session_id, peer);
     }
 
     /// Take whichever party (if any) is already waiting at the rendezvous.
     pub fn take(&self, relay_session_id: Uuid) -> Option<PendingPeer> {
-        self.waiting.lock().unwrap().remove(&relay_session_id)
+        self.waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&relay_session_id)
     }
 
     pub fn active_pairings(&self) -> usize {

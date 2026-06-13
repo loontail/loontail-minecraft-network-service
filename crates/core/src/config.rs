@@ -16,10 +16,30 @@ pub struct Config {
     pub invite_ttl: Duration,
     pub search_min_query_length: usize,
     pub search_max_results: i64,
+    pub rate_limit: RateLimitConfig,
     pub yggdrasil: YggdrasilConfig,
     pub textures: TexturesConfig,
     pub bundles: BundlesConfig,
     pub admin: AdminConfig,
+}
+
+/// Per-IP sliding-window rate limit for unauthenticated credential endpoints.
+///
+/// Env vars: `RATE_LIMIT_MAX_ATTEMPTS` (default 10),
+/// `RATE_LIMIT_WINDOW_SECONDS` (default 60).
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub max_attempts: u32,
+    pub window: Duration,
+}
+
+impl RateLimitConfig {
+    fn from_env() -> Self {
+        Self {
+            max_attempts: parse_env("RATE_LIMIT_MAX_ATTEMPTS", 10),
+            window: Duration::from_secs(parse_env("RATE_LIMIT_WINDOW_SECONDS", 60)),
+        }
+    }
 }
 
 /// Yggdrasil (Mojang-compatible auth) configuration.
@@ -77,8 +97,11 @@ impl Config {
         let database_url =
             env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL must be set"))?;
 
+        // why: default CLOSED (empty), not `*`. An unset CORS_ALLOWED_ORIGINS
+        // blocks all browser cross-origin callers rather than failing open; an
+        // explicit `*` must be opted into and never combines with credentials.
         let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
-            .unwrap_or_else(|_| "*".to_string())
+            .unwrap_or_default()
             .split(',')
             .map(|origin| origin.trim().to_string())
             .filter(|origin| !origin.is_empty())
@@ -97,6 +120,7 @@ impl Config {
             invite_ttl: Duration::from_secs(parse_env("INVITE_TTL_SECONDS", 600)),
             search_min_query_length: parse_env("SEARCH_MIN_QUERY_LENGTH", 2),
             search_max_results: parse_env("SEARCH_MAX_RESULTS", 20),
+            rate_limit: RateLimitConfig::from_env(),
             yggdrasil: YggdrasilConfig::from_env(),
             textures: TexturesConfig::from_env(),
             bundles: BundlesConfig::from_env(),

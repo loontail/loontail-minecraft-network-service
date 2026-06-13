@@ -18,7 +18,7 @@ use crate::storage::{
     delete_build_files, disk_space, ensure_build_dir, files_path, normalize_relative_path,
     split_relative_path,
 };
-use crate::{repo, storage};
+use crate::{repo, storage, MAX_UPLOAD_BYTES};
 
 fn storage_root(state: &AppState) -> &str {
     &state.config.bundles.storage_root
@@ -131,36 +131,45 @@ pub async fn upload_archive(
 ) -> AppResult<Json<Bundle>> {
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
 
-    let mut archive_field: Option<Vec<u8>> = None;
+    let root = storage_root(&state);
+    ensure_build_dir(root, &bundle.slug)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ensure dir: {e}")))?;
+
+    // why: stream the archive field straight to a temp file with a running byte
+    // cap so we never buffer the whole (up to 10 GiB) upload in RAM.
+    let tmp = tempfile_for(root, &bundle.slug)?;
+    let mut have_archive = false;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("invalid multipart: {e}")))?
     {
         if field.name() == Some("archive") {
-            let bytes = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("read archive field: {e}")))?;
-            archive_field = Some(bytes.to_vec());
+            if let Err(err) = stream_field_to_file(field, &tmp).await {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(err);
+            }
+            have_archive = true;
             break;
         }
     }
 
-    let bytes = archive_field.ok_or_else(|| {
-        AppError::BadRequest(
+    if !have_archive {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(AppError::BadRequest(
             "no archive file provided — send the ZIP as form field \"archive\"".into(),
-        )
-    })?;
+        ));
+    }
 
     repo::set_status(&state.pool, bundle.id, "processing", None).await?;
 
-    match ingest_archive(&state, &bundle, &bytes).await {
+    match ingest_archive(&state, &bundle, &tmp).await {
         Ok(()) => {
             let refreshed = repo::require_by_slug(&state.pool, &slug).await?;
             Ok(Json(refreshed))
         }
         Err(err) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
             let message = err.to_string();
             repo::set_status(&state.pool, bundle.id, "failed", Some(&message)).await?;
             Err(err)
@@ -168,20 +177,11 @@ pub async fn upload_archive(
     }
 }
 
-async fn ingest_archive(state: &AppState, bundle: &Bundle, bytes: &[u8]) -> AppResult<()> {
+async fn ingest_archive(state: &AppState, bundle: &Bundle, tmp: &std::path::Path) -> AppResult<()> {
     let root = storage_root(state);
-    ensure_build_dir(root, &bundle.slug)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("ensure dir: {e}")))?;
     let files_root = files_path(root, &bundle.slug);
 
-    // why: persist the upload to a temp file so extraction streams from disk and
-    // never holds the whole (up to 10 GB) archive plus extracted tree in memory.
-    let tmp = tempfile_for(root, &bundle.slug)?;
-    tokio::fs::write(&tmp, bytes)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("write temp archive: {e}")))?;
-
-    let tmp_for_task = tmp.clone();
+    let tmp_for_task = tmp.to_path_buf();
     let files_for_task = files_root.clone();
     // Extraction + hashing are blocking; run off the async runtime.
     let scan = tokio::task::spawn_blocking(move || -> AppResult<_> {
@@ -204,6 +204,40 @@ fn tempfile_for(storage_root: &str, slug: &str) -> AppResult<std::path::PathBuf>
     Ok(dir.join(format!("upload-{}.zip.tmp", Uuid::new_v4())))
 }
 
+/// Stream a multipart `field` to `dest`, chunk by chunk, aborting with a 400 once
+/// the running byte total exceeds [`MAX_UPLOAD_BYTES`]. Keeps peak memory bounded
+/// to a single chunk rather than the whole upload.
+async fn stream_field_to_file(
+    mut field: axum::extract::multipart::Field<'_>,
+    dest: &std::path::Path,
+) -> AppResult<u64> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("create temp upload: {e}")))?;
+    let mut written: u64 = 0;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("read upload field: {e}")))?
+    {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > MAX_UPLOAD_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "upload exceeds {MAX_UPLOAD_BYTES} bytes"
+            )));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("write upload: {e}")))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("flush upload: {e}")))?;
+    Ok(written)
+}
+
 /// `POST /builds/{slug}/files` — upload a single file to `targetPath` (form field
 /// `file`, optional text field `targetPath`).
 pub async fn upload_file(
@@ -214,46 +248,75 @@ pub async fn upload_file(
 ) -> AppResult<Json<Bundle>> {
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
 
-    let mut data: Option<Vec<u8>> = None;
+    let root = storage_root(&state);
+    ensure_build_dir(root, &slug)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ensure dir: {e}")))?;
+
+    // why: stream the `file` field to a temp file with a running cap (never buffer
+    // the whole upload), then move it into place once `targetPath` is known.
+    let tmp = tempfile_for(root, &slug)?;
+    let mut size: Option<u64> = None;
     let mut target_path: Option<String> = None;
     let mut original_filename: Option<String> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("invalid multipart: {e}")))?
-    {
-        match field.name() {
-            Some("file") => {
-                original_filename = field.file_name().map(str::to_string);
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("read file field: {e}")))?;
-                data = Some(bytes.to_vec());
+    let result: AppResult<()> =
+        async {
+            while let Some(field) = multipart
+                .next_field()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("invalid multipart: {e}")))?
+            {
+                match field.name() {
+                    Some("file") => {
+                        original_filename = field.file_name().map(str::to_string);
+                        size = Some(stream_field_to_file(field, &tmp).await?);
+                    }
+                    Some("targetPath") => {
+                        target_path =
+                            Some(field.text().await.map_err(|e| {
+                                AppError::BadRequest(format!("read targetPath: {e}"))
+                            })?);
+                    }
+                    _ => {}
+                }
             }
-            Some("targetPath") => {
-                target_path = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| AppError::BadRequest(format!("read targetPath: {e}")))?,
-                );
-            }
-            _ => {}
+            Ok(())
         }
+        .await;
+    if let Err(err) = result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(err);
     }
 
-    let bytes = data.ok_or_else(|| {
-        AppError::BadRequest("no file provided — send the file as form field \"file\"".into())
-    })?;
-    let raw_target = target_path
+    let size = match size {
+        Some(s) => s,
+        None => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(AppError::BadRequest(
+                "no file provided — send the file as form field \"file\"".into(),
+            ));
+        }
+    };
+    let raw_target = match target_path
         .filter(|p| !p.trim().is_empty())
         .or(original_filename)
-        .ok_or_else(|| AppError::BadRequest("targetPath or a filename is required".into()))?;
+    {
+        Some(t) => t,
+        None => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(AppError::BadRequest(
+                "targetPath or a filename is required".into(),
+            ));
+        }
+    };
 
-    let normalized = normalize_relative_path(&raw_target, "targetPath")?;
-    let root = storage_root(&state);
+    let normalized = match normalize_relative_path(&raw_target, "targetPath") {
+        Ok(n) => n,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(err);
+        }
+    };
     let files_root = files_path(root, &slug);
     let dest = repo::join_files(&files_root, &normalized);
 
@@ -262,9 +325,9 @@ pub async fn upload_file(
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
     }
-    tokio::fs::write(&dest, &bytes)
+    tokio::fs::rename(&tmp, &dest)
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("write file: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("move file into place: {e}")))?;
 
     let dest_for_hash = dest.clone();
     let sha256 = tokio::task::spawn_blocking(move || hash_file(&dest_for_hash))
@@ -283,7 +346,7 @@ pub async fn upload_file(
         &normalized,
         &name,
         &category,
-        bytes.len() as i64,
+        size as i64,
         Some(&sha256),
         false,
         modified,
