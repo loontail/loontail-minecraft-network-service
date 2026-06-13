@@ -9,6 +9,6 @@ services:
     ports:
       - "5432:5432"
 
-  service:
+  loontail-launcher-api:
     environment:
       RUST_LOG: "debug,sqlx=info,tower_http=debug"

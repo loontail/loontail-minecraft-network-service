@@ -623,10 +623,7 @@ async fn spa_asset_path(app: &Router) -> String {
         .find(marker)
         .expect("built SPA shell references a hashed /admin/assets/*.js bundle");
     let rest = &html[start..];
-    let end = rest
-        .find(".js")
-        .expect("asset reference is a .js bundle")
-        + ".js".len();
+    let end = rest.find(".js").expect("asset reference is a .js bundle") + ".js".len();
     rest[..end].to_string()
 }
 

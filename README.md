@@ -1,13 +1,21 @@
-# Loontail Minecraft Network Service
+# loontail-launcher-api
 
-Single Rust backend for the Loontail Minecraft Network: user bootstrap, network
-session tokens, friends, presence/statuses, world sessions, join requests/tickets,
-signaling and relay/tunnel. Postgres for storage. Docker-first for local dev and
-Hetzner production.
+Single Rust backend (one binary, `loontail-launcher-api`, one Postgres) for the
+Loontail launcher and Minecraft network. It consolidates the network service
+(user bootstrap, network session tokens, friends, presence/statuses, world
+sessions, join requests/tickets, signaling and relay/tunnel), a Mojang-compatible
+Yggdrasil auth/session/textures server, the skin/cape and launcher catalog/bundle
+registries, and a React admin SPA (embedded and served under `/admin`). Postgres
+for storage. Docker-first for local dev and Hetzner production.
 
-This service is **not** a Minecraft server. It stores network/social state and
-helps players connect to each other's local worlds through a relay tunnel. It
-never receives, stores or logs a Minecraft access token.
+It is **not** a Minecraft server. It stores network/social state and helps players
+connect to each other's local worlds through a relay tunnel. It never receives,
+stores or logs a Minecraft access token.
+
+The Cargo workspace lives under `crates/` (`core`, `yggdrasil-protocol`, `network`,
+`yggdrasil`, `textures`, `catalog`, `bundles`, `admin`, `server`). The admin SPA
+lives in `admin-ui/` and is embedded into the binary at compile time via
+`rust-embed`, so the Docker build runs `npm run build` before the Rust build.
 
 ## Run locally (Docker Compose)
 
@@ -57,6 +65,10 @@ else has a default. Key knobs:
 | `HEARTBEAT_TIMEOUT_SECONDS` | Older heartbeat → user considered offline |
 | `MAX_PLAYERS_PER_WORLD` | Per-world capacity (default 5) |
 | `JOIN_REQUEST_TTL_SECONDS` / `JOIN_TICKET_TTL_SECONDS` | Join flow TTLs |
+| `YGGDRASIL_PUBLIC_URL` / `YGGDRASIL_KEY_PATH` / `YGGDRASIL_SKIN_DOMAINS` | Yggdrasil mount path, RSA signing key, advertised skin domains |
+| `TEXTURES_STORAGE_ROOT` | Skin/cape storage root (default `data/textures`) |
+| `BUNDLES_STORAGE_ROOT` / `BUNDLES_PUBLIC_URL` | Bundle-registry storage root + public URL |
+| `ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD` | Seed admin (created on startup only when a password is set) |
 
 ## Ports & firewall
 

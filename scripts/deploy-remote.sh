@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Roll out loontail-minecraft-network-service on the Hetzner host.
+# Roll out loontail-launcher-api on the Hetzner host.
 #
 # Streamed to the server over SSH (`bash -s`) by .github/workflows/deploy.yml.
 # Inputs arrive via the environment:
@@ -77,7 +77,7 @@ compose up -d --remove-orphans
 # works regardless of which host port the service is published on.
 echo "Waiting for /health ..."
 for _ in $(seq 1 30); do
-  if compose exec -T service curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+  if compose exec -T loontail-launcher-api curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
     echo "Service healthy: $IMAGE"
     docker image prune -f >/dev/null 2>&1 || true
     exit 0
@@ -86,7 +86,7 @@ for _ in $(seq 1 30); do
 done
 
 echo "Service did not become healthy within 60s — rolling deploy failed." >&2
-logs="$(compose logs --tail=120 service 2>&1 || true)"
+logs="$(compose logs --tail=120 loontail-launcher-api 2>&1 || true)"
 printf '%s\n' "$logs" >&2
 
 # The most common cause is a stale Postgres volume initialised with different

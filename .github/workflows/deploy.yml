@@ -10,7 +10,7 @@
 #   DB_PASSWORD         Postgres password (written into .env.prod on the server)
 # --- Optional (have defaults) -----------------------------------------------
 #   HETZNER_SSH_PORT    defaults to 22
-#   HETZNER_DEPLOY_DIR  defaults to /opt/loontail/minecraft-network-service
+#   HETZNER_DEPLOY_DIR  defaults to /opt/loontail/loontail-launcher-api
 #   DB_USER             defaults to loontail
 #   DB_NAME             defaults to loontail_network
 # NOTE: DB_USER / DB_NAME / DB_PASSWORD take effect only on the FIRST deploy
@@ -94,7 +94,7 @@ jobs:
           SSH_USER: ${{ secrets.HETZNER_USER }}
           SSH_PORT: ${{ secrets.HETZNER_SSH_PORT != '' && secrets.HETZNER_SSH_PORT || '22' }}
           SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
-          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/minecraft-network-service' }}
+          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/loontail-launcher-api' }}
           IMAGE: ${{ needs.build-and-push.outputs.image }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

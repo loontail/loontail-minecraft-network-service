@@ -1,4 +1,4 @@
--- Loontail Minecraft Network Service — initial schema.
+-- loontail-launcher-api — initial network schema.
 -- Applied automatically at service startup via sqlx::migrate!.
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";

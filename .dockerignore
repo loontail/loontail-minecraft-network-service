@@ -5,3 +5,12 @@
 !.env.example
 *.log
 README.md
+
+# Built/installed artifacts are produced inside the image, not copied in.
+admin-ui/node_modules
+admin-ui/dist
+
+# Runtime data + secrets must never enter the build context.
+data/textures
+data/bundle-registry
+data/yggdrasil/keys/*.pem

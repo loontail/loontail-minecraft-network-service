@@ -1,4 +1,4 @@
-# Loontail Minecraft Network Service — production compose (Hetzner).
+# loontail-launcher-api — production compose (Hetzner).
 #
 # Unlike docker-compose.yml (which BUILDS the service locally), this file PULLS
 # a prebuilt image from GHCR. The image ref is injected by the deploy workflow
@@ -11,9 +11,12 @@
 #   LOONTAIL_IMAGE=ghcr.io/<owner>/<repo>:sha-<commit> \
 #     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
 
+name: loontail-launcher-api
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: loontail-launcher-api-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-loontail}
@@ -27,8 +30,9 @@ services:
       timeout: 5s
       retries: 5
 
-  service:
+  loontail-launcher-api:
     image: ${LOONTAIL_IMAGE:?LOONTAIL_IMAGE is required (set by the deploy workflow)}
+    container_name: loontail-launcher-api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -45,7 +49,22 @@ services:
       JOIN_TICKET_TTL_SECONDS: ${JOIN_TICKET_TTL_SECONDS:-60}
       SEARCH_MIN_QUERY_LENGTH: ${SEARCH_MIN_QUERY_LENGTH:-2}
       SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-20}
-      RUST_LOG: ${RUST_LOG:-info,loontail_minecraft_network_service=info,sqlx=warn}
+      YGGDRASIL_PUBLIC_URL: ${YGGDRASIL_PUBLIC_URL:-/api/yggdrasil}
+      YGGDRASIL_KEY_PATH: ${YGGDRASIL_KEY_PATH:-data/yggdrasil/keys/active.key.pem}
+      YGGDRASIL_TOKEN_TTL_SECONDS: ${YGGDRASIL_TOKEN_TTL_SECONDS:-1296000}
+      YGGDRASIL_MAX_TOKENS_PER_USER: ${YGGDRASIL_MAX_TOKENS_PER_USER:-10}
+      YGGDRASIL_SKIN_DOMAINS: ${YGGDRASIL_SKIN_DOMAINS:-.loontail.com,localhost}
+      TEXTURES_STORAGE_ROOT: ${TEXTURES_STORAGE_ROOT:-data/textures}
+      BUNDLES_STORAGE_ROOT: ${BUNDLES_STORAGE_ROOT:-data/bundle-registry}
+      BUNDLES_PUBLIC_URL: ${BUNDLES_PUBLIC_URL:-/bundle-registry}
+      ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-604800}
+      ADMIN_COOKIE_NAME: ${ADMIN_COOKIE_NAME:-loontail_admin}
+      ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-admin}
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
+      RUST_LOG: ${RUST_LOG:-info,loontail_server=info,loontail_network=info,sqlx=warn}
+    volumes:
+      # Persist Yggdrasil keys, textures and bundle-registry files across restarts.
+      - app_data:/app/data
     ports:
       # Direct (non-TLS) access / fallback. Caddy fronts the public 80+443 and
       # proxies to this container over the compose network, so this published
@@ -57,9 +76,10 @@ services:
   # are obtained automatically from Let's Encrypt and persisted in caddy_data.
   caddy:
     image: caddy:2-alpine
+    container_name: loontail-launcher-api-caddy
     restart: unless-stopped
     depends_on:
-      - service
+      - loontail-launcher-api
     environment:
       NETWORK_DOMAIN: ${NETWORK_DOMAIN:?NETWORK_DOMAIN is required in .env.prod}
     ports:
@@ -73,5 +93,6 @@ services:
 
 volumes:
   postgres_data:
+  app_data:
   caddy_data:
   caddy_config:

@@ -1,4 +1,4 @@
-# Loontail Minecraft Network Service — base compose (local + prod MVP).
+# loontail-launcher-api — base compose (local + prod MVP).
 # Local:  docker compose up --build
 # Prod:   docker compose --env-file .env.prod up -d --build
 #
@@ -7,9 +7,12 @@
 #   - Relay/tunnel traffic should use a DNS-only record / direct TCP.
 #     Do NOT proxy Minecraft relay traffic through Cloudflare's HTTP proxy.
 
+name: loontail-launcher-api
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: loontail-launcher-api-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-loontail}
@@ -26,10 +29,11 @@ services:
     # ports:
     #   - "5432:5432"
 
-  service:
+  loontail-launcher-api:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: loontail-launcher-api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -46,10 +50,26 @@ services:
       JOIN_TICKET_TTL_SECONDS: ${JOIN_TICKET_TTL_SECONDS:-60}
       SEARCH_MIN_QUERY_LENGTH: ${SEARCH_MIN_QUERY_LENGTH:-2}
       SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-20}
-      RUST_LOG: ${RUST_LOG:-info,loontail_minecraft_network_service=debug,sqlx=warn}
+      YGGDRASIL_PUBLIC_URL: ${YGGDRASIL_PUBLIC_URL:-/api/yggdrasil}
+      YGGDRASIL_KEY_PATH: ${YGGDRASIL_KEY_PATH:-data/yggdrasil/keys/active.key.pem}
+      YGGDRASIL_TOKEN_TTL_SECONDS: ${YGGDRASIL_TOKEN_TTL_SECONDS:-1296000}
+      YGGDRASIL_MAX_TOKENS_PER_USER: ${YGGDRASIL_MAX_TOKENS_PER_USER:-10}
+      YGGDRASIL_SKIN_DOMAINS: ${YGGDRASIL_SKIN_DOMAINS:-.loontail.com,localhost}
+      TEXTURES_STORAGE_ROOT: ${TEXTURES_STORAGE_ROOT:-data/textures}
+      BUNDLES_STORAGE_ROOT: ${BUNDLES_STORAGE_ROOT:-data/bundle-registry}
+      BUNDLES_PUBLIC_URL: ${BUNDLES_PUBLIC_URL:-/bundle-registry}
+      ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-604800}
+      ADMIN_COOKIE_NAME: ${ADMIN_COOKIE_NAME:-loontail_admin}
+      ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-admin}
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
+      RUST_LOG: ${RUST_LOG:-info,loontail_server=debug,loontail_network=debug,sqlx=warn}
+    volumes:
+      # Persist Yggdrasil keys, textures and bundle-registry files across restarts.
+      - app_data:/app/data
     ports:
       # HTTP API (and, in this MVP, the relay/signaling WebSocket endpoints).
       - "${HTTP_PORT:-8080}:8080"
 
 volumes:
   postgres_data:
+  app_data:
