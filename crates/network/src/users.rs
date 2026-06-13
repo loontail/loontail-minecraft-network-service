@@ -148,7 +148,7 @@ pub struct SearchResult {
 #[derive(Debug, sqlx::FromRow)]
 struct SearchRow {
     id: uuid::Uuid,
-    minecraft_uuid: String,
+    minecraft_uuid: Option<String>,
     username: String,
     avatar_url: Option<String>,
     skin_hash: Option<String>,

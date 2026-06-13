@@ -51,12 +51,13 @@ impl UserStatus {
 }
 
 /// A row from the `users` table. Mirrors every column even where a field is
-/// not yet read in Rust, so `SELECT *` mappings stay complete.
+/// not yet read in Rust, so `SELECT *` mappings stay complete. The identity
+/// columns (`email`..`yggdrasil_validated_at`) are added in migration `0003`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
 pub struct User {
     pub id: Uuid,
-    pub minecraft_uuid: String,
+    pub minecraft_uuid: Option<String>,
     pub username: String,
     pub normalized_username: String,
     pub account_type: Option<String>,
@@ -68,6 +69,14 @@ pub struct User {
     pub last_seen_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub email: Option<String>,
+    pub password_hash: Option<String>,
+    pub origin: String,
+    pub profile_uuid: Option<String>,
+    pub confirmed: bool,
+    pub blocked: bool,
+    pub is_admin: bool,
+    pub yggdrasil_validated_at: Option<DateTime<Utc>>,
 }
 
 /// Public representation of a user, returned by the API.
@@ -75,7 +84,7 @@ pub struct User {
 #[serde(rename_all = "camelCase")]
 pub struct UserDto {
     pub id: Uuid,
-    pub minecraft_uuid: String,
+    pub minecraft_uuid: Option<String>,
     pub username: String,
     pub avatar_url: Option<String>,
     pub skin_hash: Option<String>,

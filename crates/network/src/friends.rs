@@ -69,14 +69,14 @@ impl From<FriendRequestRow> for FriendRequestDto {
             created_at: row.created_at,
             from_user: UserDto {
                 id: row.from_id,
-                minecraft_uuid: row.from_minecraft_uuid,
+                minecraft_uuid: Some(row.from_minecraft_uuid),
                 username: row.from_username,
                 avatar_url: row.from_avatar_url,
                 skin_hash: row.from_skin_hash,
             },
             to_user: UserDto {
                 id: row.to_id,
-                minecraft_uuid: row.to_minecraft_uuid,
+                minecraft_uuid: Some(row.to_minecraft_uuid),
                 username: row.to_username,
                 avatar_url: row.to_avatar_url,
                 skin_hash: row.to_skin_hash,

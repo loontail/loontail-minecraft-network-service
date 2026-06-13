@@ -306,7 +306,7 @@ pub async fn friends_with_presence(
             FriendPresence {
                 user: UserDto {
                     id: row.id,
-                    minecraft_uuid: row.minecraft_uuid,
+                    minecraft_uuid: Some(row.minecraft_uuid),
                     username: row.username,
                     avatar_url: row.avatar_url,
                     skin_hash: row.skin_hash,

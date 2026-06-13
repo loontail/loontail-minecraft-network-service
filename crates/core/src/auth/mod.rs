@@ -10,6 +10,20 @@ use crate::error::{AppError, AppResult};
 use crate::models::User;
 use crate::state::AppState;
 
+pub mod admin;
+pub mod csrf;
+pub mod yggdrasil;
+
+pub use admin::{
+    issue_admin_session, revoke_admin_session, revoke_all_admin_sessions_for_user,
+    validate_admin_session, AdminSession, AdminUser,
+};
+pub use csrf::{generate_csrf_token, verify_csrf, CSRF_COOKIE_NAME, CSRF_HEADER_NAME};
+pub use yggdrasil::{
+    cleanup_expired_yggdrasil, invalidate_yggdrasil, issue_yggdrasil_tokens, refresh_yggdrasil,
+    validate_yggdrasil, YggdrasilTokens, YggdrasilUser,
+};
+
 /// Generate a fresh opaque session/ticket token (256 bits, hex-encoded).
 /// The raw value is returned to the client exactly once; only its hash is
 /// ever persisted.

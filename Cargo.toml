@@ -50,6 +50,8 @@ argon2 = "0.5"
 rsa = { version = "0.9", features = ["sha1", "sha2"] }
 base64 = "0.22"
 zip = "2"
+rust-embed = "8"
+mime_guess = "2"
 
 # Internal crates
 loontail-core = { path = "crates/core" }

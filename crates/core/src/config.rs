@@ -16,6 +16,58 @@ pub struct Config {
     pub invite_ttl: Duration,
     pub search_min_query_length: usize,
     pub search_max_results: i64,
+    pub yggdrasil: YggdrasilConfig,
+    pub textures: TexturesConfig,
+    pub bundles: BundlesConfig,
+    pub admin: AdminConfig,
+}
+
+/// Yggdrasil (Mojang-compatible auth) configuration.
+///
+/// Env vars: `YGGDRASIL_PUBLIC_URL` (default `/api/yggdrasil`),
+/// `YGGDRASIL_KEY_PATH` (default `data/yggdrasil/keys/active.key.pem`),
+/// `YGGDRASIL_TOKEN_TTL_SECONDS` (default 1296000 = 15d),
+/// `YGGDRASIL_MAX_TOKENS_PER_USER` (default 10),
+/// `YGGDRASIL_SKIN_DOMAINS` (comma-separated, default `.loontail.com,localhost`).
+#[derive(Debug, Clone)]
+pub struct YggdrasilConfig {
+    pub public_url: String,
+    pub key_path: String,
+    pub token_ttl: Duration,
+    pub max_tokens_per_user: i64,
+    pub skin_domains: Vec<String>,
+}
+
+/// Skin/cape texture storage configuration.
+///
+/// Env var: `TEXTURES_STORAGE_ROOT` (default `data/textures`).
+#[derive(Debug, Clone)]
+pub struct TexturesConfig {
+    pub storage_root: String,
+}
+
+/// Bundle-registry storage configuration.
+///
+/// Env vars: `BUNDLES_STORAGE_ROOT` (default `data/bundle-registry`),
+/// `BUNDLES_PUBLIC_URL` (default `/bundle-registry`).
+#[derive(Debug, Clone)]
+pub struct BundlesConfig {
+    pub storage_root: String,
+    pub public_url: String,
+}
+
+/// Admin-panel session + bootstrap configuration.
+///
+/// Env vars: `ADMIN_SESSION_TTL_SECONDS` (default 604800 = 7d),
+/// `ADMIN_COOKIE_NAME` (default `loontail_admin`),
+/// `ADMIN_BOOTSTRAP_USERNAME` (default `admin`),
+/// `ADMIN_BOOTSTRAP_PASSWORD` (optional — no seed admin created when unset).
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    pub session_ttl: Duration,
+    pub cookie_name: String,
+    pub bootstrap_username: String,
+    pub bootstrap_password: Option<String>,
 }
 
 impl Config {
@@ -45,7 +97,66 @@ impl Config {
             invite_ttl: Duration::from_secs(parse_env("INVITE_TTL_SECONDS", 600)),
             search_min_query_length: parse_env("SEARCH_MIN_QUERY_LENGTH", 2),
             search_max_results: parse_env("SEARCH_MAX_RESULTS", 20),
+            yggdrasil: YggdrasilConfig::from_env(),
+            textures: TexturesConfig::from_env(),
+            bundles: BundlesConfig::from_env(),
+            admin: AdminConfig::from_env(),
         })
+    }
+}
+
+impl YggdrasilConfig {
+    fn from_env() -> Self {
+        let skin_domains = env::var("YGGDRASIL_SKIN_DOMAINS")
+            .unwrap_or_else(|_| ".loontail.com,localhost".to_string())
+            .split(',')
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
+        Self {
+            public_url: env::var("YGGDRASIL_PUBLIC_URL")
+                .unwrap_or_else(|_| "/api/yggdrasil".to_string()),
+            key_path: env::var("YGGDRASIL_KEY_PATH")
+                .unwrap_or_else(|_| "data/yggdrasil/keys/active.key.pem".to_string()),
+            token_ttl: Duration::from_secs(parse_env("YGGDRASIL_TOKEN_TTL_SECONDS", 1_296_000)),
+            max_tokens_per_user: parse_env("YGGDRASIL_MAX_TOKENS_PER_USER", 10),
+            skin_domains,
+        }
+    }
+}
+
+impl TexturesConfig {
+    fn from_env() -> Self {
+        Self {
+            storage_root: env::var("TEXTURES_STORAGE_ROOT")
+                .unwrap_or_else(|_| "data/textures".to_string()),
+        }
+    }
+}
+
+impl BundlesConfig {
+    fn from_env() -> Self {
+        Self {
+            storage_root: env::var("BUNDLES_STORAGE_ROOT")
+                .unwrap_or_else(|_| "data/bundle-registry".to_string()),
+            public_url: env::var("BUNDLES_PUBLIC_URL")
+                .unwrap_or_else(|_| "/bundle-registry".to_string()),
+        }
+    }
+}
+
+impl AdminConfig {
+    fn from_env() -> Self {
+        Self {
+            session_ttl: Duration::from_secs(parse_env("ADMIN_SESSION_TTL_SECONDS", 604_800)),
+            cookie_name: env::var("ADMIN_COOKIE_NAME")
+                .unwrap_or_else(|_| "loontail_admin".to_string()),
+            bootstrap_username: env::var("ADMIN_BOOTSTRAP_USERNAME")
+                .unwrap_or_else(|_| "admin".to_string()),
+            bootstrap_password: env::var("ADMIN_BOOTSTRAP_PASSWORD")
+                .ok()
+                .filter(|p| !p.is_empty()),
+        }
     }
 }
 
