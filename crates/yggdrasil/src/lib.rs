@@ -6,6 +6,7 @@
 //! crate-level `OnceLock` (it is process-global, not per-request, and `AppState`
 //! is owned by `core`). Handlers read it through [`signing_key`].
 
+pub mod account;
 pub mod crypto;
 pub mod error;
 pub mod join_sessions;
@@ -444,6 +445,9 @@ async fn find_user_by_normalized_username(
     .map_err(|e| YggError::from(loontail_core::AppError::from(e)))?;
     Ok(user)
 }
+
+/// The launcher/agent account surface (`/api/auth/*`), mounted by the server crate.
+pub use account::account_routes;
 
 /// Re-exports for the integration tests: the profile types the handlers emit.
 pub use profile::{GameProfile, ProfileProperty};

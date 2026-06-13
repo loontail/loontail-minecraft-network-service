@@ -3,14 +3,13 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use loontail_core::auth::AuthUser;
+use loontail_core::auth::{issue_session, AuthUser};
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::models::{normalize_username, User, UserDto, UserStatus};
 use loontail_core::AppState;
 use loontail_core::Metrics;
 
 use crate::presence;
-use crate::sessions;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,7 +103,7 @@ pub async fn bootstrap(
     .execute(&state.pool)
     .await?;
 
-    let session = sessions::issue_session(&state.pool, &state.config, user.id).await?;
+    let session = issue_session(&state.pool, user.id, state.config.session_ttl).await?;
     Metrics::incr(&state.metrics.bootstraps);
 
     Ok(Json(BootstrapResponse {

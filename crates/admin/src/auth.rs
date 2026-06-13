@@ -7,9 +7,7 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use loontail_core::auth::{
-    generate_csrf_token, issue_admin_session, revoke_admin_session, AdminUser,
-};
+use loontail_core::auth::{generate_csrf_token, issue_session, revoke_session, AdminUser};
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::identity::authenticate_password;
 use loontail_core::AppState;
@@ -30,7 +28,7 @@ pub async fn login(
         return Err(AppError::Forbidden);
     }
 
-    let session = issue_admin_session(&state.pool, user.id, state.config.admin.session_ttl).await?;
+    let session = issue_session(&state.pool, user.id, state.config.admin.session_ttl).await?;
     let csrf = generate_csrf_token();
 
     let mut headers = HeaderMap::new();
@@ -51,7 +49,7 @@ pub async fn logout(
     headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
     if let Some(token) = read_cookie(&headers, &state.config.admin.cookie_name) {
-        revoke_admin_session(&state.pool, &token).await?;
+        revoke_session(&state.pool, &token).await?;
     }
     let mut out = HeaderMap::new();
     clear_session_cookies(&mut out, &state.config.admin.cookie_name);

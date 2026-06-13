@@ -197,6 +197,17 @@ pub async fn invalidate_yggdrasil(
     Ok(affected)
 }
 
+/// Invalidate every Yggdrasil token pair for a user in one statement (e.g. on
+/// block, password reset, or admin "revoke tokens"). Returns rows removed.
+pub async fn invalidate_all_yggdrasil_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<u64> {
+    let affected = sqlx::query("DELETE FROM yggdrasil_tokens WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(affected)
+}
+
 /// Delete all expired token pairs. Runs hourly off the request path; returns the
 /// number of rows removed.
 pub async fn cleanup_expired_yggdrasil(pool: &PgPool) -> AppResult<u64> {

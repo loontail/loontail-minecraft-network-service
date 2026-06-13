@@ -135,44 +135,6 @@ pub struct ResetPasswordRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApiTokenDto {
-    pub id: Uuid,
-    pub name: String,
-    pub scopes: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateApiTokenRequest {
-    pub name: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-}
-
-/// Update an existing token's name and scopes (the secret is never changed).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateApiTokenRequest {
-    pub name: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-}
-
-/// The create-token response carries the raw token exactly once.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreatedApiTokenDto {
-    pub id: Uuid,
-    pub name: String,
-    pub scopes: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    pub token: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AnalyticsOverview {
     pub playing_now: i64,
     pub online_in_network: i64,

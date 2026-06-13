@@ -11,7 +11,7 @@ use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use loontail_core::auth::{cleanup_expired_admin_sessions, cleanup_expired_yggdrasil};
+use loontail_core::auth::{cleanup_expired_sessions, cleanup_expired_yggdrasil};
 use loontail_core::db;
 use loontail_core::{AppState, Config};
 
@@ -86,6 +86,7 @@ fn build_router(state: AppState) -> Router {
     let ygg_suffix = yggdrasil_api_suffix(&state.config.yggdrasil.public_url);
     let api = Router::new()
         .merge(loontail_catalog::routes())
+        .nest("/auth", loontail_yggdrasil::account_routes())
         .nest(&ygg_suffix, loontail_yggdrasil::routes())
         .nest("/bundle-registry", loontail_bundles::routes());
 
@@ -146,10 +147,10 @@ fn spawn_cleanup_tasks(state: AppState) {
                 Ok(_) => {}
                 Err(err) => tracing::warn!(error = %err, "yggdrasil token cleanup failed"),
             }
-            match cleanup_expired_admin_sessions(&pool).await {
-                Ok(n) if n > 0 => tracing::debug!(removed = n, "cleaned expired admin sessions"),
+            match cleanup_expired_sessions(&pool).await {
+                Ok(n) if n > 0 => tracing::debug!(removed = n, "cleaned expired sessions"),
                 Ok(_) => {}
-                Err(err) => tracing::warn!(error = %err, "admin session cleanup failed"),
+                Err(err) => tracing::warn!(error = %err, "session cleanup failed"),
             }
         }
     });

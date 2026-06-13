@@ -7,7 +7,6 @@ pub mod invites;
 pub mod join_requests;
 pub mod presence;
 pub mod relay;
-pub mod sessions;
 pub mod signaling;
 pub mod users;
 pub mod worlds;

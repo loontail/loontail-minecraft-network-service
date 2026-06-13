@@ -14,16 +14,14 @@ pub mod cookies;
 pub mod dto;
 pub mod spa;
 pub mod startup;
-pub mod tokens;
 pub mod users;
 
-use axum::routing::{get, patch, post};
+use axum::routing::{get, post};
 use axum::Router;
 
 use loontail_core::AppState;
 
 pub use startup::ensure_bootstrap_admin;
-pub use tokens::verify_api_token;
 
 /// Build the admin domain router. The server crate mounts this under `/admin`.
 ///
@@ -52,12 +50,6 @@ pub fn routes() -> Router<AppState> {
         .route("/users/{id}/unblock", post(users::unblock_user))
         .route("/users/{id}/reset-password", post(users::reset_password))
         .route("/users/{id}/revoke-tokens", post(users::revoke_tokens))
-        // api tokens
-        .route("/api-tokens", get(tokens::list).post(tokens::create))
-        .route(
-            "/api-tokens/{id}",
-            patch(tokens::update).delete(tokens::delete),
-        )
         // analytics
         .route("/analytics/overview", get(analytics::overview))
         .route("/analytics/timeseries", get(analytics::timeseries));

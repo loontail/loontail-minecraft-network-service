@@ -13,8 +13,9 @@ pub mod realtime;
 pub mod state;
 
 pub use auth::{
-    bearer_token_from_headers, generate_token, hash_token, user_from_token, AdminUser, AuthUser,
-    YggdrasilUser,
+    bearer_token_from_headers, cleanup_expired_sessions, generate_token, hash_token, issue_session,
+    revoke_all_sessions_for_user, revoke_session, user_from_token, AdminUser, AuthUser,
+    IssuedSession, YggdrasilUser,
 };
 pub use config::{AdminConfig, BundlesConfig, Config, TexturesConfig, YggdrasilConfig};
 pub use error::{AppError, AppResult};

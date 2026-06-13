@@ -1,16 +1,16 @@
 //! Public catalog handlers (mounted at `/api`). They reproduce the launcher's
 //! Strapi contract: parse `populate[...]=true` + `locale=` from the raw query,
-//! gate on a Bearer API token (or allow public read), apply the draft filter and
-//! locale fallback in `repo`, and wrap results in `{data, meta:{pagination}}`.
+//! apply the draft filter and locale fallback in `repo`, and wrap results in
+//! `{data, meta:{pagination}}`. Every read requires a valid session (`AuthUser`),
+//! so the launcher attaches its Bearer token — there is no anonymous catalog read.
 
 use axum::extract::{OriginalUri, Path, State};
-use axum::http::HeaderMap;
 use axum::Json;
 
+use loontail_core::auth::AuthUser;
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::AppState;
 
-use crate::apitoken::authorize_public_read;
 use crate::dto::{
     ClientDto, EntityEnvelope, KeywordDto, ListEnvelope, Meta, Pagination, ServerDto,
 };
@@ -23,11 +23,10 @@ fn raw_query(uri: &OriginalUri) -> &str {
 
 /// `GET /clients?populate[...]=true&locale=` — the launcher's primary catalog call.
 pub async fn list_clients(
+    _auth: AuthUser,
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
 ) -> AppResult<Json<ListEnvelope<ClientDto>>> {
-    authorize_public_read(&state.pool, &headers).await?;
     let query = CatalogQuery::parse(uri.query().unwrap_or(""));
     let data = repo::list_clients(&state.pool, &query).await?;
     let total = data.len() as i64;
@@ -41,12 +40,11 @@ pub async fn list_clients(
 
 /// `GET /clients/{id}` — by numeric id, documentId (UUID), or slug.
 pub async fn get_client(
+    _auth: AuthUser,
     State(state): State<AppState>,
     original: OriginalUri,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Json<EntityEnvelope<ClientDto>>> {
-    authorize_public_read(&state.pool, &headers).await?;
     let query = CatalogQuery::parse(raw_query(&original));
     let client = repo::get_client(&state.pool, &id, &query)
         .await?
@@ -56,11 +54,10 @@ pub async fn get_client(
 
 /// `GET /keywords?locale=`
 pub async fn list_keywords(
+    _auth: AuthUser,
     State(state): State<AppState>,
     original: OriginalUri,
-    headers: HeaderMap,
 ) -> AppResult<Json<ListEnvelope<KeywordDto>>> {
-    authorize_public_read(&state.pool, &headers).await?;
     let query = CatalogQuery::parse(raw_query(&original));
     let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
     let data = repo::list_keywords(&state.pool, locale).await?;
@@ -75,12 +72,11 @@ pub async fn list_keywords(
 
 /// `GET /keywords/{id}`
 pub async fn get_keyword(
+    _auth: AuthUser,
     State(state): State<AppState>,
     original: OriginalUri,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Json<EntityEnvelope<KeywordDto>>> {
-    authorize_public_read(&state.pool, &headers).await?;
     let query = CatalogQuery::parse(raw_query(&original));
     let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
     let keyword = repo::get_keyword(&state.pool, &id, locale)
@@ -91,10 +87,9 @@ pub async fn get_keyword(
 
 /// `GET /servers`
 pub async fn list_servers(
+    _auth: AuthUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> AppResult<Json<ListEnvelope<ServerDto>>> {
-    authorize_public_read(&state.pool, &headers).await?;
     let data = repo::list_servers(&state.pool).await?;
     let total = data.len() as i64;
     Ok(Json(ListEnvelope {
@@ -107,11 +102,10 @@ pub async fn list_servers(
 
 /// `GET /servers/{id}`
 pub async fn get_server(
+    _auth: AuthUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Json<EntityEnvelope<ServerDto>>> {
-    authorize_public_read(&state.pool, &headers).await?;
     let server = repo::get_server(&state.pool, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("server not found".into()))?;

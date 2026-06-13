@@ -1,15 +1,14 @@
-//! Integration tests for the Yggdrasil token and admin session lifecycles in
+//! Integration tests for the Yggdrasil token and unified session lifecycles in
 //! `core::auth`, against an isolated Postgres per test.
 
 use std::time::Duration;
 
-use loontail_core::auth::admin::{
-    issue_admin_session, revoke_admin_session, revoke_all_admin_sessions_for_user,
-    validate_admin_session,
-};
 use loontail_core::auth::yggdrasil::{
     cleanup_expired_yggdrasil, invalidate_yggdrasil, issue_yggdrasil_tokens, refresh_yggdrasil,
     validate_yggdrasil,
+};
+use loontail_core::auth::{
+    issue_session, revoke_all_sessions_for_user, revoke_session, user_from_token,
 };
 use loontail_core::identity::{admin_create_user, block, AdminCreateUser};
 use sqlx::PgPool;
@@ -191,38 +190,38 @@ async fn yggdrasil_cleanup_removes_only_expired(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn admin_session_issue_validate_revoke(pool: PgPool) {
+async fn session_issue_resolve_revoke(pool: PgPool) {
     let uid = seed_user(&pool, "boss", true).await;
-    let session = issue_admin_session(&pool, uid, TTL).await.unwrap();
+    let session = issue_session(&pool, uid, TTL).await.unwrap();
 
-    let user = validate_admin_session(&pool, &session.token).await.unwrap();
+    let user = user_from_token(&pool, &session.token).await.unwrap();
     assert_eq!(user.id, uid);
     assert!(user.is_admin);
 
-    let revoked = revoke_admin_session(&pool, &session.token).await.unwrap();
+    let revoked = revoke_session(&pool, &session.token).await.unwrap();
     assert_eq!(revoked, 1);
-    assert!(validate_admin_session(&pool, &session.token).await.is_err());
+    assert!(user_from_token(&pool, &session.token).await.is_err());
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn admin_session_rejects_non_admin(pool: PgPool) {
+async fn session_rejects_blocked_user(pool: PgPool) {
     let uid = seed_user(&pool, "peon", false).await;
-    let session = issue_admin_session(&pool, uid, TTL).await.unwrap();
-    // Session exists, but the user is not an admin ⇒ extractor-level validation
-    // refuses it.
-    assert!(validate_admin_session(&pool, &session.token).await.is_err());
+    let session = issue_session(&pool, uid, TTL).await.unwrap();
+    // The live session resolves until the user is blocked, at which point every
+    // one of their sessions stops resolving immediately (no waiting for TTL).
+    assert!(user_from_token(&pool, &session.token).await.is_ok());
+    block(&pool, uid).await.unwrap();
+    assert!(user_from_token(&pool, &session.token).await.is_err());
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn admin_revoke_all_for_user(pool: PgPool) {
+async fn revoke_all_for_user(pool: PgPool) {
     let uid = seed_user(&pool, "multi", true).await;
-    let a = issue_admin_session(&pool, uid, TTL).await.unwrap();
-    let b = issue_admin_session(&pool, uid, TTL).await.unwrap();
+    let a = issue_session(&pool, uid, TTL).await.unwrap();
+    let b = issue_session(&pool, uid, TTL).await.unwrap();
 
-    let revoked = revoke_all_admin_sessions_for_user(&pool, uid)
-        .await
-        .unwrap();
+    let revoked = revoke_all_sessions_for_user(&pool, uid).await.unwrap();
     assert_eq!(revoked, 2);
-    assert!(validate_admin_session(&pool, &a.token).await.is_err());
-    assert!(validate_admin_session(&pool, &b.token).await.is_err());
+    assert!(user_from_token(&pool, &a.token).await.is_err());
+    assert!(user_from_token(&pool, &b.token).await.is_err());
 }

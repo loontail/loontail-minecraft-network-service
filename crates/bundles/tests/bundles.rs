@@ -7,7 +7,7 @@ use std::path::Path;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use loontail_core::auth::admin::issue_admin_session;
+use loontail_core::auth::issue_session;
 use loontail_core::config::Config;
 use loontail_core::identity::{admin_create_user, AdminCreateUser};
 use loontail_core::AppState;
@@ -26,7 +26,9 @@ fn test_state(pool: PgPool, storage_root: &Path) -> AppState {
     AppState::new(pool, config)
 }
 
-async fn seed_admin_cookie(pool: &PgPool) -> String {
+/// Seed an admin and mint a session, returning its raw token. Sent as
+/// `Authorization: Bearer` below — a programmatic admin caller, so CSRF-exempt.
+async fn seed_admin_token(pool: &PgPool) -> String {
     let admin = admin_create_user(
         pool,
         AdminCreateUser {
@@ -39,7 +41,7 @@ async fn seed_admin_cookie(pool: &PgPool) -> String {
     )
     .await
     .expect("admin");
-    let session = issue_admin_session(pool, admin.id, std::time::Duration::from_secs(900))
+    let session = issue_session(pool, admin.id, std::time::Duration::from_secs(900))
         .await
         .expect("session");
     session.token
@@ -91,7 +93,7 @@ fn multipart_zip_body(zip: &[u8]) -> (String, Vec<u8>) {
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
-async fn create_build(state: &AppState, cookie: &str, slug: &str) {
+async fn create_build(state: &AppState, token: &str, slug: &str) {
     let app = loontail_bundles::admin_routes().with_state(state.clone());
     let body = serde_json::json!({ "name": "Test Bundle", "slug": slug }).to_string();
     let resp = app
@@ -100,7 +102,7 @@ async fn create_build(state: &AppState, cookie: &str, slug: &str) {
                 .method("POST")
                 .uri("/builds")
                 .header("content-type", "application/json")
-                .header("cookie", format!("loontail_admin={cookie}"))
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -109,7 +111,7 @@ async fn create_build(state: &AppState, cookie: &str, slug: &str) {
     assert_eq!(resp.status(), StatusCode::CREATED, "create build");
 }
 
-async fn upload_zip(state: &AppState, cookie: &str, slug: &str, zip: &[u8]) -> StatusCode {
+async fn upload_zip(state: &AppState, token: &str, slug: &str, zip: &[u8]) -> StatusCode {
     let app = loontail_bundles::admin_routes().with_state(state.clone());
     let (content_type, body) = multipart_zip_body(zip);
     let resp = app
@@ -118,7 +120,7 @@ async fn upload_zip(state: &AppState, cookie: &str, slug: &str, zip: &[u8]) -> S
                 .method("POST")
                 .uri(format!("/builds/{slug}/upload"))
                 .header("content-type", content_type)
-                .header("cookie", format!("loontail_admin={cookie}"))
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -131,11 +133,11 @@ async fn upload_zip(state: &AppState, cookie: &str, slug: &str, zip: &[u8]) -> S
 async fn upload_lays_out_files_rows_and_manifest(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(pool.clone(), tmp.path());
-    let cookie = seed_admin_cookie(&pool).await;
+    let token = seed_admin_token(&pool).await;
     let slug = "my-build";
 
-    create_build(&state, &cookie, slug).await;
-    let status = upload_zip(&state, &cookie, slug, &build_test_zip()).await;
+    create_build(&state, &token, slug).await;
+    let status = upload_zip(&state, &token, slug, &build_test_zip()).await;
     assert_eq!(status, StatusCode::OK, "upload archive");
 
     // Files land at storage_root/builds/{slug}/files/{relativePath} EXACTLY.
@@ -238,11 +240,11 @@ async fn upload_lays_out_files_rows_and_manifest(pool: PgPool) {
 async fn public_manifest_is_served_verbatim(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(pool.clone(), tmp.path());
-    let cookie = seed_admin_cookie(&pool).await;
+    let token = seed_admin_token(&pool).await;
     let slug = "contract-build";
 
-    create_build(&state, &cookie, slug).await;
-    upload_zip(&state, &cookie, slug, &build_test_zip()).await;
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
 
     // The bytes on disk are the source of truth.
     let manifest_path = tmp.path().join("builds").join(slug).join("artifacts.json");
@@ -276,11 +278,11 @@ async fn public_manifest_is_served_verbatim(pool: PgPool) {
 async fn static_route_serves_file_bytes(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(pool.clone(), tmp.path());
-    let cookie = seed_admin_cookie(&pool).await;
+    let token = seed_admin_token(&pool).await;
     let slug = "static-build";
 
-    create_build(&state, &cookie, slug).await;
-    upload_zip(&state, &cookie, slug, &build_test_zip()).await;
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
 
     let app = loontail_bundles::static_routes().with_state(state.clone());
     let resp = app
@@ -304,10 +306,10 @@ async fn static_route_serves_file_bytes(pool: PgPool) {
 async fn zip_slip_archive_is_rejected(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(pool.clone(), tmp.path());
-    let cookie = seed_admin_cookie(&pool).await;
+    let token = seed_admin_token(&pool).await;
     let slug = "evil-build";
 
-    create_build(&state, &cookie, slug).await;
+    create_build(&state, &token, slug).await;
 
     // A malicious ZIP whose entry escapes the build directory.
     let mut zip_bytes = Vec::new();
@@ -321,7 +323,7 @@ async fn zip_slip_archive_is_rejected(pool: PgPool) {
         zip.finish().unwrap();
     }
 
-    let status = upload_zip(&state, &cookie, slug, &zip_bytes).await;
+    let status = upload_zip(&state, &token, slug, &zip_bytes).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -343,11 +345,11 @@ async fn zip_slip_archive_is_rejected(pool: PgPool) {
 async fn toggle_download_once_reflects_in_manifest(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(pool.clone(), tmp.path());
-    let cookie = seed_admin_cookie(&pool).await;
+    let token = seed_admin_token(&pool).await;
     let slug = "once-build";
 
-    create_build(&state, &cookie, slug).await;
-    upload_zip(&state, &cookie, slug, &build_test_zip()).await;
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
 
     let entry_id: uuid::Uuid = sqlx::query_scalar(
         "SELECT a.id FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
@@ -365,7 +367,7 @@ async fn toggle_download_once_reflects_in_manifest(pool: PgPool) {
                 .method("PUT")
                 .uri(format!("/builds/{slug}/files/{entry_id}"))
                 .header("content-type", "application/json")
-                .header("cookie", format!("loontail_admin={cookie}"))
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
                     serde_json::json!({ "downloadOnce": true }).to_string(),
                 ))

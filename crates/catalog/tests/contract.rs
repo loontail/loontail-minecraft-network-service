@@ -4,9 +4,13 @@
 //! (`#[sqlx::test]`). Assertions pin the exact JSON field names + envelope shape
 //! the launcher's `normalizeClient`/Strapi schemas consume.
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use loontail_core::auth::issue_session;
+use loontail_core::identity::register_user;
 use loontail_core::{AppState, Config};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -21,10 +25,39 @@ fn state(pool: PgPool) -> AppState {
     AppState::new(pool, config)
 }
 
+/// Create a fresh non-admin account and mint a session, returning its raw token.
+/// Every public catalog read now requires a valid `AuthUser`, so the launcher
+/// attaches this as a Bearer token; the user is unrelated to the seeded catalog
+/// rows, so it does not perturb any envelope/pagination assertion.
+async fn seed_session_token(pool: &PgPool) -> String {
+    // Unique per call: tests issue several reads (each seeds its own reader), and
+    // `normalized_username`/`email` are UNIQUE.
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let user = register_user(
+        pool,
+        &format!("reader-{nonce}"),
+        &format!("reader-{nonce}@example.com"),
+        "pw",
+    )
+    .await
+    .expect("register catalog reader");
+    issue_session(pool, user.id, Duration::from_secs(900))
+        .await
+        .expect("issue session")
+        .token
+}
+
 async fn get_json(pool: PgPool, uri: &str) -> (StatusCode, Value) {
+    let token = seed_session_token(&pool).await;
     let app = loontail_catalog::routes().with_state(state(pool));
     let res = app
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = res.status();
@@ -405,23 +438,17 @@ async fn empty_bundle_slug_collapses_to_null(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn invalid_api_token_is_rejected_valid_or_absent_allowed(pool: PgPool) {
+async fn session_required_valid_accepted_invalid_and_absent_rejected(pool: PgPool) {
     seed_published_client(&pool).await;
 
-    // A valid API token (sha-256 of "secret-token") is accepted.
-    let hash = loontail_catalog::hash_api_token("secret-token");
-    sqlx::query("INSERT INTO api_tokens (name, token_hash) VALUES ('launcher', $1)")
-        .bind(&hash)
-        .execute(&pool)
-        .await
-        .unwrap();
-
+    // A valid session Bearer token is accepted.
+    let token = seed_session_token(&pool).await;
     let app = loontail_catalog::routes().with_state(state(pool.clone()));
     let res = app
         .oneshot(
             Request::builder()
                 .uri("/clients?locale=en")
-                .header("authorization", "Bearer secret-token")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -443,7 +470,16 @@ async fn invalid_api_token_is_rejected_valid_or_absent_allowed(pool: PgPool) {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    // No token ⇒ public read still allowed.
-    let (status, _) = get_json(pool, "/clients?locale=en").await;
-    assert_eq!(status, StatusCode::OK);
+    // No token ⇒ rejected (there is no anonymous catalog read).
+    let app = loontail_catalog::routes().with_state(state(pool));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/clients?locale=en")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }

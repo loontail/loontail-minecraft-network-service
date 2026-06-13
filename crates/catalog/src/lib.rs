@@ -5,13 +5,10 @@
 //! `admin_routes()` mount under `/admin/catalog` (AdminUser-guarded).
 
 mod admin;
-mod apitoken;
 mod dto;
 mod public;
 mod query;
 mod repo;
-
-pub use apitoken::{authorize_public_read, hash_api_token, verify_api_token};
 
 use axum::routing::{get, post};
 use axum::Router;

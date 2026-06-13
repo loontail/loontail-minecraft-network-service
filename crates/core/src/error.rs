@@ -49,7 +49,7 @@ impl AppError {
             AppError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                "missing or invalid network session token".to_string(),
+                "missing or invalid authentication token".to_string(),
             ),
             AppError::Forbidden => (
                 StatusCode::FORBIDDEN,

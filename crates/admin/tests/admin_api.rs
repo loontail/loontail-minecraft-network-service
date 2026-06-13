@@ -1,8 +1,8 @@
 //! Integration tests for the admin domain: bootstrap admin seeding, login
 //! (admin-only), Yggdrasil-user creation proving end-to-end credential binding,
-//! block/reset/revoke, API-token create+verify, analytics overview from seeded
-//! presence, and CSRF rejection. Each test runs against an isolated Postgres via
-//! `#[sqlx::test]` and drives a `Router<AppState>` through `tower::oneshot`.
+//! block/reset/revoke, analytics overview from seeded presence, and CSRF
+//! rejection. Each test runs against an isolated Postgres via `#[sqlx::test]` and
+//! drives a `Router<AppState>` through `tower::oneshot`.
 
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use loontail_admin::{ensure_bootstrap_admin, verify_api_token};
+use loontail_admin::ensure_bootstrap_admin;
 use loontail_core::auth::CSRF_COOKIE_NAME;
 use loontail_core::config::Config;
 use loontail_core::identity::authenticate_password;
@@ -402,104 +402,6 @@ async fn block_reset_and_revoke_tokens(pool: PgPool) {
             .await
             .is_err()
     );
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn api_token_create_and_verify(pool: PgPool) {
-    let state = test_state(pool.clone());
-    ensure_bootstrap_admin(&pool, &state.config.admin)
-        .await
-        .unwrap();
-    let app = app(state.clone());
-    let session = login(&app, "rootadmin", "rootpass123").await.unwrap();
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/api-tokens")
-                .header(COOKIE, session.cookie_header())
-                .header("x-csrf-token", &session.csrf)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "name": "launcher", "scopes": ["catalog:read"] }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let created = body_json(resp).await;
-    let raw = created["token"].as_str().unwrap().to_string();
-    let id = created["id"].as_str().unwrap().to_string();
-    assert_eq!(raw.len(), 64);
-
-    // The raw token verifies against the stored hash.
-    let resolved = verify_api_token(&state, &raw).await.unwrap();
-    assert_eq!(resolved.to_string(), id);
-    // A bogus token does not.
-    assert!(verify_api_token(&state, "nope").await.is_err());
-
-    // It shows up in the list (metadata only, no raw value).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/admin/api-tokens")
-                .header(COOKIE, format!("{COOKIE_NAME}={}", session.session_cookie))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let list = body_json(resp).await;
-    assert_eq!(list.as_array().unwrap().len(), 1);
-    assert_eq!(list[0]["name"], "launcher");
-    assert!(list[0].get("token").is_none());
-
-    // Update its name + scopes (the secret value is untouched and still verifies).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri(format!("/admin/api-tokens/{id}"))
-                .header(COOKIE, session.cookie_header())
-                .header("x-csrf-token", &session.csrf)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "name": "launcher-prod", "scopes": ["*"] }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let updated = body_json(resp).await;
-    assert_eq!(updated["name"], "launcher-prod");
-    assert_eq!(updated["scopes"], json!(["*"]));
-    assert_eq!(
-        verify_api_token(&state, &raw).await.unwrap().to_string(),
-        id
-    );
-
-    // Delete it.
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/admin/api-tokens/{id}"))
-                .header(COOKIE, session.cookie_header())
-                .header("x-csrf-token", &session.csrf)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(verify_api_token(&state, &raw).await.is_err());
 }
 
 #[sqlx::test(migrations = "../../migrations")]

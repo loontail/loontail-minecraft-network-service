@@ -345,6 +345,48 @@ pub async fn admin_create_user(pool: &PgPool, input: AdminCreateUser) -> AppResu
     .map_err(|e| map_create_conflict(e, &normalized, email))
 }
 
+/// Public self-registration (origin `yggdrasil`): username/email + Argon2id
+/// password, `confirmed = true` (no email verification in the MVP), non-admin,
+/// with a freshly minted random `profile_uuid`. Backs `POST /api/auth/register`.
+pub async fn register_user(
+    pool: &PgPool,
+    username: &str,
+    email: &str,
+    password: &str,
+) -> AppResult<User> {
+    let username = username.trim();
+    let email = email.trim();
+    if username.is_empty() {
+        return Err(AppError::BadRequest("username is required".into()));
+    }
+    if email.is_empty() {
+        return Err(AppError::BadRequest("email is required".into()));
+    }
+    if password.is_empty() {
+        return Err(AppError::BadRequest("password is required".into()));
+    }
+    let normalized = normalize_username(username);
+    let password_hash = hash_password(password)?;
+    let profile_uuid = random_profile_uuid();
+
+    sqlx::query_as::<_, User>(
+        r#"
+        INSERT INTO users
+            (username, normalized_username, email, password_hash, origin, profile_uuid, confirmed)
+        VALUES ($1, $2, $3, $4, 'yggdrasil', $5, true)
+        RETURNING *
+        "#,
+    )
+    .bind(username)
+    .bind(&normalized)
+    .bind(email)
+    .bind(&password_hash)
+    .bind(&profile_uuid)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| map_create_conflict(e, &normalized, email))
+}
+
 /// Look up a single user by primary key.
 pub async fn get_user(pool: &PgPool, id: Uuid) -> AppResult<User> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")

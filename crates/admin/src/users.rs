@@ -1,16 +1,14 @@
-//! Admin user management: search, create (bound to Yggdrasil), read, patch,
-//! delete, and the block/unblock/reset-password/revoke-tokens actions. Every
-//! mutation requires a valid admin session and passes the CSRF double-submit
-//! check.
+//! Admin user management: search, create (Yggdrasil-bound), read, patch, delete,
+//! and the block/unblock/reset-password/revoke-tokens actions. Every handler
+//! requires the `AdminUser` extractor, which also enforces the CSRF double-submit
+//! for cookie-authenticated mutations (Bearer tooling is exempt).
 
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
 use axum::Json;
 use uuid::Uuid;
 
 use loontail_core::auth::{
-    invalidate_yggdrasil, revoke_all_admin_sessions_for_user, revoke_all_network_sessions_for_user,
-    verify_csrf, AdminUser,
+    invalidate_all_yggdrasil_for_user, revoke_all_sessions_for_user, AdminUser,
 };
 use loontail_core::error::AppResult;
 use loontail_core::identity::{
@@ -56,10 +54,8 @@ pub async fn list(
 pub async fn create(
     _admin: AdminUser,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<AdminUserDto>> {
-    verify_csrf(&headers)?;
     let user = admin_create_user(
         &state.pool,
         AdminCreateUser {
@@ -84,15 +80,15 @@ pub async fn get(
     Ok(Json(AdminUserDto::from(user)))
 }
 
-/// `PATCH /admin/users/{id}` — patch username/email/is_admin/confirmed.
+/// `PATCH /admin/users/{id}` — patch username/email/is_admin/confirmed. Revokes
+/// the user's sessions when `is_admin` is lowered so a demotion takes effect at
+/// once (an active token must not keep authorizing admin routes).
 pub async fn patch(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserDto>> {
-    verify_csrf(&headers)?;
     let user = update_user(
         &state.pool,
         id,
@@ -104,17 +100,18 @@ pub async fn patch(
         },
     )
     .await?;
+    if body.is_admin == Some(false) {
+        revoke_all_sessions_for_user(&state.pool, id).await?;
+    }
     Ok(Json(AdminUserDto::from(user)))
 }
 
-/// `DELETE /admin/users/{id}` — remove a user (cascades sessions/tokens).
+/// `DELETE /admin/users/{id}` — remove a user (cascades sessions and tokens).
 pub async fn delete(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
 ) -> AppResult<Json<Ack>> {
-    verify_csrf(&headers)?;
     // Ensure it exists so a missing id surfaces a 404 rather than a silent no-op.
     get_user(&state.pool, id).await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
@@ -124,14 +121,13 @@ pub async fn delete(
     Ok(Json(Ack::ok()))
 }
 
-/// `POST /admin/users/{id}/block`.
+/// `POST /admin/users/{id}/block` — disable the account; live sessions stop
+/// resolving immediately because `user_from_token` re-checks `blocked`.
 pub async fn block_user(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
 ) -> AppResult<Json<AdminUserDto>> {
-    verify_csrf(&headers)?;
     let user = block(&state.pool, id).await?;
     Ok(Json(AdminUserDto::from(user)))
 }
@@ -141,56 +137,34 @@ pub async fn unblock_user(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
 ) -> AppResult<Json<AdminUserDto>> {
-    verify_csrf(&headers)?;
     let user = unblock(&state.pool, id).await?;
     Ok(Json(AdminUserDto::from(user)))
 }
 
-/// `POST /admin/users/{id}/reset-password`.
+/// `POST /admin/users/{id}/reset-password` — set a new password and revoke every
+/// session + Yggdrasil token so the old credential is authenticated nowhere.
 pub async fn reset_password(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
     Json(body): Json<ResetPasswordRequest>,
 ) -> AppResult<Json<Ack>> {
-    verify_csrf(&headers)?;
     set_password(&state.pool, id, &body.password).await?;
-    // A password reset must not leave old credentials authenticated anywhere.
-    revoke_all_network_sessions_for_user(&state.pool, id).await?;
-    revoke_all_admin_sessions_for_user(&state.pool, id).await?;
-    invalidate_all_yggdrasil_for_user(&state, id).await?;
+    revoke_all_sessions_for_user(&state.pool, id).await?;
+    invalidate_all_yggdrasil_for_user(&state.pool, id).await?;
     Ok(Json(Ack::ok()))
 }
 
-/// `POST /admin/users/{id}/revoke-tokens` — revoke every network + admin session
-/// and invalidate all Yggdrasil token pairs for the user.
+/// `POST /admin/users/{id}/revoke-tokens` — revoke every session and invalidate
+/// all Yggdrasil token pairs for the user.
 pub async fn revoke_tokens(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
 ) -> AppResult<Json<Ack>> {
-    verify_csrf(&headers)?;
     get_user(&state.pool, id).await?;
-    revoke_all_network_sessions_for_user(&state.pool, id).await?;
-    revoke_all_admin_sessions_for_user(&state.pool, id).await?;
-    invalidate_all_yggdrasil_for_user(&state, id).await?;
+    revoke_all_sessions_for_user(&state.pool, id).await?;
+    invalidate_all_yggdrasil_for_user(&state.pool, id).await?;
     Ok(Json(Ack::ok()))
-}
-
-/// Invalidate every Yggdrasil token pair for a user. `invalidate_yggdrasil`
-/// operates per access token, so collect the user's tokens and remove each.
-async fn invalidate_all_yggdrasil_for_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
-    let access_tokens: Vec<String> =
-        sqlx::query_scalar("SELECT access_token FROM yggdrasil_tokens WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_all(&state.pool)
-            .await?;
-    for token in access_tokens {
-        invalidate_yggdrasil(&state.pool, &token, None).await?;
-    }
-    Ok(())
 }
