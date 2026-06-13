@@ -11,9 +11,15 @@ loontail-core = { workspace = true }
 loontail-yggdrasil-protocol = { workspace = true }
 
 axum = { workspace = true }
+tokio = { workspace = true }
 sqlx = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 tracing = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

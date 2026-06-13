@@ -386,13 +386,12 @@ pub async fn accept(
     // request created while the policy/trust allowed it must not still admit the
     // guest after the host flips back to host_only or the trust link is severed
     // (the host approving does not re-establish a link that no longer exists).
-    if !are_friends(&state.pool, row.requester_user_id, row.host_user_id).await? {
-        if world.invite_policy != "friends_of_friends"
+    if !are_friends(&state.pool, row.requester_user_id, row.host_user_id).await?
+        && (world.invite_policy != "friends_of_friends"
             || !is_friend_of_active_member(&state, row.requester_user_id, row.world_session_id)
-                .await?
-        {
-            return Err(AppError::Forbidden);
-        }
+                .await?)
+    {
+        return Err(AppError::Forbidden);
     }
 
     if world.current_players >= world.max_players {

@@ -279,20 +279,14 @@ async fn pipe(host: WebSocket, guest: WebSocket, state: &AppState) {
 
     let host_to_guest = async {
         while let Some(Ok(message)) = host_stream.next().await {
-            match message {
-                Message::Binary(data) => {
-                    Metrics::add(bytes_counter, data.len() as u64);
-                    if guest_sink.send(Message::Binary(data)).await.is_err() {
+            match classify(message, bytes_counter) {
+                Forward::Send(frame) => {
+                    if guest_sink.send(frame).await.is_err() {
                         break;
                     }
                 }
-                Message::Text(text) => {
-                    if guest_sink.send(Message::Text(text)).await.is_err() {
-                        break;
-                    }
-                }
-                Message::Close(_) => break,
-                _ => {}
+                Forward::Skip => {}
+                Forward::Stop => break,
             }
         }
         let _ = guest_sink.send(Message::Close(None)).await;
@@ -300,20 +294,14 @@ async fn pipe(host: WebSocket, guest: WebSocket, state: &AppState) {
 
     let guest_to_host = async {
         while let Some(Ok(message)) = guest_stream.next().await {
-            match message {
-                Message::Binary(data) => {
-                    Metrics::add(bytes_counter, data.len() as u64);
-                    if host_sink.send(Message::Binary(data)).await.is_err() {
+            match classify(message, bytes_counter) {
+                Forward::Send(frame) => {
+                    if host_sink.send(frame).await.is_err() {
                         break;
                     }
                 }
-                Message::Text(text) => {
-                    if host_sink.send(Message::Text(text)).await.is_err() {
-                        break;
-                    }
-                }
-                Message::Close(_) => break,
-                _ => {}
+                Forward::Skip => {}
+                Forward::Stop => break,
             }
         }
         let _ = host_sink.send(Message::Close(None)).await;
@@ -322,5 +310,28 @@ async fn pipe(host: WebSocket, guest: WebSocket, state: &AppState) {
     tokio::select! {
         _ = host_to_guest => {}
         _ = guest_to_host => {}
+    }
+}
+
+/// A peer frame's disposition after counting forwarded bytes.
+enum Forward {
+    /// Forward this frame to the other side.
+    Send(Message),
+    /// Drop the frame (e.g. ping/pong) but keep the tunnel open.
+    Skip,
+    /// The peer closed; tear the tunnel down.
+    Stop,
+}
+
+/// Classify an inbound relay frame, metering forwarded binary payload bytes.
+fn classify(message: Message, bytes_counter: &std::sync::atomic::AtomicU64) -> Forward {
+    match message {
+        Message::Binary(data) => {
+            Metrics::add(bytes_counter, data.len() as u64);
+            Forward::Send(Message::Binary(data))
+        }
+        Message::Text(text) => Forward::Send(Message::Text(text)),
+        Message::Close(_) => Forward::Stop,
+        _ => Forward::Skip,
     }
 }

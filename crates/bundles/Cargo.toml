@@ -10,11 +10,27 @@ description = "Loontail launcher API — bundle registry (builds/artifacts, ZIP 
 loontail-core = { workspace = true }
 
 axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true }
+tokio = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+anyhow = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 zip = { workspace = true }
+# why: ordered category map so the manifest's top-level key order is stable
+# (the launcher hashes the raw JSON byte-for-byte).
+indexmap = { version = "2", features = ["serde"] }
+
+[target.'cfg(unix)'.dependencies]
+# why: statvfs for the disk-space endpoint on Linux/macOS; Windows uses the
+# Win32 API directly so it needs no extra dependency.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

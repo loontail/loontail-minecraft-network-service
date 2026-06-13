@@ -16,3 +16,12 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+rust-embed = { workspace = true, features = ["debug-embed", "interpolate-folder-path"] }
+mime_guess = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true }
+http-body-util = "0.1"
+
+[build-dependencies]

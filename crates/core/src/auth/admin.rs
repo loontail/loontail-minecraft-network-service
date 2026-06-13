@@ -100,6 +100,19 @@ pub async fn revoke_all_admin_sessions_for_user(pool: &PgPool, user_id: Uuid) ->
     Ok(affected)
 }
 
+/// Delete admin sessions that have expired or been revoked. Runs hourly off the
+/// request path so the table does not grow unbounded; returns the number of rows
+/// removed. Validation already excludes these rows, so removal is purely hygienic.
+pub async fn cleanup_expired_admin_sessions(pool: &PgPool) -> AppResult<u64> {
+    let affected = sqlx::query(
+        "DELETE FROM admin_sessions WHERE expires_at <= now() OR revoked_at IS NOT NULL",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected)
+}
+
 fn cookie_value<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
     let header = parts.headers.get(COOKIE)?.to_str().ok()?;
     header.split(';').find_map(|pair| {

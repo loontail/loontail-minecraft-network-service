@@ -5,6 +5,7 @@ use axum::http::HeaderMap;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::User;
@@ -15,8 +16,8 @@ pub mod csrf;
 pub mod yggdrasil;
 
 pub use admin::{
-    issue_admin_session, revoke_admin_session, revoke_all_admin_sessions_for_user,
-    validate_admin_session, AdminSession, AdminUser,
+    cleanup_expired_admin_sessions, issue_admin_session, revoke_admin_session,
+    revoke_all_admin_sessions_for_user, validate_admin_session, AdminSession, AdminUser,
 };
 pub use csrf::{generate_csrf_token, verify_csrf, CSRF_COOKIE_NAME, CSRF_HEADER_NAME};
 pub use yggdrasil::{
@@ -39,6 +40,19 @@ pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Revoke every active network session for a user (e.g. when an admin disables
+/// or resets the account). Returns the number of sessions revoked.
+pub async fn revoke_all_network_sessions_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<u64> {
+    let affected = sqlx::query(
+        "UPDATE network_sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected)
 }
 
 /// Resolve a network session token to its owning user, enforcing that the
