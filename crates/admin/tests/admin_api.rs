@@ -600,6 +600,36 @@ async fn analytics_timeseries_reads_user_events(pool: PgPool) {
     assert_eq!(total, 2);
 }
 
+/// Fetch the embedded SPA shell and extract the hashed JS bundle path it
+/// references (e.g. `/admin/assets/index-XXXX.js`). The placeholder shell that
+/// `build.rs` writes when `admin-ui/dist` is absent has no such reference, so
+/// this also asserts the real built SPA is embedded.
+async fn spa_asset_path(app: &Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    let marker = "/admin/assets/";
+    let start = html
+        .find(marker)
+        .expect("built SPA shell references a hashed /admin/assets/*.js bundle");
+    let rest = &html[start..];
+    let end = rest
+        .find(".js")
+        .expect("asset reference is a .js bundle")
+        + ".js".len();
+    rest[..end].to_string()
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn spa_serves_shell_assets_and_client_routes(pool: PgPool) {
     let state = test_state(pool);
@@ -624,22 +654,41 @@ async fn spa_serves_shell_assets_and_client_routes(pool: PgPool) {
         "serves the SPA shell at /admin/"
     );
 
-    // A real embedded asset is served.
+    // A real embedded asset is served as JavaScript (not the SPA shell). The
+    // hashed bundle name is discovered from the embedded index.html so the test
+    // tracks the current build instead of a stale hardcoded hash.
+    let asset_path = spa_asset_path(&app).await;
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/assets/index-Dz3-3UXD.js")
+                .uri(&asset_path)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.contains("javascript"),
+        "asset served as JavaScript, got {content_type}"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("<div id=\"root\""),
+        "asset response is the real bundle, not the SPA shell"
+    );
 
     // An unknown client route falls back to the SPA shell (HTML), not a 404.
     let resp = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -652,4 +701,45 @@ async fn spa_serves_shell_assets_and_client_routes(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&bytes).contains("<div id=\"root\""));
+
+    // A client route that a REST endpoint also claims (`GET /admin/users`) still
+    // serves the SPA shell for a browser page navigation (Accept: text/html), so
+    // the route deep links and survives a refresh.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/users")
+                .header("accept", "text/html,application/xhtml+xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("<div id=\"root\""),
+        "browser navigation to a REST-shadowed path serves the SPA shell"
+    );
+
+    // The same path requested as JSON (the SPA's own fetch) is not hijacked by the
+    // shell: it reaches the REST handler, which rejects the unauthenticated call.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/users")
+                .header("accept", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "JSON fetch reaches the REST handler, not the SPA shell"
+    );
 }

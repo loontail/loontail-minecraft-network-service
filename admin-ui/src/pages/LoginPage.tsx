@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
-import { useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -22,7 +22,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { useLogin } from "@/features/auth/api";
+import { useAuth } from "@/features/auth/AuthProvider";
 import { ApiError } from "@/shared/api/client";
 
 const schema = z.object({
@@ -34,24 +34,28 @@ type FormValues = z.infer<typeof schema>;
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const login = useLogin();
+  const { login, isLoggingIn, isAuthenticated, isLoading } = useAuth();
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: { username: "", password: "" },
   });
 
-  function onSubmit(values: FormValues) {
-    login.mutate(values, {
-      onSuccess: () => navigate("/", { replace: true }),
-      onError: (error) => {
-        const message =
-          error instanceof ApiError
-            ? error.message
-            : "Unable to sign in. Try again.";
-        toast.error(message);
-      },
-    });
+  if (!isLoading && isAuthenticated) {
+    return <Navigate to="/" replace />;
+  }
+
+  async function onSubmit(values: FormValues) {
+    try {
+      await login(values);
+      navigate("/", { replace: true });
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : "Unable to sign in. Try again.";
+      toast.error(message);
+    }
   }
 
   return (
@@ -99,10 +103,8 @@ export function LoginPage() {
                   </FormItem>
                 )}
               />
-              <Button type="submit" disabled={login.isPending}>
-                {login.isPending && (
-                  <Loader2 className="size-4 animate-spin" />
-                )}
+              <Button type="submit" disabled={isLoggingIn}>
+                {isLoggingIn && <Loader2 className="size-4 animate-spin" />}
                 Sign in
               </Button>
             </form>

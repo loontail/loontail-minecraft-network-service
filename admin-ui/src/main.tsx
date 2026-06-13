@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import { App } from "@/App";
 import { Toaster } from "@/components/ui/sonner";
+import { AuthProvider } from "@/features/auth/AuthProvider";
 import { queryClient } from "@/shared/api/queryClient";
 
 import "./index.css";
@@ -20,8 +21,10 @@ createRoot(rootEl).render(
     <ThemeProvider attribute="class" defaultTheme="dark" forcedTheme="dark">
       <QueryClientProvider client={queryClient}>
         <BrowserRouter basename="/admin">
-          <App />
-          <Toaster />
+          <AuthProvider>
+            <App />
+            <Toaster />
+          </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>
     </ThemeProvider>

@@ -4,7 +4,9 @@
 //! build. Unknown paths fall back to `index.html` for client-side routing.
 
 use axum::body::Body;
-use axum::http::{header, HeaderValue, StatusCode, Uri};
+use axum::extract::Request;
+use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -45,6 +47,29 @@ fn serve_index() -> Response {
 /// Serve the SPA shell at the nest root (`/admin/`).
 pub async fn index() -> Response {
     serve_index()
+}
+
+/// Serve the SPA shell for browser page navigations so client-side routes deep
+/// link and survive a refresh — even when a REST route shadows the same path
+/// (e.g. `GET /admin/users`, which is both a JSON list endpoint and an SPA
+/// route). A request is a page navigation when it is a `GET` whose `Accept`
+/// prefers `text/html`; the SPA's own `fetch` calls send `Accept:
+/// application/json` and so fall through to the JSON handlers untouched. Embedded
+/// asset requests (scripts/styles) never send `text/html`, so they are likewise
+/// unaffected.
+pub async fn navigation_guard(request: Request, next: Next) -> Response {
+    if request.method() == Method::GET && wants_html(&request) {
+        return serve_index();
+    }
+    next.run(request).await
+}
+
+fn wants_html(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
 }
 
 /// Router fallback: serve an embedded asset for the request path, or the SPA

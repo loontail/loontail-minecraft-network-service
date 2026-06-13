@@ -11,7 +11,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { useLogout, useSession } from "@/features/auth/api";
+import { useAuth } from "@/features/auth/AuthProvider";
 import { cn } from "@/shared/lib/cn";
 
 const NAV = [
@@ -23,10 +23,9 @@ const NAV = [
 ] as const;
 
 export function AppShell() {
-  const { data: me } = useSession();
-  const logout = useLogout();
+  const { user, logout, isLoggingOut } = useAuth();
 
-  const initials = me?.username?.slice(0, 2).toUpperCase() ?? "AD";
+  const initials = user?.username?.slice(0, 2).toUpperCase() ?? "AD";
 
   return (
     <div className="flex h-full">
@@ -65,15 +64,18 @@ export function AppShell() {
           </Avatar>
           <div className="min-w-0 flex-1">
             <p className="truncate text-body-med text-text-hi">
-              {me?.username ?? "Administrator"}
+              {user?.username ?? "Administrator"}
             </p>
-            <p className="truncate text-caption text-text-faint">Admin</p>
+            <p className="truncate text-caption text-text-faint">
+              {user?.email ?? "Admin"}
+            </p>
           </div>
           <Button
             variant="ghost"
             size="icon"
             aria-label="Log out"
-            onClick={() => logout.mutate()}
+            disabled={isLoggingOut}
+            onClick={() => void logout()}
           >
             <LogOut className="size-4" />
           </Button>

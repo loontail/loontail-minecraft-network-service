@@ -61,6 +61,11 @@ pub fn routes() -> Router<AppState> {
 
     // The SPA shell + embedded assets. An explicit `/` route serves the nest-root
     // (a router fallback alone does not match the bare `/admin/` under a nest in
-    // axum 0.8), and the fallback covers assets and unknown client routes.
-    api.route("/", get(spa::index)).fallback(spa::fallback)
+    // axum 0.8), and the fallback covers assets and unknown client routes. The
+    // navigation guard serves the shell for browser page loads even when a REST
+    // route shadows the same path (e.g. `GET /admin/users`), so client routes deep
+    // link and survive a refresh while the SPA's JSON `fetch` calls pass through.
+    api.route("/", get(spa::index))
+        .fallback(spa::fallback)
+        .layer(axum::middleware::from_fn(spa::navigation_guard))
 }

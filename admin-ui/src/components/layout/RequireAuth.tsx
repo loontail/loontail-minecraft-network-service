@@ -1,21 +1,23 @@
 import type { ReactNode } from "react";
 import { Navigate } from "react-router-dom";
 
-import { Skeleton } from "@/components/ui/skeleton";
-import { useSession } from "@/features/auth/api";
+import { useAuth } from "@/features/auth/AuthProvider";
 
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { data: me, isLoading } = useSession();
+  const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center p-8">
-        <Skeleton className="h-24 w-64" />
+        <div className="flex flex-col items-center gap-4">
+          <div className="size-8 animate-spin rounded-full border-2 border-edge border-t-cta" />
+          <p className="text-caption text-text-faint">Loading session...</p>
+        </div>
       </div>
     );
   }
 
-  if (!me) {
+  if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
 

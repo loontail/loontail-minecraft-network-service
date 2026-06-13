@@ -1,23 +1,7 @@
-export interface AnalyticsOverview {
-  playingNow: number;
-  onlineInNetwork: number;
-  openWorlds: number;
-  activeRelays: number;
-  totalUsers: number;
-}
-
-export interface TimeseriesPoint {
-  timestamp: string;
-  value: number;
-}
-
-export interface Timeseries {
-  metric: string;
-  window: string;
-  points: TimeseriesPoint[];
-}
-
-export interface AdminMe {
-  id: string;
-  username: string;
-}
+// Back-compat barrel: the canonical DTO types now live in @/shared/types.
+export type {
+  AdminMe,
+  AnalyticsOverview,
+  TimeseriesPoint,
+  TimeseriesResponse,
+} from "@/shared/types";
