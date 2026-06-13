@@ -145,7 +145,7 @@ fn create_key_dir(dir: &Path) -> Result<(), CryptoError> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         if !dir.exists() {
             std::fs::DirBuilder::new()
                 .recursive(true)
