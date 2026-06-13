@@ -1,5 +1,6 @@
 mod infra;
 mod ratelimit;
+mod reqlog;
 
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 use loontail_core::auth::{cleanup_expired_sessions, cleanup_expired_yggdrasil};
 use loontail_core::db;
+use loontail_core::request_log::delete_request_logs_older_than;
 use loontail_core::{AppState, Config};
 
 #[tokio::main]
@@ -122,6 +124,13 @@ fn build_router(state: AppState) -> Router {
         // serve those file bytes from the configured public prefix.
         .nest("/bundle-registry", loontail_bundles::static_routes())
         .nest_service("/admin", admin.with_state(state.clone()))
+        // Capture every served request (minus probes + WS upgrades) into the
+        // observability ring + request_logs. Applied before `.with_state` so it
+        // reads the matched-route template from extensions and shares `AppState`.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            reqlog::capture,
+        ))
         .with_state(state)
         // The limiter self-filters to unauthenticated credential paths by URI; it
         // sits outside the routers so it sees the original request path.
@@ -184,11 +193,12 @@ fn yggdrasil_api_suffix(public_url: &str) -> String {
     }
 }
 
-/// Spawn hourly background cleanup of expired Yggdrasil token pairs and admin
-/// sessions. Failures are logged and retried on the next tick — they never abort
-/// the loop.
+/// Spawn hourly background cleanup of expired Yggdrasil token pairs, admin
+/// sessions, and aged request logs. Failures are logged and retried on the next
+/// tick — they never abort the loop.
 fn spawn_cleanup_tasks(state: AppState) {
     let pool = state.pool.clone();
+    let retention_days = state.config.request_log.retention_days;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(3600));
         loop {
@@ -202,6 +212,11 @@ fn spawn_cleanup_tasks(state: AppState) {
                 Ok(n) if n > 0 => tracing::debug!(removed = n, "cleaned expired sessions"),
                 Ok(_) => {}
                 Err(err) => tracing::warn!(error = %err, "session cleanup failed"),
+            }
+            match delete_request_logs_older_than(&pool, retention_days).await {
+                Ok(n) if n > 0 => tracing::debug!(removed = n, "cleaned aged request logs"),
+                Ok(_) => {}
+                Err(err) => tracing::warn!(error = %err, "request-log cleanup failed"),
             }
         }
     });

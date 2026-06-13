@@ -10,6 +10,7 @@ pub mod identity;
 pub mod metrics;
 pub mod models;
 pub mod realtime;
+pub mod request_log;
 pub mod state;
 
 pub use auth::{
@@ -18,10 +19,15 @@ pub use auth::{
     AdminUser, AuthUser, IssuedSession, YggdrasilUser,
 };
 pub use config::{
-    AdminConfig, BundlesConfig, Config, RateLimitConfig, TexturesConfig, YggdrasilConfig,
+    AdminConfig, BundlesConfig, Config, RateLimitConfig, RequestLogConfig, TexturesConfig,
+    YggdrasilConfig,
 };
 pub use error::{AppError, AppResult};
 pub use identity::{hash_password, verify_password};
 pub use metrics::Metrics;
 pub use realtime::{PendingPeer, Realtime, RelayHub, ServerEvent, SignalingHub};
+pub use request_log::{
+    delete_request_logs_older_than, resolve_principal, RequestLog, RequestLogSink,
+    ResolvedPrincipal,
+};
 pub use state::AppState;

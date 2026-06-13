@@ -1,4 +1,11 @@
-import { Boxes, LayoutDashboard, Library, LogOut, Users } from "lucide-react";
+import {
+  Boxes,
+  LayoutDashboard,
+  Library,
+  LogOut,
+  ScrollText,
+  Users,
+} from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -12,6 +19,7 @@ const NAV = [
   { to: "/users", label: "Users", icon: Users, end: false },
   { to: "/catalog", label: "Catalog", icon: Library, end: false },
   { to: "/bundles", label: "Bundles", icon: Boxes, end: false },
+  { to: "/logs", label: "Logs & Traffic", icon: ScrollText, end: false },
 ] as const;
 
 export function AppShell() {

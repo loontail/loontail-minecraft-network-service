@@ -5,6 +5,7 @@ import { RequireAuth } from "@/components/layout/RequireAuth";
 import { BundlesPage } from "@/pages/BundlesPage";
 import { CatalogPage } from "@/pages/CatalogPage";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { LogsTrafficPage } from "@/pages/LogsTrafficPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { UsersPage } from "@/pages/UsersPage";
 
@@ -23,6 +24,7 @@ export function App() {
         <Route path="users" element={<UsersPage />} />
         <Route path="catalog" element={<CatalogPage />} />
         <Route path="bundles" element={<BundlesPage />} />
+        <Route path="logs" element={<LogsTrafficPage />} />
       </Route>
     </Routes>
   );

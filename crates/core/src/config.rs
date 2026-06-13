@@ -17,6 +17,7 @@ pub struct Config {
     pub search_min_query_length: usize,
     pub search_max_results: i64,
     pub rate_limit: RateLimitConfig,
+    pub request_log: RequestLogConfig,
     pub yggdrasil: YggdrasilConfig,
     pub textures: TexturesConfig,
     pub bundles: BundlesConfig,
@@ -38,6 +39,23 @@ impl RateLimitConfig {
         Self {
             max_attempts: parse_env("RATE_LIMIT_MAX_ATTEMPTS", 10),
             window: Duration::from_secs(parse_env("RATE_LIMIT_WINDOW_SECONDS", 60)),
+        }
+    }
+}
+
+/// Retention for the `request_logs` observability table. Rows older than
+/// `retention_days` are deleted by the hourly cleanup tick.
+///
+/// Env var: `REQUEST_LOG_RETENTION_DAYS` (default 7).
+#[derive(Debug, Clone)]
+pub struct RequestLogConfig {
+    pub retention_days: i64,
+}
+
+impl RequestLogConfig {
+    fn from_env() -> Self {
+        Self {
+            retention_days: parse_env("REQUEST_LOG_RETENTION_DAYS", 7),
         }
     }
 }
@@ -121,6 +139,7 @@ impl Config {
             search_min_query_length: parse_env("SEARCH_MIN_QUERY_LENGTH", 2),
             search_max_results: parse_env("SEARCH_MAX_RESULTS", 20),
             rate_limit: RateLimitConfig::from_env(),
+            request_log: RequestLogConfig::from_env(),
             yggdrasil: YggdrasilConfig::from_env(),
             textures: TexturesConfig::from_env(),
             bundles: BundlesConfig::from_env(),

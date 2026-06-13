@@ -167,6 +167,125 @@ pub struct TimeseriesResponse {
     pub series: Vec<TimeseriesPoint>,
 }
 
+/// One request-log row as returned by `/admin/logs/tail` and (with `id`) by
+/// `/admin/analytics/requests`. `authKind` is `"session" | "admin" | "anon"`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogEntry {
+    /// Present only on persisted rows (`/analytics/requests`); omitted for the
+    /// live ring tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    pub ts: DateTime<Utc>,
+    pub method: String,
+    pub path: String,
+    pub status: i16,
+    pub latency_ms: i32,
+    pub user_id: Option<Uuid>,
+    pub auth_kind: String,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub bytes_out: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogTailResponse {
+    pub entries: Vec<RequestLogEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogTailQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Filters + pagination for `/admin/analytics/requests`. All filters optional.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogQuery {
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub status: Option<i16>,
+    #[serde(default)]
+    pub page: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogPageResponse {
+    pub data: Vec<RequestLogEntry>,
+    pub meta: PageMeta,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestWindowQuery {
+    #[serde(default)]
+    pub window: Option<String>,
+}
+
+/// One status-class bucket in the summary's `statusMix`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusClassCount {
+    pub status_class: String,
+    pub count: i64,
+}
+
+/// One hot path in the summary's `topPaths`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopPath {
+    pub path: String,
+    pub count: i64,
+    pub avg_latency_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestSummaryResponse {
+    pub window: String,
+    pub total_requests: i64,
+    /// Share (0..1) of requests whose status is >= 500 (server errors).
+    pub error_rate: f64,
+    pub avg_latency_ms: f64,
+    pub status_mix: Vec<StatusClassCount>,
+    pub top_paths: Vec<TopPath>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestTimeseriesQuery {
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub metric: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestTimeseriesPoint {
+    pub bucket: DateTime<Utc>,
+    pub value: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestTimeseriesResponse {
+    pub window: String,
+    pub metric: String,
+    pub series: Vec<RequestTimeseriesPoint>,
+}
+
 /// A bare success acknowledgement for mutations that have no body to return.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

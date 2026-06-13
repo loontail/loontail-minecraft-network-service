@@ -12,6 +12,7 @@ pub mod analytics;
 pub mod auth;
 pub mod cookies;
 pub mod dto;
+pub mod requests;
 pub mod spa;
 pub mod startup;
 pub mod users;
@@ -52,7 +53,12 @@ pub fn routes() -> Router<AppState> {
         .route("/users/{id}/revoke-tokens", post(users::revoke_tokens))
         // analytics
         .route("/analytics/overview", get(analytics::overview))
-        .route("/analytics/timeseries", get(analytics::timeseries));
+        .route("/analytics/timeseries", get(analytics::timeseries))
+        // request observability
+        .route("/logs/tail", get(requests::tail))
+        .route("/analytics/requests", get(requests::list))
+        .route("/analytics/requests/summary", get(requests::summary))
+        .route("/analytics/requests/timeseries", get(requests::timeseries));
 
     // The SPA shell + embedded assets. An explicit `/` route serves the nest-root
     // (a router fallback alone does not match the bare `/admin/` under a nest in

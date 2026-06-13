@@ -70,8 +70,10 @@ pub async fn overview(
 }
 
 /// Resolve the `window` query param to a Postgres interval literal plus a bucket
-/// width, defaulting to a 7-day window bucketed by day.
-fn resolve_window(window: &str) -> (&'static str, &'static str, String) {
+/// width, defaulting to a 7-day window bucketed by day. The interval and bucket
+/// unit are drawn from this fixed allowlist (never user text), so callers may
+/// safely format them into SQL.
+pub(crate) fn resolve_window(window: &str) -> (&'static str, &'static str, String) {
     match window {
         "24h" | "1d" | "day" => ("24 hours", "hour", "24h".into()),
         "30d" | "month" => ("30 days", "day", "30d".into()),

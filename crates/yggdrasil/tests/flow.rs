@@ -10,7 +10,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use loontail_core::config::{
-    AdminConfig, BundlesConfig, Config, RateLimitConfig, TexturesConfig, YggdrasilConfig,
+    AdminConfig, BundlesConfig, Config, RateLimitConfig, RequestLogConfig, TexturesConfig,
+    YggdrasilConfig,
 };
 use loontail_core::identity::{admin_create_user, AdminCreateUser};
 use loontail_core::AppState;
@@ -43,6 +44,7 @@ fn test_config() -> Config {
             max_attempts: 10,
             window: Duration::from_secs(60),
         },
+        request_log: RequestLogConfig { retention_days: 7 },
         yggdrasil: YggdrasilConfig {
             public_url: PUBLIC_URL.into(),
             key_path: "tests/test-key.pem".into(),
@@ -69,12 +71,7 @@ fn test_config() -> Config {
 fn app(pool: PgPool) -> axum::Router {
     let config = test_config();
     init_crypto(&config).expect("init crypto from test key");
-    let state = AppState {
-        pool,
-        config: std::sync::Arc::new(config),
-        metrics: std::sync::Arc::new(loontail_core::Metrics::new()),
-        realtime: std::sync::Arc::new(loontail_core::Realtime::new()),
-    };
+    let state = AppState::new(pool, config);
     routes().with_state(state)
 }
 
