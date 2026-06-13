@@ -1,9 +1,8 @@
 use axum::extract::{Query, State};
 use axum::Json;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use loontail_core::auth::{issue_session, AuthUser};
+use loontail_core::auth::AuthUser;
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::models::{normalize_username, User, UserDto, UserStatus};
 use loontail_core::AppState;
@@ -34,52 +33,41 @@ pub struct BootstrapRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapResponse {
     pub user: UserDto,
-    pub token: String,
-    pub expires_at: DateTime<Utc>,
 }
 
-/// `POST /users/bootstrap` — public. Creates or updates the user from the
-/// Minecraft session data sent by the mod, then issues a network session
-/// token. The Minecraft access token is never accepted here.
+/// `POST /users/bootstrap` — the in-game agent starts its network session.
+/// Authenticated by the session token the launcher injected (`AuthUser`); it
+/// issues NO token. It binds the live Minecraft identity onto the account
+/// (`minecraft_uuid` is filled only when unset, so an account keeps one stable
+/// identity) and marks presence online with the reported client version + loader.
 pub async fn bootstrap(
     State(state): State<AppState>,
+    auth: AuthUser,
     Json(body): Json<BootstrapRequest>,
 ) -> AppResult<Json<BootstrapResponse>> {
     let minecraft_uuid = body.minecraft_uuid.trim();
-    let username = body.username.trim();
-    if minecraft_uuid.is_empty() {
-        return Err(AppError::BadRequest("minecraftUuid is required".into()));
-    }
-    if username.is_empty() {
-        return Err(AppError::BadRequest("username is required".into()));
-    }
-
-    let normalized = normalize_username(username);
 
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users
-            (minecraft_uuid, username, normalized_username, account_type, xuid, client_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (minecraft_uuid) DO UPDATE SET
-            username            = EXCLUDED.username,
-            normalized_username = EXCLUDED.normalized_username,
-            account_type        = COALESCE(EXCLUDED.account_type, users.account_type),
-            xuid                = COALESCE(EXCLUDED.xuid, users.xuid),
-            client_id           = COALESCE(EXCLUDED.client_id, users.client_id),
-            last_seen_at        = now(),
-            updated_at          = now()
+        UPDATE users SET
+            minecraft_uuid = COALESCE(minecraft_uuid, NULLIF($2, '')),
+            account_type   = COALESCE($3, account_type),
+            xuid           = COALESCE($4, xuid),
+            client_id      = COALESCE($5, client_id),
+            last_seen_at   = now(),
+            updated_at     = now()
+        WHERE id = $1
         RETURNING *
         "#,
     )
+    .bind(auth.id())
     .bind(minecraft_uuid)
-    .bind(username)
-    .bind(&normalized)
     .bind(&body.account_type)
     .bind(&body.xuid)
     .bind(&body.client_id)
     .fetch_one(&state.pool)
-    .await?;
+    .await
+    .map_err(map_bootstrap_conflict)?;
 
     // Initialise / refresh presence as online (the player just launched).
     sqlx::query(
@@ -103,14 +91,24 @@ pub async fn bootstrap(
     .execute(&state.pool)
     .await?;
 
-    let session = issue_session(&state.pool, user.id, state.config.session_ttl).await?;
     Metrics::incr(&state.metrics.bootstraps);
 
     Ok(Json(BootstrapResponse {
         user: UserDto::from(user),
-        token: session.token,
-        expires_at: session.expires_at,
     }))
+}
+
+/// A reported Minecraft UUID already bound to a different account surfaces as a
+/// 409 rather than a generic 500.
+fn map_bootstrap_conflict(err: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(db) = &err {
+        if db.constraint() == Some("users_minecraft_uuid_key") {
+            return AppError::Conflict(
+                "this Minecraft account is already linked to another user".into(),
+            );
+        }
+    }
+    AppError::Database(err)
 }
 
 #[derive(Debug, Serialize)]

@@ -5,6 +5,8 @@
 //! and drives the `Router<AppState>` through `tower::ServiceExt::oneshot` — no
 //! real socket is opened.
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
@@ -34,23 +36,43 @@ async fn body_json(resp: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
-/// A bootstrapped network user: its issued bearer token plus the public DTO the
-/// server returned, so tests can reference its id without a second round-trip.
+/// A seeded network user: its issued session bearer token plus the user id, so
+/// tests can reference its identity without a second round-trip.
 struct TestUser {
     token: String,
     id: String,
 }
 
-/// `POST /users/bootstrap` for a synthetic mod user and assert the shape, then
-/// return the token + identity for follow-up authenticated calls.
-async fn bootstrap(app: &Router, minecraft_uuid: &str, username: &str) -> TestUser {
-    let resp = app
-        .clone()
+/// Mint a session for an account directly via the core functions. The test app
+/// builds only `loontail_network::routes()` (no `/api/auth`), so sessions cannot
+/// be obtained over HTTP — we register a Yggdrasil account (no minecraft_uuid,
+/// random profile_uuid) and issue a session against the pool.
+async fn mint_session(pool: &PgPool, username: &str) -> (uuid::Uuid, String) {
+    let email = format!("{username}@test.invalid");
+    let user = loontail_core::identity::register_user(pool, username, &email, "test-password")
+        .await
+        .expect("register account");
+    let session = loontail_core::auth::issue_session(pool, user.id, Duration::from_secs(3600))
+        .await
+        .expect("issue session");
+    (user.id, session.token)
+}
+
+/// POST an authenticated `/users/bootstrap` for `user`, binding the live
+/// Minecraft identity + presence. Returns the raw response.
+async fn post_bootstrap(
+    app: &Router,
+    token: &str,
+    minecraft_uuid: &str,
+    username: &str,
+) -> axum::response::Response {
+    app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/users/bootstrap")
                 .header("content-type", "application/json")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::from(
                     json!({
                         "minecraftUuid": minecraft_uuid,
@@ -63,20 +85,30 @@ async fn bootstrap(app: &Router, minecraft_uuid: &str, username: &str) -> TestUs
                 .unwrap(),
         )
         .await
-        .unwrap();
+        .unwrap()
+}
+
+/// Register an account, issue its session, then run the now-authenticated
+/// `/users/bootstrap` to bind the live Minecraft identity + mark presence online.
+/// Asserts the `{ user }` response shape and returns the session + user id for
+/// follow-up authenticated calls.
+async fn seed_user(pool: &PgPool, app: &Router, minecraft_uuid: &str, username: &str) -> TestUser {
+    let (id, token) = mint_session(pool, username).await;
+
+    let resp = post_bootstrap(app, &token, minecraft_uuid, username).await;
     assert_eq!(resp.status(), StatusCode::OK, "bootstrap should succeed");
     let body = body_json(resp).await;
-    let token = body["token"].as_str().expect("token issued").to_string();
     assert!(
-        body["expiresAt"].as_str().is_some(),
-        "bootstrap returns an expiry"
+        body.get("token").is_none(),
+        "bootstrap no longer issues a token"
     );
     let user = &body["user"];
     assert_eq!(user["username"], username);
     assert_eq!(user["minecraftUuid"], minecraft_uuid);
+    assert_eq!(user["id"].as_str().expect("user id"), id.to_string());
     TestUser {
         token,
-        id: user["id"].as_str().expect("user id").to_string(),
+        id: id.to_string(),
     }
 }
 
@@ -106,12 +138,37 @@ async fn authed(
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn bootstrap_issues_token_and_me_returns_user_and_presence(pool: PgPool) {
-    let app = app(pool);
-    let user = bootstrap(&app, "11111111-1111-1111-1111-111111111111", "alice").await;
+async fn bootstrap_binds_identity_and_me_returns_user_and_presence(pool: PgPool) {
+    let app = app(pool.clone());
 
-    // The issued token authenticates /me, which echoes the user + presence
-    // (bootstrap initialised presence as online).
+    // Bootstrap now REQUIRES a session: an unauthenticated POST is rejected.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/users/bootstrap")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "minecraftUuid": "11111111-1111-1111-1111-111111111111",
+                        "username": "alice",
+                        "minecraftVersion": "1.21.4",
+                        "loader": "fabric"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // With a valid session, bootstrap binds the identity and marks presence online.
+    let user = seed_user(&pool, &app, "11111111-1111-1111-1111-111111111111", "alice").await;
+
+    // The session authenticates /me, which echoes the user + presence (bootstrap
+    // initialised presence as online).
     let resp = authed(&app, &user, "GET", "/me", None).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let me = body_json(resp).await;
@@ -148,32 +205,73 @@ async fn bootstrap_issues_token_and_me_returns_user_and_presence(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn bootstrap_is_idempotent_per_minecraft_uuid(pool: PgPool) {
+async fn bootstrap_rebinds_same_account_and_rejects_taken_minecraft_uuid(pool: PgPool) {
     let app = app(pool.clone());
-    let first = bootstrap(&app, "22222222-2222-2222-2222-222222222222", "bob").await;
-    // Same minecraft_uuid, renamed: upsert keeps one row, updates the username.
-    let second = bootstrap(&app, "22222222-2222-2222-2222-222222222222", "bobby").await;
-    assert_eq!(first.id, second.id, "same minecraft uuid maps to one user");
+    let mc_uuid = "22222222-2222-2222-2222-222222222222";
 
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+    // First account binds the identity.
+    let bob = seed_user(&pool, &app, mc_uuid, "bob").await;
+
+    // Re-bootstrapping the SAME account (same session) keeps one row and refreshes
+    // last_seen — no new user is created and the binding is stable.
+    let before: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT last_seen_at FROM users WHERE id = $1::uuid")
+            .bind(&bob.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let resp = post_bootstrap(&app, &bob.token, mc_uuid, "bob").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["user"]["id"], bob.id);
+    let after: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT last_seen_at FROM users WHERE id = $1::uuid")
+            .bind(&bob.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(after >= before, "re-bootstrap refreshes last_seen");
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE minecraft_uuid = $1")
+        .bind(mc_uuid)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 1);
-    let name: String = sqlx::query_scalar("SELECT username FROM users WHERE id = $1::uuid")
-        .bind(&first.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(name, "bobby");
+    assert_eq!(
+        count, 1,
+        "same account keeps one row for the minecraft uuid"
+    );
+
+    // A SECOND, DIFFERENT account that bootstraps with the ALREADY-BOUND
+    // minecraft_uuid is a 409 Conflict (one Minecraft identity per account).
+    let (_other_id, other_token) = mint_session(&pool, "bobby").await;
+    let resp = post_bootstrap(&app, &other_token, mc_uuid, "bobby").await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn search_finds_other_users_by_username(pool: PgPool) {
-    let app = app(pool);
-    let alice = bootstrap(&app, "33333333-3333-3333-3333-333333333331", "searcher").await;
-    bootstrap(&app, "33333333-3333-3333-3333-333333333332", "findme").await;
-    bootstrap(&app, "33333333-3333-3333-3333-333333333333", "findme_too").await;
+    let app = app(pool.clone());
+    let alice = seed_user(
+        &pool,
+        &app,
+        "33333333-3333-3333-3333-333333333331",
+        "searcher",
+    )
+    .await;
+    seed_user(
+        &pool,
+        &app,
+        "33333333-3333-3333-3333-333333333332",
+        "findme",
+    )
+    .await;
+    seed_user(
+        &pool,
+        &app,
+        "33333333-3333-3333-3333-333333333333",
+        "findme_too",
+    )
+    .await;
 
     // A substring match returns both "findme" users but never the caller.
     let resp = authed(&app, &alice, "GET", "/users/search?q=findme", None).await;
@@ -195,9 +293,21 @@ async fn search_finds_other_users_by_username(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn friend_request_accept_makes_both_friends(pool: PgPool) {
-    let app = app(pool);
-    let a = bootstrap(&app, "44444444-4444-4444-4444-444444444441", "afriend").await;
-    let b = bootstrap(&app, "44444444-4444-4444-4444-444444444442", "bfriend").await;
+    let app = app(pool.clone());
+    let a = seed_user(
+        &pool,
+        &app,
+        "44444444-4444-4444-4444-444444444441",
+        "afriend",
+    )
+    .await;
+    let b = seed_user(
+        &pool,
+        &app,
+        "44444444-4444-4444-4444-444444444442",
+        "bfriend",
+    )
+    .await;
 
     // A sends B a friend request.
     let resp = authed(
@@ -255,9 +365,21 @@ async fn friend_request_accept_makes_both_friends(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn friend_request_decline_leaves_no_friendship(pool: PgPool) {
-    let app = app(pool);
-    let a = bootstrap(&app, "55555555-5555-5555-5555-555555555551", "decliner_a").await;
-    let b = bootstrap(&app, "55555555-5555-5555-5555-555555555552", "decliner_b").await;
+    let app = app(pool.clone());
+    let a = seed_user(
+        &pool,
+        &app,
+        "55555555-5555-5555-5555-555555555551",
+        "decliner_a",
+    )
+    .await;
+    let b = seed_user(
+        &pool,
+        &app,
+        "55555555-5555-5555-5555-555555555552",
+        "decliner_b",
+    )
+    .await;
 
     let req = body_json(
         authed(
@@ -316,9 +438,15 @@ async fn friend_request_decline_leaves_no_friendship(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn presence_heartbeat_status_and_friends_view(pool: PgPool) {
-    let app = app(pool);
-    let host = bootstrap(&app, "66666666-6666-6666-6666-666666666661", "phost").await;
-    let viewer = bootstrap(&app, "66666666-6666-6666-6666-666666666662", "pviewer").await;
+    let app = app(pool.clone());
+    let host = seed_user(&pool, &app, "66666666-6666-6666-6666-666666666661", "phost").await;
+    let viewer = seed_user(
+        &pool,
+        &app,
+        "66666666-6666-6666-6666-666666666662",
+        "pviewer",
+    )
+    .await;
 
     // Make them friends so the viewer can observe the host's presence.
     let req = body_json(
@@ -386,7 +514,7 @@ async fn presence_heartbeat_status_and_friends_view(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn world_session_open_is_idempotent_patch_and_close(pool: PgPool) {
     let app = app(pool.clone());
-    let host = bootstrap(&app, "77777777-7777-7777-7777-777777777771", "whost").await;
+    let host = seed_user(&pool, &app, "77777777-7777-7777-7777-777777777771", "whost").await;
 
     // Open: idempotent — a second open returns the same row (one open per host).
     let first = body_json(
@@ -430,7 +558,13 @@ async fn world_session_open_is_idempotent_patch_and_close(pool: PgPool) {
     assert_eq!(patched["invitePolicy"], "friends_of_friends");
 
     // A non-host cannot patch the world.
-    let other = bootstrap(&app, "77777777-7777-7777-7777-777777777772", "wother").await;
+    let other = seed_user(
+        &pool,
+        &app,
+        "77777777-7777-7777-7777-777777777772",
+        "wother",
+    )
+    .await;
     let resp = authed(
         &app,
         &other,
@@ -472,8 +606,14 @@ async fn world_session_open_is_idempotent_patch_and_close(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn join_ticket_happy_path_for_joinable_friend(pool: PgPool) {
     let app = app(pool.clone());
-    let host = bootstrap(&app, "88888888-8888-8888-8888-888888888881", "jhost").await;
-    let guest = bootstrap(&app, "88888888-8888-8888-8888-888888888882", "jguest").await;
+    let host = seed_user(&pool, &app, "88888888-8888-8888-8888-888888888881", "jhost").await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "88888888-8888-8888-8888-888888888882",
+        "jguest",
+    )
+    .await;
 
     // Befriend so the guest is allowed to join.
     let req = body_json(
@@ -544,7 +684,13 @@ async fn join_ticket_happy_path_for_joinable_friend(pool: PgPool) {
     assert_eq!(relay_count, 1);
 
     // A non-friend stranger is forbidden from grabbing a ticket.
-    let stranger = bootstrap(&app, "88888888-8888-8888-8888-888888888883", "jstranger").await;
+    let stranger = seed_user(
+        &pool,
+        &app,
+        "88888888-8888-8888-8888-888888888883",
+        "jstranger",
+    )
+    .await;
     let resp = authed(
         &app,
         &stranger,
