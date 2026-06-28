@@ -1,7 +1,7 @@
 // Build-time generator for `public/versions.json` — the static data that powers
 // the cascading Minecraft / Forge / Fabric / Java dropdowns in the Build detail
-// page. It mirrors the four resolvers the old Strapi `minecraft-versions` plugin
-// called, but resolves everything once at build time instead of per-request.
+// page. Resolves the Minecraft / Forge / Fabric / Java options once at build
+// time instead of per-request.
 //
 // `@loontail/minecraft-kit` is a Node-only, build-script-only dependency (it
 // re-exports node:child_process/fs/os and must never enter the browser bundle).
