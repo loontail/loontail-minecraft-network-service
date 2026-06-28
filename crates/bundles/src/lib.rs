@@ -25,13 +25,13 @@ use loontail_core::AppState;
 /// catalog owns a 1:1 bundle per build). [`provision_bundle`] inserts the draft row
 /// and its on-disk directory; [`provision_bundle_row`] + [`ensure_bundle_dir`] are
 /// the tx-capable split (DB row inside the caller's transaction, dir after commit).
-/// [`find_bundle_id_by_slug`] is the find half. [`delete_owned_bundle`] (and its
-/// tx-capable parts [`delete_bundle_row`] / [`bundle_slug_by_id`] / [`remove_bundle_dir`])
-/// fully tear a bundle down (row + CASCADE artifacts + on-disk files) so deleting a
-/// build never orphans its bundle.
+/// [`find_bundle_id_by_slug`] is the find half. The tx-capable teardown parts
+/// [`delete_bundle_row`] / [`bundle_slug_by_id`] / [`remove_bundle_dir`] let the
+/// catalog tear a bundle down (row + CASCADE artifacts + on-disk files) inside its
+/// own delete transaction so deleting a build never orphans its bundle.
 pub use repo::{
-    bundle_slug_by_id, delete_bundle_row, delete_owned_bundle, ensure_bundle_dir,
-    find_bundle_id_by_slug, provision_bundle, provision_bundle_row, remove_bundle_dir,
+    bundle_slug_by_id, delete_bundle_row, ensure_bundle_dir, find_bundle_id_by_slug,
+    provision_bundle, provision_bundle_row, remove_bundle_dir,
 };
 
 /// Hard cap on a single bundle upload (ZIP archive or individual file): 10 GiB,

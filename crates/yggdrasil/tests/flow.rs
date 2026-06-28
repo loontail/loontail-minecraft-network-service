@@ -32,6 +32,8 @@ fn test_config() -> Config {
         http_port: 0,
         database_url: String::new(),
         cors_allowed_origins: vec![],
+        trusted_proxy: false,
+        metrics_token: None,
         session_ttl: Duration::from_secs(86_400),
         heartbeat_timeout: Duration::from_secs(60),
         max_players_per_world: 5,
@@ -214,6 +216,52 @@ async fn authenticate_validate_refresh_invalidate(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn access_token_is_hashed_at_rest(pool: PgPool) {
+    // SEC-5: the access token returned to the client is plaintext, but the row
+    // persists only its SHA-256 hash. A read-only DB leak must not yield a usable
+    // token, yet validate (hash-on-lookup) must still resolve it.
+    let (_uid, _profile_uuid) = seed_user(&pool, "vault", "hunter2").await;
+    let app = app(pool.clone());
+
+    let (status, body) = post_json(
+        &app,
+        "/authserver/authenticate",
+        json!({ "username": "vault", "password": "hunter2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "authenticate ok: {body}");
+    let access = body["accessToken"].as_str().unwrap().to_string();
+
+    // The stored access_token column is NOT the plaintext...
+    let plaintext_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM yggdrasil_tokens WHERE access_token = $1")
+            .bind(&access)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(plaintext_rows, 0, "plaintext token must not be stored");
+
+    // ...it is the SHA-256 hash of the plaintext.
+    let hash = loontail_core::auth::hash_token(&access);
+    let hashed_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM yggdrasil_tokens WHERE access_token = $1")
+            .bind(&hash)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(hashed_rows, 1, "row holds the hash, not the plaintext");
+
+    // The plaintext still validates (hash-on-lookup).
+    let (status, _) = post_json(
+        &app,
+        "/authserver/validate",
+        json!({ "accessToken": access }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn join_then_has_joined_returns_signed_profile(pool: PgPool) {
     let (uid, profile_uuid) = seed_user(&pool, "bob", "swordfish").await;
 
@@ -294,9 +342,11 @@ async fn join_then_has_joined_returns_signed_profile(pool: PgPool) {
     let value: Value = serde_json::from_slice(&decoded).unwrap();
     assert_eq!(value["profileId"].as_str(), Some(profile_uuid.as_str()));
     assert_eq!(value["profileName"].as_str(), Some("bob"));
+    // why (BUG-2): the texture URL is derived from the authoritative profile_uuid,
+    // not the row's stored (reconciliation-stale) file_url.
     assert_eq!(
         value["textures"]["SKIN"]["url"].as_str(),
-        Some("/api/yggdrasil/textures/skins/bob.png")
+        Some(format!("/api/yggdrasil/textures/{profile_uuid}/skin").as_str())
     );
     assert_eq!(
         value["textures"]["SKIN"]["metadata"]["model"].as_str(),

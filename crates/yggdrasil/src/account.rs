@@ -139,6 +139,7 @@ async fn register(
     Json(body): Json<RegisterRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     let user = register_user(&state.pool, &body.username, &body.email, &body.password).await?;
+    loontail_core::analytics::spawn_event(&state, "new_user", Some(user.id), None);
     auth_response(&state, user).await
 }
 

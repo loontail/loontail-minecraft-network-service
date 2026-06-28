@@ -8,6 +8,17 @@ pub struct Config {
     pub http_port: u16,
     pub database_url: String,
     pub cors_allowed_origins: Vec<String>,
+    /// When `true`, the service runs behind a trusted reverse proxy and the client
+    /// IP is taken from the proxy-set `X-Forwarded-For` / `X-Real-IP` headers
+    /// rather than the transport peer (which is the proxy itself). When `false`
+    /// (the default) the transport peer is used and forwarding headers are never
+    /// trusted. Set `TRUSTED_PROXY=true` only when the immediate peer is a proxy
+    /// you control that overwrites these headers. See `crates/server/src/ip.rs`.
+    pub trusted_proxy: bool,
+    /// Optional shared bearer token that authorizes `GET /metrics` for an ops
+    /// scraper (e.g. Prometheus) that can't carry an admin session. When unset,
+    /// `/metrics` is reachable only by an authenticated admin. Env: `METRICS_TOKEN`.
+    pub metrics_token: Option<String>,
     pub session_ttl: Duration,
     pub heartbeat_timeout: Duration,
     pub max_players_per_world: i32,
@@ -140,6 +151,11 @@ impl Config {
             http_port: parse_env("HTTP_PORT", 8080),
             database_url,
             cors_allowed_origins,
+            // why: default CLOSED. Forwarding headers are client-controllable, so we
+            // only honour them when explicitly told the immediate peer is a trusted
+            // proxy that overwrites them.
+            trusted_proxy: parse_bool_env("TRUSTED_PROXY", false),
+            metrics_token: env::var("METRICS_TOKEN").ok().filter(|t| !t.is_empty()),
             session_ttl: Duration::from_secs(parse_env("SESSION_TTL_SECONDS", 86_400)),
             heartbeat_timeout: Duration::from_secs(parse_env("HEARTBEAT_TIMEOUT_SECONDS", 60)),
             max_players_per_world: parse_env("MAX_PLAYERS_PER_WORLD", 5),
@@ -230,5 +246,71 @@ where
     match env::var(key) {
         Ok(value) => value.parse().unwrap_or(default),
         Err(_) => default,
+    }
+}
+
+/// Parse a boolean env var, accepting `true`/`1`/`yes`/`on` (case-insensitive) as
+/// `true` and everything else (including unset) as `default`.
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    match env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
+}
+
+/// Split a configured public URL into its `scheme://authority` origin (when it
+/// carries one) and its path portion. A path-only value (e.g. the default
+/// `/api/yggdrasil`) yields `(None, "/api/yggdrasil")`. The textures crate uses the
+/// origin to absolutize asset URLs; the server uses the path to mount the yggdrasil
+/// router. Single source of truth so both halves stay consistent.
+pub fn parse_public_url(public_url: &str) -> (Option<String>, &str) {
+    let Some(scheme_end) = public_url.find("://") else {
+        return (None, public_url);
+    };
+    let after_scheme = scheme_end + 3;
+    let rest = &public_url[after_scheme..];
+    let authority_len = rest.find('/').unwrap_or(rest.len());
+    if authority_len == 0 {
+        // `scheme://` with no authority — treat the remainder as a path.
+        return (None, &public_url[after_scheme..]);
+    }
+    let origin = public_url[..after_scheme + authority_len].to_string();
+    (Some(origin), &public_url[after_scheme + authority_len..])
+}
+
+#[cfg(test)]
+mod public_url_tests {
+    use super::parse_public_url;
+
+    #[test]
+    fn full_url_splits_into_origin_and_path() {
+        assert_eq!(
+            parse_public_url("https://auth.loontail.com/api/yggdrasil"),
+            (
+                Some("https://auth.loontail.com".to_string()),
+                "/api/yggdrasil"
+            )
+        );
+        assert_eq!(
+            parse_public_url("http://localhost:8080/api/yggdrasil"),
+            (Some("http://localhost:8080".to_string()), "/api/yggdrasil")
+        );
+    }
+
+    #[test]
+    fn bare_origin_has_empty_path() {
+        assert_eq!(
+            parse_public_url("https://auth.loontail.com"),
+            (Some("https://auth.loontail.com".to_string()), "")
+        );
+    }
+
+    #[test]
+    fn path_only_has_no_origin() {
+        assert_eq!(parse_public_url("/api/yggdrasil"), (None, "/api/yggdrasil"));
+        assert_eq!(parse_public_url(""), (None, ""));
     }
 }

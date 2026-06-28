@@ -33,7 +33,9 @@ use crate::state::AppState;
 pub mod csrf;
 pub mod yggdrasil;
 
-pub use csrf::{generate_csrf_token, verify_csrf, CSRF_COOKIE_NAME, CSRF_HEADER_NAME};
+pub use csrf::{
+    constant_time_eq, generate_csrf_token, verify_csrf, CSRF_COOKIE_NAME, CSRF_HEADER_NAME,
+};
 pub use yggdrasil::{
     cleanup_expired_yggdrasil, invalidate_all_yggdrasil_for_user, invalidate_yggdrasil,
     issue_yggdrasil_tokens, refresh_yggdrasil, validate_yggdrasil, YggdrasilTokens, YggdrasilUser,
@@ -162,7 +164,9 @@ pub fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+/// Extract a named cookie value from request headers. Returns the first match,
+/// trimmed. The single source of truth for cookie parsing across the workspace.
+pub fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let header = headers.get(COOKIE)?.to_str().ok()?;
     header.split(';').find_map(|pair| {
         let pair = pair.trim();

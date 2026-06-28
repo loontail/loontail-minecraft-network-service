@@ -28,6 +28,23 @@ pub fn effective_status(
     }
 }
 
+/// Resolve a friend's displayed status + joinable world from their effective base
+/// status and any active friend-of-friends guest world. A friend connected as a
+/// guest to a friend-of-friends world is shown as in-world (pointing at that world)
+/// so the viewer can ask to join it; host-only worlds never surface a `guest_world_id`
+/// here, so the guest stays plain online and no join/invite affordance appears.
+fn derive_friend_status(
+    base: UserStatus,
+    guest_world_id: Option<Uuid>,
+    current_world_session_id: Option<Uuid>,
+) -> (UserStatus, Option<Uuid>) {
+    match guest_world_id {
+        Some(world) if base != UserStatus::Offline => (UserStatus::InWorld, Some(world)),
+        _ if base.is_in_world() => (base, current_world_session_id),
+        _ => (base, None),
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct PresenceRow {
     status: String,
@@ -215,7 +232,7 @@ pub async fn set_status(
 #[derive(sqlx::FromRow)]
 struct FriendPresenceRow {
     id: Uuid,
-    minecraft_uuid: String,
+    minecraft_uuid: Option<String>,
     username: String,
     avatar_url: Option<String>,
     skin_hash: Option<String>,
@@ -296,19 +313,12 @@ pub async fn friends_with_presence(
                 }
                 _ => UserStatus::Offline,
             };
-            // A friend connected as a guest to a friend-of-friends world is shown
-            // as in-world (pointing at that world) so the viewer can ask to join
-            // it. host-only worlds never surface here, so the guest stays plain
-            // "online" and no join/invite affordance appears.
-            let (status, current_world_session_id) = match row.guest_world_id {
-                Some(world) if base != UserStatus::Offline => (UserStatus::InWorld, Some(world)),
-                _ if base.is_in_world() => (base, row.current_world_session_id),
-                _ => (base, None),
-            };
+            let (status, current_world_session_id) =
+                derive_friend_status(base, row.guest_world_id, row.current_world_session_id);
             FriendPresence {
                 user: UserDto {
                     id: row.id,
-                    minecraft_uuid: Some(row.minecraft_uuid),
+                    minecraft_uuid: row.minecraft_uuid,
                     username: row.username,
                     avatar_url: row.avatar_url,
                     skin_hash: row.skin_hash,
@@ -331,4 +341,83 @@ pub async fn friends_presence(
 ) -> AppResult<Json<Vec<FriendPresence>>> {
     let friends = friends_with_presence(&state, auth.id()).await?;
     Ok(Json(friends))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{derive_friend_status, effective_status};
+    use chrono::{Duration, Utc};
+    use loontail_core::models::UserStatus;
+    use std::time::Duration as StdDuration;
+    use uuid::Uuid;
+
+    #[test]
+    fn effective_status_keeps_stored_when_within_timeout() {
+        let timeout = StdDuration::from_secs(60);
+        let fresh = Utc::now() - Duration::seconds(30);
+        assert_eq!(
+            effective_status(UserStatus::Joinable, fresh, timeout),
+            UserStatus::Joinable
+        );
+    }
+
+    #[test]
+    fn effective_status_collapses_to_offline_past_timeout() {
+        let timeout = StdDuration::from_secs(60);
+        let stale = Utc::now() - Duration::seconds(120);
+        assert_eq!(
+            effective_status(UserStatus::InWorld, stale, timeout),
+            UserStatus::Offline
+        );
+    }
+
+    #[test]
+    fn effective_status_boundary_just_inside_timeout_keeps_stored() {
+        // A heartbeat just inside the window (timeout - 1s) must NOT collapse.
+        let timeout = StdDuration::from_secs(60);
+        let boundary = Utc::now() - Duration::seconds(59);
+        assert_eq!(
+            effective_status(UserStatus::Online, boundary, timeout),
+            UserStatus::Online
+        );
+    }
+
+    #[test]
+    fn derive_friend_status_promotes_live_guest_to_in_world() {
+        let world = Uuid::new_v4();
+        // An online friend who is an active guest in a FoF world surfaces as in-world,
+        // pointing at the guest world (not their own current_world_session_id).
+        let other = Uuid::new_v4();
+        assert_eq!(
+            derive_friend_status(UserStatus::Online, Some(world), Some(other)),
+            (UserStatus::InWorld, Some(world))
+        );
+    }
+
+    #[test]
+    fn derive_friend_status_offline_guest_is_not_promoted() {
+        let world = Uuid::new_v4();
+        // An offline friend never surfaces a joinable world even if a stale guest row exists.
+        assert_eq!(
+            derive_friend_status(UserStatus::Offline, Some(world), None),
+            (UserStatus::Offline, None)
+        );
+    }
+
+    #[test]
+    fn derive_friend_status_in_world_without_guest_keeps_own_world() {
+        let own = Uuid::new_v4();
+        assert_eq!(
+            derive_friend_status(UserStatus::InWorld, None, Some(own)),
+            (UserStatus::InWorld, Some(own))
+        );
+    }
+
+    #[test]
+    fn derive_friend_status_online_without_guest_has_no_world() {
+        assert_eq!(
+            derive_friend_status(UserStatus::Online, None, None),
+            (UserStatus::Online, None)
+        );
+    }
 }

@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{escape_like_pattern, normalize_username, User};
+use crate::models::{escape_like_pattern, is_valid_email, normalize_username, User};
 
 /// Hash a plaintext password with Argon2id (default params). The returned PHC
 /// string embeds the algorithm, params, and a per-password random salt.
@@ -311,6 +311,10 @@ pub async fn assign_or_reconcile_profile_uuid(pool: &PgPool, user: &User) -> App
     if user.profile_uuid.as_deref() == Some(desired.as_str()) {
         return Ok(user.clone());
     }
+    // why (BUG-2): rewriting profile_uuid here does NOT strand the user's skin/cape.
+    // `users.profile_uuid` is authoritative and the textures handlers resolve the
+    // user by it before joining skins/capes via `users.id`, so the rows' denormalized
+    // profile_uuid is free to go stale without orphaning the texture.
     let updated = sqlx::query_as::<_, User>(
         "UPDATE users SET profile_uuid = $2, updated_at = now() WHERE id = $1 RETURNING *",
     )
@@ -388,10 +392,14 @@ pub async fn register_user(
     if username.is_empty() {
         return Err(AppError::BadRequest("username is required".into()));
     }
-    if email.is_empty() {
-        return Err(AppError::BadRequest("email is required".into()));
+    if !is_valid_email(email) {
+        return Err(AppError::BadRequest("a valid email is required".into()));
     }
     check_password_len(password)?;
+    // SEC-4: registration is rate-limited per client IP at the router (SEC-1) and the
+    // email is now format-validated above. Still TODO — email-confirmation
+    // (confirmed=false until a verification link is followed): deferred because there
+    // is no email-sending infrastructure in this MVP to deliver the link.
     let normalized = normalize_username(username);
     let password_hash = hash_password(password)?;
     let profile_uuid = random_profile_uuid();

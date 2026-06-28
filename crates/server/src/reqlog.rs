@@ -20,6 +20,8 @@ use chrono::Utc;
 use loontail_core::request_log::{resolve_principal, RequestLog};
 use loontail_core::AppState;
 
+use crate::ip;
+
 /// Records each served request into the observability sink. Skips the noise
 /// allowlist; resolves the principal best-effort before running the handler so a
 /// single cheap query (only when a token is present) attributes the row.
@@ -38,10 +40,8 @@ pub async fn capture(State(state): State<AppState>, request: Request, next: Next
 
     let method = request.method().as_str().to_string();
     let headers = request.headers().clone();
-    let ip = resolve_ip(
-        request.extensions().get::<ConnectInfo<SocketAddr>>(),
-        &headers,
-    );
+    let peer = ip::peer_from_extensions(request.extensions().get::<ConnectInfo<SocketAddr>>());
+    let ip = ip::client_ip(&headers, peer, state.config.trusted_proxy).map(|addr| addr.to_string());
     let user_agent = header_string(&headers, &USER_AGENT);
 
     let principal = resolve_principal(&state.pool, &headers, &state.config.admin.cookie_name).await;
@@ -74,24 +74,6 @@ pub async fn capture(State(state): State<AppState>, request: Request, next: Next
 /// are covered by their prefix).
 fn is_excluded(path: &str) -> bool {
     path == "/health" || path == "/metrics" || path == "/signaling" || path.starts_with("/relay")
-}
-
-/// Resolve the client IP: the transport peer from `ConnectInfo`, else the first
-/// hop of `X-Forwarded-For` (only reachable behind a trusted proxy that strips the
-/// socket and overwrites the header).
-fn resolve_ip(
-    connect_info: Option<&ConnectInfo<SocketAddr>>,
-    headers: &HeaderMap,
-) -> Option<String> {
-    if let Some(ConnectInfo(addr)) = connect_info {
-        return Some(addr.ip().to_string());
-    }
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(|first| first.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn content_length(headers: &HeaderMap) -> Option<i64> {

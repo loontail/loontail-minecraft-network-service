@@ -15,12 +15,13 @@ use std::time::{Duration, Instant};
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use loontail_core::config::RateLimitConfig;
 use loontail_core::AppError;
+
+use crate::ip;
 
 /// Paths that consume a token from the limiter. Matched after `NormalizePathLayer`
 /// has trimmed any trailing slash, so the bare forms below suffice.
@@ -41,20 +42,28 @@ pub struct RateLimiter {
 struct Inner {
     max_attempts: u32,
     window: Duration,
+    /// Whether the immediate peer is a trusted proxy (governs how the client IP is
+    /// derived; see [`crate::ip`]).
+    trusted_proxy: bool,
     hits: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    /// Shared bucket for credential requests whose IP can't be resolved. Keeps
+    /// such requests throttled (fail-closed) instead of bypassing the limiter.
+    unresolved: Mutex<VecDeque<Instant>>,
 }
 
 impl RateLimiter {
-    pub fn from_config(config: &RateLimitConfig) -> Self {
-        Self::new(config.max_attempts, config.window)
+    pub fn from_config(config: &RateLimitConfig, trusted_proxy: bool) -> Self {
+        Self::new(config.max_attempts, config.window, trusted_proxy)
     }
 
-    pub fn new(max_attempts: u32, window: Duration) -> Self {
+    pub fn new(max_attempts: u32, window: Duration, trusted_proxy: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
                 max_attempts,
                 window,
+                trusted_proxy,
                 hits: Mutex::new(HashMap::new()),
+                unresolved: Mutex::new(VecDeque::new()),
             }),
         }
     }
@@ -85,22 +94,32 @@ impl RateLimiter {
     fn check(&self, ip: IpAddr) -> bool {
         self.check_at(ip, Instant::now())
     }
-}
 
-/// Resolve the client IP, preferring the transport peer from `ConnectInfo`. Falls
-/// back to the first hop of `X-Forwarded-For` only when there is no peer address
-/// (e.g. behind a TRUSTED reverse proxy that strips the socket). The header is
-/// client-controllable, so this path must only be reachable behind a proxy that
-/// overwrites `X-Forwarded-For`.
-fn resolve_ip(connect_info: Option<&IpAddr>, headers: &HeaderMap) -> Option<IpAddr> {
-    if let Some(ip) = connect_info {
-        return Some(*ip);
+    /// Fail-closed bucket for credential requests with an unresolvable IP: they
+    /// all share one conservative budget so a missing IP can never bypass the
+    /// limiter on the very endpoints worth protecting (SEC-3).
+    fn check_unresolved_at(&self, now: Instant) -> bool {
+        let window = self.inner.window;
+        let max = self.inner.max_attempts as usize;
+        let mut bucket = self
+            .inner
+            .unresolved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cutoff = now.checked_sub(window).unwrap_or(now);
+        while bucket.front().is_some_and(|&t| t <= cutoff) {
+            bucket.pop_front();
+        }
+        if bucket.len() >= max {
+            return false;
+        }
+        bucket.push_back(now);
+        true
     }
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .and_then(|first| first.trim().parse::<IpAddr>().ok())
+
+    fn check_unresolved(&self) -> bool {
+        self.check_unresolved_at(Instant::now())
+    }
 }
 
 /// `axum::middleware::from_fn_with_state` entry point. Throttles only the
@@ -116,18 +135,36 @@ pub async fn rate_limit_middleware(
 
     // `into_make_service_with_connect_info::<SocketAddr>()` stashes the peer in
     // request extensions; read it there to avoid an extractor-tuple bound.
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip());
-    if let Some(ip) = resolve_ip(peer.as_ref(), request.headers()) {
-        if !limiter.check(ip) {
-            tracing::warn!(%ip, path = request.uri().path(), "rate limit exceeded");
-            return AppError::TooManyRequests.into_response();
+    let peer = ip::peer_from_extensions(request.extensions().get::<ConnectInfo<SocketAddr>>());
+    let resolved = ip::client_ip(request.headers(), peer, limiter.inner.trusted_proxy);
+
+    let allowed = match resolved {
+        Some(ip) => {
+            let ok = limiter.check(ip);
+            if !ok {
+                tracing::warn!(%ip, path = request.uri().path(), "rate limit exceeded");
+            }
+            ok
         }
+        // why: a credential path with no resolvable IP fails CLOSED into a shared
+        // conservative bucket rather than passing through unthrottled — otherwise a
+        // missing/forged source would defeat the limiter on exactly the endpoints
+        // that matter.
+        None => {
+            let ok = limiter.check_unresolved();
+            if !ok {
+                tracing::warn!(
+                    path = request.uri().path(),
+                    "rate limit exceeded (unresolved client IP)"
+                );
+            }
+            ok
+        }
+    };
+
+    if !allowed {
+        return AppError::TooManyRequests.into_response();
     }
-    // why: when no IP can be resolved we fail OPEN rather than block every caller;
-    // in production `ConnectInfo` always yields the peer, so this is dev-only.
     next.run(request).await
 }
 
@@ -138,6 +175,8 @@ fn is_throttled_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ip::client_ip;
+    use axum::http::HeaderMap;
     use std::net::Ipv4Addr;
 
     fn ip(last: u8) -> IpAddr {
@@ -146,7 +185,7 @@ mod tests {
 
     #[test]
     fn allows_up_to_limit_then_blocks() {
-        let limiter = RateLimiter::new(3, Duration::from_secs(60));
+        let limiter = RateLimiter::new(3, Duration::from_secs(60), false);
         let now = Instant::now();
         let addr = ip(1);
         assert!(limiter.check_at(addr, now));
@@ -160,7 +199,7 @@ mod tests {
 
     #[test]
     fn window_slides_and_frees_slots() {
-        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        let limiter = RateLimiter::new(2, Duration::from_secs(60), false);
         let t0 = Instant::now();
         let addr = ip(2);
         assert!(limiter.check_at(addr, t0));
@@ -173,13 +212,24 @@ mod tests {
 
     #[test]
     fn ips_are_independent() {
-        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        let limiter = RateLimiter::new(1, Duration::from_secs(60), false);
         let now = Instant::now();
         assert!(limiter.check_at(ip(3), now));
         assert!(!limiter.check_at(ip(3), now));
         assert!(
             limiter.check_at(ip(4), now),
             "a different IP has its own budget"
+        );
+    }
+
+    #[test]
+    fn unresolved_ip_fails_closed_into_shared_bucket() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60), false);
+        let now = Instant::now();
+        assert!(limiter.check_unresolved_at(now), "first unresolved allowed");
+        assert!(
+            !limiter.check_unresolved_at(now),
+            "second unresolved blocked — fail-closed, not passthrough"
         );
     }
 
@@ -193,27 +243,37 @@ mod tests {
         assert!(!is_throttled_path("/health"));
     }
 
+    /// With a peer present AND `trusted_proxy=true`, the limiter key is the XFF hop,
+    /// not the peer; with `trusted_proxy=false` it is the peer and XFF is ignored.
+    /// Asserted at the key-derivation level (`client_ip`) the limiter consumes.
     #[test]
-    fn connect_info_ip_is_preferred() {
+    fn limiter_key_follows_trusted_proxy_flag() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "9.9.9.9".parse().unwrap());
+        headers.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
         let peer = ip(5);
-        assert_eq!(resolve_ip(Some(&peer), &headers), Some(peer));
-    }
 
-    #[test]
-    fn forwarded_for_first_hop_fallback() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        // trusted_proxy=true: key is the XFF hop, NOT the peer.
+        let key_trusted = client_ip(&headers, Some(peer), true);
         assert_eq!(
-            resolve_ip(None, &headers),
-            Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)))
+            key_trusted,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            "trusted proxy → bucket by the XFF hop"
         );
-    }
+        assert_ne!(
+            key_trusted,
+            Some(peer),
+            "trusted proxy must not key on the peer"
+        );
 
-    #[test]
-    fn no_ip_when_neither_source_present() {
-        let headers = HeaderMap::new();
-        assert_eq!(resolve_ip(None, &headers), None);
+        // trusted_proxy=false: key is the peer, XFF ignored entirely.
+        assert_eq!(
+            client_ip(&headers, Some(peer), false),
+            Some(peer),
+            "untrusted → bucket by the peer, XFF ignored"
+        );
+
+        // The two keys differ, so a per-IP limiter buckets them separately — the
+        // whole point of SEC-1.
+        assert_ne!(key_trusted, client_ip(&headers, Some(peer), false));
     }
 }

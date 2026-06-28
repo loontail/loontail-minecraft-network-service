@@ -1,4 +1,5 @@
 mod infra;
+mod ip;
 mod ratelimit;
 mod reqlog;
 
@@ -89,7 +90,8 @@ async fn main() -> anyhow::Result<()> {
 /// domain, with CORS and HTTP tracing.
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config.cors_allowed_origins);
-    let limiter = ratelimit::RateLimiter::from_config(&state.config.rate_limit);
+    let limiter =
+        ratelimit::RateLimiter::from_config(&state.config.rate_limit, state.config.trusted_proxy);
 
     // Group the `/api` subtree: catalog at its root (/clients, /keywords,
     // /servers), yggdrasil nested at its configured prefix, and the bundle
@@ -154,7 +156,31 @@ fn build_router(state: AppState) -> Router {
             ratelimit::rate_limit_middleware,
         ))
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        // SEC-8: `nosniff` everywhere (not just /admin) so an uploaded `.html`/`.svg`
+        // served from textures/catalog-media/bundle routes can't be MIME-sniffed and
+        // rendered in-origin. The stricter CSP/frame/HSTS headers stay admin-scoped
+        // (see `with_security_headers`). `overriding` is a no-op on the admin subtree
+        // (it already sets the same value).
+        .layer(SetResponseHeaderLayer::overriding(
+            X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        // SEC-10: redact the query string before it reaches the tracing span so a
+        // WS `?token=` (or any `?token=` fallback) never lands in logs/proxy access
+        // logs.
+        .layer(TraceLayer::new_for_http().make_span_with(make_redacted_span))
+}
+
+/// Build the per-request tracing span WITHOUT the query string, so a `?token=`
+/// fallback on the WS upgrades (`/signaling`, `/relay/:id`) cannot leak into logs.
+fn make_redacted_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        method = %request.method(),
+        // Path only — never `request.uri()`, which includes the query.
+        path = %request.uri().path(),
+        version = ?request.version(),
+    )
 }
 
 /// Apply baseline security response headers to `router`. Scoped to the admin
@@ -198,13 +224,7 @@ fn with_security_headers(router: Router<AppState>) -> Router<AppState> {
 /// `/api` subtree; an absolute external base (e.g. `https://auth.x/api/yggdrasil`)
 /// is reduced to the same suffix so the internal routes resolve identically.
 fn yggdrasil_api_suffix(public_url: &str) -> String {
-    let path = match public_url.find("://") {
-        Some(idx) => {
-            let rest = &public_url[idx + 3..];
-            rest.find('/').map(|p| &rest[p..]).unwrap_or("")
-        }
-        None => public_url,
-    };
+    let (_, path) = loontail_core::config::parse_public_url(public_url);
     let trimmed = path.trim_end_matches('/');
     match trimmed.strip_prefix("/api") {
         Some(suffix) if !suffix.is_empty() => suffix.to_string(),

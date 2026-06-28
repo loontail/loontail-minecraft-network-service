@@ -2,6 +2,7 @@
 //! metrics, models, auth, and the in-memory realtime structures. Domain crates
 //! depend only on this crate and return `axum::Router<AppState>`.
 
+pub mod analytics;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -12,11 +13,12 @@ pub mod models;
 pub mod realtime;
 pub mod request_log;
 pub mod state;
+pub mod storage;
 
 pub use auth::{
-    bearer_token_from_headers, cleanup_expired_sessions, generate_token, hash_token, issue_session,
-    revoke_all_sessions_for_user, revoke_session, session_token_from_headers, user_from_token,
-    AdminUser, AuthUser, IssuedSession, YggdrasilUser,
+    bearer_token_from_headers, cleanup_expired_sessions, cookie_value, generate_token, hash_token,
+    issue_session, revoke_all_sessions_for_user, revoke_session, session_token_from_headers,
+    user_from_token, AdminUser, AuthUser, IssuedSession, YggdrasilUser,
 };
 pub use config::{
     AdminConfig, BundlesConfig, CatalogConfig, Config, RateLimitConfig, RequestLogConfig,

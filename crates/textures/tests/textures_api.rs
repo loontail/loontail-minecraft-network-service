@@ -377,6 +377,104 @@ async fn lookup_absent_profile_returns_null_skin_and_cape(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn skin_survives_profile_uuid_reconcile(pool: PgPool) {
+    // BUG-2: a credential-only user uploads a skin (skins row keyed by user_id with a
+    // denormalized profile_uuid = the random one). Later the user's minecraft_uuid
+    // becomes known and identity reconciliation rewrites users.profile_uuid. The skin
+    // must still be served under the NEW profile_uuid (the row's stale denormalized
+    // profile_uuid must not orphan it), and the URL the signed GameProfile embeds
+    // (`/textures/{newUuid}/skin`) must resolve.
+    use loontail_core::identity::{assign_or_reconcile_profile_uuid, get_user};
+
+    let (textures, _root, _state) = app(pool.clone());
+
+    // register → launcher login → upload skin, all under the random profile_uuid.
+    let user = admin_create_user(
+        &pool,
+        AdminCreateUser {
+            username: "rebound".into(),
+            email: "rebound@example.com".into(),
+            password: "pw".into(),
+            minecraft_uuid: None,
+            is_admin: false,
+        },
+    )
+    .await
+    .unwrap();
+    let user_id = user.id;
+    let old_uuid = user.profile_uuid.clone().unwrap();
+    let token = issue_session(&pool, user_id, Duration::from_secs(900))
+        .await
+        .unwrap()
+        .token;
+
+    assert_eq!(
+        put_texture(&textures, "skin", &token, &png(64, 64), Some("SLIM")).await,
+        StatusCode::NO_CONTENT
+    );
+
+    // The skin serves under the original profile_uuid.
+    let (status, json) = get_json(&textures, &format!("/textures/{old_uuid}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["skin"]["url"], format!("/textures/{old_uuid}/skin"));
+
+    // The in-game bootstrap binds a minecraft_uuid to this row; the next login
+    // reconciles profile_uuid := undash(minecraft_uuid). Simulate that here.
+    let minecraft_uuid = "11111111-2222-3333-4444-555555555555";
+    let new_uuid = "11111111222233334444555555555555";
+    sqlx::query("UPDATE users SET minecraft_uuid = $2 WHERE id = $1")
+        .bind(user_id)
+        .bind(minecraft_uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bound = get_user(&pool, user_id).await.unwrap();
+    let reconciled = assign_or_reconcile_profile_uuid(&pool, &bound)
+        .await
+        .unwrap();
+    assert_eq!(reconciled.profile_uuid.as_deref(), Some(new_uuid));
+    assert_ne!(old_uuid, new_uuid);
+
+    // The skins row still carries the OLD denormalized profile_uuid...
+    let stale: String = sqlx::query_scalar("SELECT profile_uuid FROM skins WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stale, old_uuid,
+        "row's denormalized profile_uuid went stale"
+    );
+
+    // ...yet the skin is served under the NEW profile_uuid (joined via users.id).
+    let (status, json) = get_json(&textures, &format!("/textures/{new_uuid}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["skin"]["url"], format!("/textures/{new_uuid}/skin"));
+    assert_eq!(json["skin"]["variant"], "SLIM");
+
+    // The PNG byte route the signed GameProfile texture URL points at resolves.
+    let png_req = Request::builder()
+        .method("GET")
+        .uri(format!("/textures/{new_uuid}/skin"))
+        .body(Body::empty())
+        .unwrap();
+    let png_resp = textures.clone().oneshot(png_req).await.unwrap();
+    assert_eq!(png_resp.status(), StatusCode::OK);
+    assert_eq!(
+        png_resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+
+    // The OLD uuid no longer resolves (no user carries it now).
+    let (status, json) = get_json(&textures, &format!("/textures/{old_uuid}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, serde_json::json!({ "skin": null, "cape": null }));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn upload_requires_auth(pool: PgPool) {
     let (router, _root, _s) = app(pool.clone());
 
@@ -460,7 +558,8 @@ async fn admin_lists_and_deletes_a_skin(pool: PgPool) {
     );
 
     // Admin listing sees exactly that one row with the right fields.
-    let (status, json) = admin_request(&admin, "GET", "/admin/textures/skins", Some(&admin_token)).await;
+    let (status, json) =
+        admin_request(&admin, "GET", "/admin/textures/skins", Some(&admin_token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["meta"]["total"], 1);
     assert_eq!(json["data"][0]["username"], "painter");
@@ -488,7 +587,8 @@ async fn admin_lists_and_deletes_a_skin(pool: PgPool) {
     assert_eq!(json["deleted"], true);
     assert!(!std::path::Path::new(&file_path).exists());
 
-    let (_status, json) = admin_request(&admin, "GET", "/admin/textures/skins", Some(&admin_token)).await;
+    let (_status, json) =
+        admin_request(&admin, "GET", "/admin/textures/skins", Some(&admin_token)).await;
     assert_eq!(json["meta"]["total"], 0);
 }
 
@@ -502,8 +602,13 @@ async fn admin_search_filters_by_username(pool: PgPool) {
     put_texture(&textures, "skin", &t1, &png(64, 64), None).await;
     put_texture(&textures, "skin", &t2, &png(64, 64), None).await;
 
-    let (status, json) =
-        admin_request(&admin, "GET", "/admin/textures/skins?q=alic", Some(&admin_token)).await;
+    let (status, json) = admin_request(
+        &admin,
+        "GET",
+        "/admin/textures/skins?q=alic",
+        Some(&admin_token),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["meta"]["total"], 1);
     assert_eq!(json["data"][0]["username"], "alice");
@@ -527,14 +632,20 @@ async fn admin_orphans_scan_and_purge(pool: PgPool) {
     std::fs::remove_file(&file_path).unwrap();
 
     // The orphan scan reports the row whose file is gone.
-    let (status, json) = admin_request(&admin, "GET", "/admin/textures/orphans", Some(&admin_token)).await;
+    let (status, json) =
+        admin_request(&admin, "GET", "/admin/textures/orphans", Some(&admin_token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["skins"].as_array().unwrap().len(), 1);
     assert_eq!(json["skins"][0]["profileUuid"], profile_uuid);
 
     // Purge removes it.
-    let (status, json) =
-        admin_request(&admin, "POST", "/admin/textures/purge-missing", Some(&admin_token)).await;
+    let (status, json) = admin_request(
+        &admin,
+        "POST",
+        "/admin/textures/purge-missing",
+        Some(&admin_token),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["purgedSkins"], 1);
 

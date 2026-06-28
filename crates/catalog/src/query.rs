@@ -34,7 +34,7 @@ fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
+            b'%' if i + 3 <= bytes.len() => {
                 let hi = hex_val(bytes[i + 1]);
                 let lo = hex_val(bytes[i + 2]);
                 if let (Some(hi), Some(lo)) = (hi, lo) {
@@ -87,5 +87,21 @@ mod tests {
     fn empty_locale_value_is_none() {
         let q = CatalogQuery::parse("locale=");
         assert!(q.locale.is_none());
+    }
+
+    #[test]
+    fn decodes_full_escape_at_end_of_value() {
+        // A complete `%XX` whose `%` sits at the final possible index must decode,
+        // not be dropped (the old `i + 2 < len` guard mishandled this boundary).
+        let q = CatalogQuery::parse("locale=en%2Dus");
+        assert_eq!(q.locale.as_deref(), Some("en-us"));
+    }
+
+    #[test]
+    fn trailing_partial_escape_is_preserved_literally() {
+        // A truncated escape at the very end is emitted verbatim rather than
+        // panicking or swallowing bytes.
+        assert_eq!(percent_decode("ab%"), "ab%");
+        assert_eq!(percent_decode("ab%2"), "ab%2");
     }
 }

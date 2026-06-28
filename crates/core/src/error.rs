@@ -97,3 +97,15 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+/// Whether a sqlx error is a Postgres unique-constraint violation, regardless of
+/// which constraint. Callers that need the specific constraint name inspect
+/// `db.constraint()` themselves.
+pub fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+/// Whether a sqlx error is a Postgres foreign-key-constraint violation.
+pub fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_foreign_key_violation())
+}

@@ -42,30 +42,31 @@ pub struct ProfileIdentity {
 }
 
 struct SkinRow {
-    file_url: String,
     variant: String,
 }
 
-struct CapeRow {
-    file_url: String,
-}
-
 async fn load_skin(pool: &PgPool, user_id: Uuid) -> AppResult<Option<SkinRow>> {
-    let row = sqlx::query_as::<_, (String, String)>(
-        "SELECT file_url, variant FROM skins WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(file_url, variant)| SkinRow { file_url, variant }))
-}
-
-async fn load_cape(pool: &PgPool, user_id: Uuid) -> AppResult<Option<CapeRow>> {
-    let row = sqlx::query_as::<_, (String,)>("SELECT file_url FROM capes WHERE user_id = $1")
+    let row = sqlx::query_as::<_, (String,)>("SELECT variant FROM skins WHERE user_id = $1")
         .bind(user_id)
         .fetch_optional(pool)
         .await?;
-    Ok(row.map(|(file_url,)| CapeRow { file_url }))
+    Ok(row.map(|(variant,)| SkinRow { variant }))
+}
+
+async fn has_cape(pool: &PgPool, user_id: Uuid) -> AppResult<bool> {
+    Ok(
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM capes WHERE user_id = $1)")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// The server-relative URL a profile's texture is served from. Derived from the
+/// authoritative `profile_uuid` (BUG-2): the skin/cape row's stored `file_url` can
+/// embed a now-stale UUID after identity reconciliation, so we never read it back.
+fn texture_url(profile_uuid: &str, kind: &str) -> String {
+    format!("/textures/{profile_uuid}/{kind}")
 }
 
 /// Absolutize a stored (server-relative) texture URL against the public base URL,
@@ -102,16 +103,16 @@ pub async fn build_profile(
     signing: Option<&SigningKey>,
 ) -> Result<GameProfile, YggError> {
     let skin = load_skin(pool, identity.user_id).await?;
-    let cape = load_cape(pool, identity.user_id).await?;
+    let cape = has_cape(pool, identity.user_id).await?;
 
     let mut properties = Vec::new();
-    if skin.is_some() || cape.is_some() {
+    if skin.is_some() || cape {
         let skin_input = skin.map(|s| SkinInput {
-            url: absolutize(public_base, &s.file_url),
+            url: absolutize(public_base, &texture_url(&identity.profile_uuid, "skin")),
             variant: parse_variant(&s.variant),
         });
-        let cape_input = cape.map(|c| CapeInput {
-            url: absolutize(public_base, &c.file_url),
+        let cape_input = cape.then(|| CapeInput {
+            url: absolutize(public_base, &texture_url(&identity.profile_uuid, "cape")),
         });
 
         let value = build_textures_value(TexturesPayloadInput {

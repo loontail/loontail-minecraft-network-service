@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::auth::{bearer_token_from_headers, hash_token};
+use crate::auth::{hash_token, session_token_from_headers};
 
 /// Live tail ring capacity. Holds the most recent records in memory for the
 /// `/admin/logs/tail` snapshot without touching Postgres.
@@ -193,8 +193,8 @@ async fn insert_batch(pool: &PgPool, batch: &[RequestLog]) -> Result<(), sqlx::E
 /// hourly cleanup tick; returns the number of rows removed.
 pub async fn delete_request_logs_older_than(pool: &PgPool, days: i64) -> Result<u64, sqlx::Error> {
     let affected =
-        sqlx::query("DELETE FROM request_logs WHERE ts < now() - ($1 * interval '1 day')")
-            .bind(days as f64)
+        sqlx::query("DELETE FROM request_logs WHERE ts < now() - make_interval(days => $1::int)")
+            .bind(days)
             .execute(pool)
             .await?
             .rows_affected();
@@ -213,7 +213,7 @@ pub async fn resolve_principal(
     headers: &axum::http::HeaderMap,
     cookie_name: &str,
 ) -> ResolvedPrincipal {
-    let token = match session_token(headers, cookie_name) {
+    let token = match session_token_from_headers(headers, cookie_name) {
         Some(token) => token,
         // No credential at all: skip the DB entirely.
         None => return ResolvedPrincipal::anon(),
@@ -248,24 +248,6 @@ pub async fn resolve_principal(
         // A token was presented but is expired/revoked/blocked/unknown.
         None => ResolvedPrincipal::anon(),
     }
-}
-
-/// Resolve the raw session token a request presented — `Authorization: Bearer`
-/// first, then the admin session cookie.
-fn session_token(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<String> {
-    if let Some(token) = bearer_token_from_headers(headers) {
-        return Some(token);
-    }
-    cookie_value(headers, cookie_name).map(str::to_string)
-}
-
-fn cookie_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
-    let header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    header.split(';').find_map(|pair| {
-        let pair = pair.trim();
-        let (k, v) = pair.split_once('=')?;
-        (k.trim() == name).then(|| v.trim())
-    })
 }
 
 #[cfg(test)]
@@ -331,17 +313,17 @@ mod tests {
     #[test]
     fn session_token_prefers_bearer_then_cookie() {
         let mut headers = HeaderMap::new();
-        assert_eq!(session_token(&headers, "loontail_admin"), None);
+        assert_eq!(session_token_from_headers(&headers, "loontail_admin"), None);
 
         headers.insert(COOKIE, "loontail_admin=cookietok".parse().unwrap());
         assert_eq!(
-            session_token(&headers, "loontail_admin").as_deref(),
+            session_token_from_headers(&headers, "loontail_admin").as_deref(),
             Some("cookietok")
         );
 
         headers.insert(AUTHORIZATION, "Bearer bearertok".parse().unwrap());
         assert_eq!(
-            session_token(&headers, "loontail_admin").as_deref(),
+            session_token_from_headers(&headers, "loontail_admin").as_deref(),
             Some("bearertok"),
             "bearer wins over cookie"
         );

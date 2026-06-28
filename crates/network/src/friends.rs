@@ -5,17 +5,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use loontail_core::auth::AuthUser;
-use loontail_core::error::{AppError, AppResult};
+use loontail_core::error::{is_unique_violation, AppError, AppResult};
 use loontail_core::models::UserDto;
 use loontail_core::AppState;
 use loontail_core::Metrics;
 use loontail_core::ServerEvent;
 
 use crate::presence::{self, FriendPresence};
-
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
-}
 
 /// `GET /friends` — the user's friends with their effective presence.
 pub async fn list_friends(
@@ -50,12 +46,12 @@ struct FriendRequestRow {
     status: String,
     created_at: DateTime<Utc>,
     from_id: Uuid,
-    from_minecraft_uuid: String,
+    from_minecraft_uuid: Option<String>,
     from_username: String,
     from_avatar_url: Option<String>,
     from_skin_hash: Option<String>,
     to_id: Uuid,
-    to_minecraft_uuid: String,
+    to_minecraft_uuid: Option<String>,
     to_username: String,
     to_avatar_url: Option<String>,
     to_skin_hash: Option<String>,
@@ -69,14 +65,14 @@ impl From<FriendRequestRow> for FriendRequestDto {
             created_at: row.created_at,
             from_user: UserDto {
                 id: row.from_id,
-                minecraft_uuid: Some(row.from_minecraft_uuid),
+                minecraft_uuid: row.from_minecraft_uuid,
                 username: row.from_username,
                 avatar_url: row.from_avatar_url,
                 skin_hash: row.from_skin_hash,
             },
             to_user: UserDto {
                 id: row.to_id,
-                minecraft_uuid: Some(row.to_minecraft_uuid),
+                minecraft_uuid: row.to_minecraft_uuid,
                 username: row.to_username,
                 avatar_url: row.to_avatar_url,
                 skin_hash: row.to_skin_hash,

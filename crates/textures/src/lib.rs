@@ -42,14 +42,7 @@ fn absolutize_url(config: &Config, relative: &str) -> String {
 /// `None` for path-only values (e.g. the default `/api/yggdrasil`), in which case
 /// texture URLs stay server-relative.
 fn public_origin(public_url: &str) -> Option<String> {
-    let scheme_end = public_url.find("://")?;
-    let after_scheme = scheme_end + 3;
-    let rest = &public_url[after_scheme..];
-    let authority_len = rest.find('/').unwrap_or(rest.len());
-    if authority_len == 0 {
-        return None;
-    }
-    Some(public_url[..after_scheme + authority_len].to_string())
+    loontail_core::config::parse_public_url(public_url).0
 }
 
 /// Build the textures domain router. The server crate nests this under `/textures`.

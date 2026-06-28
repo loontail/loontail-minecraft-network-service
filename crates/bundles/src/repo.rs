@@ -175,26 +175,6 @@ pub fn remove_bundle_dir(storage_root: &str, slug: &str) {
     }
 }
 
-/// Fully delete a build's owned bundle: look up its slug, drop the `bundles` row
-/// (CASCADE removes `bundle_artifacts`), then best-effort remove the on-disk
-/// `{storage_root}/builds/{slug}` tree. Reusable across crates — the catalog calls
-/// this when a build (catalog client) that owns a bundle is deleted, since the
-/// `ON DELETE SET NULL` FK would otherwise orphan the bundle, its artifacts, and its
-/// files forever. The directory is removed after the row delete and independently of
-/// it (a stale dir never blocks the DB delete).
-pub async fn delete_owned_bundle(
-    pool: &PgPool,
-    storage_root: &str,
-    bundle_id: Uuid,
-) -> AppResult<()> {
-    let slug = bundle_slug_by_id(pool, bundle_id).await?;
-    delete_bundle_row(pool, bundle_id).await?;
-    if let Some(slug) = slug {
-        remove_bundle_dir(storage_root, &slug);
-    }
-    Ok(())
-}
-
 pub async fn set_status(
     pool: &PgPool,
     id: Uuid,
@@ -273,11 +253,18 @@ pub async fn upsert_artifact(
     Ok(())
 }
 
-/// Replace all artifact rows for a bundle with a freshly scanned set.
+/// Replace a bundle's artifact rows with a freshly scanned set, in one transaction:
+/// upsert every scanned entry (preserving each existing row's `download_once`), then
+/// delete any row whose `relative_path` is absent from the new scan. An empty scan
+/// clears all of the bundle's rows. This is the full-replace half of a build re-upload
+/// (the disk files are replaced separately by the caller).
 pub async fn upsert_scan(pool: &PgPool, bundle_id: Uuid, scan: &[ScanEntry]) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+
+    let mut paths: Vec<String> = Vec::with_capacity(scan.len());
     for entry in scan {
-        upsert_artifact(
-            pool,
+        upsert_artifact_tx(
+            &mut tx,
             bundle_id,
             &entry.relative_path,
             &entry.name,
@@ -288,7 +275,60 @@ pub async fn upsert_scan(pool: &PgPool, bundle_id: Uuid, scan: &[ScanEntry]) -> 
             entry.file_modified_at,
         )
         .await?;
+        paths.push(entry.relative_path.clone());
     }
+
+    sqlx::query(
+        "DELETE FROM bundle_artifacts WHERE bundle_id = $1 AND relative_path <> ALL($2::text[])",
+    )
+    .bind(bundle_id)
+    .bind(&paths)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Transaction-executor variant of [`upsert_artifact`] (same `ON CONFLICT` semantics,
+/// including the deliberate `download_once` preservation) so a whole scan upserts and
+/// prunes atomically inside one transaction.
+#[allow(clippy::too_many_arguments)]
+async fn upsert_artifact_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    bundle_id: Uuid,
+    relative_path: &str,
+    name: &str,
+    category: &str,
+    size: i64,
+    sha256: Option<&str>,
+    is_dir: bool,
+    file_modified_at: Option<DateTime<Utc>>,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO bundle_artifacts
+            (bundle_id, relative_path, name, category, size, sha256, is_dir, download_once, file_modified_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, false, $8)
+        ON CONFLICT (bundle_id, relative_path) DO UPDATE
+        SET name = EXCLUDED.name,
+            category = EXCLUDED.category,
+            size = EXCLUDED.size,
+            sha256 = EXCLUDED.sha256,
+            is_dir = EXCLUDED.is_dir,
+            file_modified_at = EXCLUDED.file_modified_at
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(relative_path)
+    .bind(name)
+    .bind(category)
+    .bind(size)
+    .bind(sha256)
+    .bind(is_dir)
+    .bind(file_modified_at)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

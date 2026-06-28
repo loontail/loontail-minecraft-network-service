@@ -1,11 +1,12 @@
 use std::sync::atomic::Ordering;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use loontail_core::auth::{bearer_token_from_headers, AdminUser};
 use loontail_core::AppState;
 
 /// `GET /health` — liveness + database connectivity. Returns 503 if the DB
@@ -30,7 +31,17 @@ pub async fn health(State(state): State<AppState>) -> Response {
 }
 
 /// `GET /metrics` — Prometheus-style text exposition.
-pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Gated (SEC-2): operational telemetry is not anonymous. Accepts either an
+/// authenticated admin session OR, for header-only ops scrapers, the configured
+/// `METRICS_TOKEN` as a Bearer. Returns 401/403 otherwise. Nothing scrapes this
+/// anonymously (the request log even excludes `/metrics`), so the default is
+/// admin-only.
+pub async fn metrics_handler(state: State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(rejection) = authorize_metrics(&state, &headers).await {
+        return rejection;
+    }
+    let State(state) = state;
     let metrics = &state.metrics;
     let mut body = String::new();
     let lines = [
@@ -72,5 +83,33 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         state.realtime.signaling.connected_users()
     ));
 
-    ([("content-type", "text/plain; version=0.0.4")], body)
+    ([("content-type", "text/plain; version=0.0.4")], body).into_response()
+}
+
+/// Authorize a `/metrics` request: a valid admin session, or a Bearer matching the
+/// configured `METRICS_TOKEN` (constant-time). On failure returns the rejection
+/// `Response` to short-circuit with.
+async fn authorize_metrics(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    if let (Some(expected), Some(presented)) = (
+        &state.config.metrics_token,
+        bearer_token_from_headers(headers),
+    ) {
+        if loontail_core::auth::constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
+            return Ok(());
+        }
+    }
+
+    // Fall back to an admin session (cookie or Bearer). Build minimal request parts
+    // carrying the headers so the standard extractor logic applies.
+    let mut req = axum::http::Request::new(axum::body::Body::empty());
+    *req.headers_mut() = headers.clone();
+    let (mut parts, _) = req.into_parts();
+    match <AdminUser as axum::extract::FromRequestParts<AppState>>::from_request_parts(
+        &mut parts, state,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.into_response()),
+    }
 }

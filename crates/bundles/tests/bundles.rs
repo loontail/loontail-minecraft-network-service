@@ -95,6 +95,23 @@ fn build_test_zip() -> Vec<u8> {
     buf
 }
 
+/// Build an in-memory ZIP from `(path, contents)` pairs, Stored (uncompressed).
+fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut buf);
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (path, contents) in entries {
+            zip.start_file(*path, opts).unwrap();
+            zip.write_all(contents).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    buf
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -468,6 +485,86 @@ async fn reupload_preserves_download_once(pool: PgPool) {
         download_once,
         "re-upload preserved the download_once toggle"
     );
+}
+
+/// BUG-6 + BUG-7 regression: a full archive re-upload is a REPLACE. Files dropped
+/// from the new ZIP must vanish from both disk and the artifact rows; files added must
+/// appear; survivors stay. After uploading B over A, exactly B's set remains and the
+/// served manifest reflects only B (the manifest is filtered to on-disk files, which
+/// after this fix are exactly B).
+#[sqlx::test(migrations = "../../migrations")]
+async fn reupload_replaces_disk_and_rows(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "replace-build";
+
+    create_build(&state, &token, slug).await;
+
+    // Archive A: a.txt + b.txt.
+    let zip_a = build_zip(&[("a.txt", b"alpha"), ("b.txt", b"bravo")]);
+    assert_eq!(
+        upload_zip(&state, &token, slug, &zip_a).await,
+        StatusCode::OK
+    );
+
+    let files_root = tmp.path().join("builds").join(slug).join("files");
+    assert_eq!(std::fs::read(files_root.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(files_root.join("b.txt")).unwrap(), b"bravo");
+
+    let count_path = |path: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+                 WHERE b.slug = $1 AND a.relative_path = $2",
+            )
+            .bind(slug)
+            .bind(path)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    assert_eq!(count_path("a.txt").await, 1, "a.txt row after A");
+    assert_eq!(count_path("b.txt").await, 1, "b.txt row after A");
+
+    // Archive B: a.txt (changed) + c.txt — b.txt is gone, c.txt is new.
+    let zip_b = build_zip(&[("a.txt", b"alpha2"), ("c.txt", b"charlie")]);
+    assert_eq!(
+        upload_zip(&state, &token, slug, &zip_b).await,
+        StatusCode::OK
+    );
+
+    // Disk: b.txt gone, c.txt present, a.txt updated.
+    assert!(!files_root.join("b.txt").exists(), "b.txt file removed");
+    assert_eq!(std::fs::read(files_root.join("a.txt")).unwrap(), b"alpha2");
+    assert_eq!(std::fs::read(files_root.join("c.txt")).unwrap(), b"charlie");
+
+    // Rows: b.txt row gone, a.txt + c.txt present.
+    assert_eq!(count_path("b.txt").await, 0, "b.txt row removed (BUG-6)");
+    assert_eq!(count_path("a.txt").await, 1, "a.txt row kept");
+    assert_eq!(count_path("c.txt").await, 1, "c.txt row added");
+
+    // Exactly B's file set remains (root files only — no dir rows for top-level files).
+    let remaining: Vec<String> = sqlx::query_scalar(
+        "SELECT a.relative_path FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+         WHERE b.slug = $1 AND a.is_dir = false ORDER BY a.relative_path",
+    )
+    .bind(slug)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, vec!["a.txt".to_string(), "c.txt".to_string()]);
+
+    // Manifest contract: reflects only B's files, none of A's dropped files.
+    let json = read_manifest(tmp.path(), slug);
+    let root = json["root"].as_array().unwrap();
+    let paths: Vec<&str> = root.iter().filter_map(|e| e["path"].as_str()).collect();
+    assert!(paths.contains(&"a.txt"), "manifest lists a.txt");
+    assert!(paths.contains(&"c.txt"), "manifest lists c.txt");
+    assert!(!paths.contains(&"b.txt"), "manifest drops b.txt");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

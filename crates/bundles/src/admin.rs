@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::storage::{
     delete_build_files, disk_space, ensure_build_dir, files_path, normalize_relative_path,
-    split_relative_path,
+    split_relative_path, validate_slug,
 };
 use crate::{repo, storage, MAX_UPLOAD_BYTES};
 
@@ -90,6 +90,7 @@ pub async fn get(
     _admin: AdminUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<BundleWithArtifacts>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let artifacts = repo::list_artifacts(&state.pool, bundle.id).await?;
     Ok(Json(BundleWithArtifacts { bundle, artifacts }))
@@ -102,6 +103,7 @@ pub async fn update(
     Path(slug): Path<String>,
     Json(body): Json<UpdateBundle>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let updated = repo::update_bundle_meta(
         &state.pool,
@@ -120,6 +122,9 @@ pub async fn delete(
     _admin: AdminUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
+    // why (SEC-6): reject a traversal slug before any FS join, not relying on the
+    // DB-existence invariant.
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     delete_build_files(storage_root(&state), &slug)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("delete build files: {e}")))?;
@@ -137,6 +142,7 @@ pub async fn upload_archive(
     Path(slug): Path<String>,
     mut multipart: Multipart,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
 
     let root = storage_root(&state);
@@ -193,6 +199,16 @@ async fn ingest_archive(state: &AppState, bundle: &Bundle, tmp: &std::path::Path
     let files_for_task = files_root.clone();
     // Extraction + hashing are blocking; run off the async runtime.
     let scan = tokio::task::spawn_blocking(move || -> AppResult<_> {
+        // why: an archive re-upload fully replaces the build, so wipe the prior
+        // files/ subtree first — otherwise a file dropped from the new ZIP lingers
+        // on disk. Only files/ is cleared (the temp .zip.tmp lives in the build root,
+        // a sibling of files/, so it survives) and is recreated for extraction.
+        if files_for_task.exists() {
+            std::fs::remove_dir_all(&files_for_task)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("clear files dir: {e}")))?;
+        }
+        std::fs::create_dir_all(&files_for_task)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("recreate files dir: {e}")))?;
         extract_zip(&tmp_for_task, &files_for_task)?;
         let _ = std::fs::remove_file(&tmp_for_task);
         scan_directory(&files_for_task)
@@ -254,6 +270,7 @@ pub async fn upload_file(
     Path(slug): Path<String>,
     mut multipart: Multipart,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
 
     let root = storage_root(&state);
@@ -372,6 +389,7 @@ pub async fn create_folder(
     Path(slug): Path<String>,
     Json(body): Json<CreateFolder>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let normalized = normalize_relative_path(body.relative_path.trim(), "relativePath")?;
 
@@ -420,6 +438,7 @@ pub async fn delete_file(
     _admin: AdminUser,
     Path((slug, entry_id)): Path<(String, Uuid)>,
 ) -> AppResult<Json<serde_json::Value>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let entry = artifact_in_bundle(&state, bundle.id, entry_id).await?;
 
@@ -460,6 +479,7 @@ pub async fn toggle_download_once(
     Path((slug, entry_id)): Path<(String, Uuid)>,
     Json(body): Json<ToggleDownloadOnce>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let entry = artifact_in_bundle(&state, bundle.id, entry_id).await?;
     repo::set_download_once(&state.pool, entry.id, body.download_once).await?;
@@ -476,6 +496,7 @@ pub async fn rename_file(
     Path((slug, entry_id)): Path<(String, Uuid)>,
     Json(body): Json<RenameFile>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let entry = artifact_in_bundle(&state, bundle.id, entry_id).await?;
     let normalized = normalize_relative_path(body.new_relative_path.trim(), "newRelativePath")?;
@@ -495,6 +516,7 @@ pub async fn move_file(
     Path((slug, entry_id)): Path<(String, Uuid)>,
     Json(body): Json<MoveFile>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let entry = artifact_in_bundle(&state, bundle.id, entry_id).await?;
 
@@ -519,6 +541,7 @@ pub async fn move_files(
     if body.ids.is_empty() {
         return Err(AppError::BadRequest("ids must be a non-empty array".into()));
     }
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let files_root = files_path(storage_root(&state), &slug);
 
@@ -646,6 +669,7 @@ pub async fn rehash_file(
     _admin: AdminUser,
     Path((slug, entry_id)): Path<(String, Uuid)>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let entry = artifact_in_bundle(&state, bundle.id, entry_id).await?;
     if entry.is_dir {
@@ -679,6 +703,7 @@ pub async fn bulk_delete(
     if body.ids.is_empty() {
         return Err(AppError::BadRequest("ids must be a non-empty array".into()));
     }
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let files_root = files_path(storage_root(&state), &slug);
 
@@ -715,6 +740,7 @@ pub async fn validate(
     _admin: AdminUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<ValidateResult>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let artifacts = repo::list_artifacts(&state.pool, bundle.id).await?;
     let files_root = files_path(storage_root(&state), &slug);
@@ -758,6 +784,7 @@ pub async fn regenerate_manifest(
     _admin: AdminUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<Bundle>> {
+    validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     repo::set_status(&state.pool, bundle.id, "processing", None).await?;
     match regenerate(&state, &bundle).await {

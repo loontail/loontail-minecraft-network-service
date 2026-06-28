@@ -6,14 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rand::RngCore;
-
-/// A fresh 6-byte revision, hex-encoded (12 chars). New on every upload.
-pub fn revision_hex() -> String {
-    let mut bytes = [0u8; 6];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
+pub use loontail_core::storage::{revision_hex, unlink_quiet, write_file};
 
 /// Build the absolute on-disk path for a media file under the storage root.
 /// File name is `{role}-{revision}.{ext}`, nested under the client's UUID dir.
@@ -39,25 +32,4 @@ pub fn public_url(client_id: &str, role: &str, revision: &str, ext: &str) -> Str
 /// race directory creation; per-client subdirs are created on demand at write.
 pub async fn ensure_dir(storage_root: &str) -> std::io::Result<()> {
     tokio::fs::create_dir_all(storage_root).await
-}
-
-/// Write the media bytes to disk, returning the path written. The parent dir is
-/// created on demand (idempotent) so a stale/missing storage tree self-heals.
-pub async fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, bytes).await
-}
-
-/// Best-effort unlink of a media file. A missing file is not an error (the row's
-/// file may already be gone after a crash or manual cleanup).
-pub async fn unlink_quiet(path: &Path) {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            tracing::warn!(error = %err, path = %path.display(), "failed to unlink catalog media");
-        }
-    }
 }

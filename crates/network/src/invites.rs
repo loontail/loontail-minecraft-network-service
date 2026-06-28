@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use loontail_core::auth::AuthUser;
-use loontail_core::error::{AppError, AppResult};
+use loontail_core::error::{is_unique_violation, AppError, AppResult};
 use loontail_core::models::{JoinTicketDto, UserDto};
 use loontail_core::AppState;
 use loontail_core::ServerEvent;
@@ -44,10 +44,6 @@ pub struct WorldInviteDto {
     pub inviter: UserDto,
     pub invitee: UserDto,
     pub host: UserDto,
-}
-
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
 async fn build_dto(pool: &PgPool, row: InviteRow) -> AppResult<WorldInviteDto> {

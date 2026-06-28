@@ -88,22 +88,24 @@ pub async fn serve_file(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("serve file: {e}")))?
         .into_response();
 
-    // ServeFile guesses by extension; force a known type for the launcher's files.
-    if let Some(ct) = guess_content_type(&normalized) {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
-    }
+    // why (SEC-8): never let `ServeFile`'s extension guess decide the type for
+    // uploaded build files — an uploaded `.html`/`.svg` served as text/html could
+    // render same-origin. Force a known type for the launcher's real files and
+    // `application/octet-stream` (a download, never rendered) for everything else.
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type_for(&normalized)),
+    );
     Ok(response)
 }
 
-/// Override `ServeFile`'s guess for the file types the launcher serves; `None`
-/// keeps whatever `ServeFile` inferred.
-fn guess_content_type(path: &str) -> Option<&'static str> {
+/// Map a build file's extension to a fixed Content-Type. Unknown types are served
+/// as `application/octet-stream` so they download rather than render in-origin.
+fn content_type_for(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
-        "json" => Some("application/json"),
-        "jar" => Some("application/java-archive"),
-        _ => None,
+        "json" => "application/json",
+        "jar" => "application/java-archive",
+        _ => "application/octet-stream",
     }
 }

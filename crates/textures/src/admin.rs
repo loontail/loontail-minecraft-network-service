@@ -93,7 +93,8 @@ pub struct DeleteAck {
 }
 
 async fn delete(state: &AppState, kind: Kind, user_id: &str) -> AppResult<Json<DeleteAck>> {
-    let id = Uuid::parse_str(user_id).map_err(|_| AppError::BadRequest("invalid user id".into()))?;
+    let id =
+        Uuid::parse_str(user_id).map_err(|_| AppError::BadRequest("invalid user id".into()))?;
     let removed = store::admin_delete_by_user(&state.pool, kind, id).await?;
     if let Some(path) = &removed {
         store::unlink_quiet(std::path::Path::new(path)).await;

@@ -92,6 +92,7 @@ pub async fn bootstrap(
     .await?;
 
     Metrics::incr(&state.metrics.bootstraps);
+    loontail_core::analytics::spawn_event(&state, "bootstrap", Some(user.id), None);
 
     Ok(Json(BootstrapResponse {
         user: UserDto::from(user),

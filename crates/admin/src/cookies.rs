@@ -58,10 +58,5 @@ pub fn clear_session_cookies(headers: &mut HeaderMap, cookie_name: &str) {
 /// Read a named cookie value from request headers (used to find the raw session
 /// token on logout, where there is no extractor to lean on).
 pub fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    header.split(';').find_map(|pair| {
-        let pair = pair.trim();
-        let (k, v) = pair.split_once('=')?;
-        (k.trim() == name).then(|| v.trim().to_string())
-    })
+    loontail_core::cookie_value(headers, name).map(str::to_string)
 }

@@ -629,11 +629,11 @@ async fn analytics_timeseries_reads_user_events(pool: PgPool) {
         .await
         .unwrap();
 
-    // Record a couple of bootstrap events via the helper.
-    loontail_admin::analytics::record_event(&state, "bootstrap", None, None)
+    // Record a couple of bootstrap events via the core write primitive.
+    loontail_core::analytics::record_event(&state, "bootstrap", None, None)
         .await
         .unwrap();
-    loontail_admin::analytics::record_event(&state, "bootstrap", None, None)
+    loontail_core::analytics::record_event(&state, "bootstrap", None, None)
         .await
         .unwrap();
 

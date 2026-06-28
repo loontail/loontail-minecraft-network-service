@@ -137,6 +137,35 @@ async fn authed(
         .unwrap()
 }
 
+/// Make `a` and `b` friends via the request/accept flow.
+async fn befriend(app: &Router, a: &TestUser, b: &TestUser) {
+    let req = body_json(
+        authed(
+            app,
+            a,
+            "POST",
+            "/friends/requests",
+            Some(json!({ "toUserId": b.id })),
+        )
+        .await,
+    )
+    .await;
+    let request_id = req["id"].as_str().unwrap();
+    let resp = authed(
+        app,
+        b,
+        "POST",
+        &format!("/friends/requests/{request_id}/accept"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "friend accept should succeed"
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn bootstrap_binds_identity_and_me_returns_user_and_presence(pool: PgPool) {
     let app = app(pool.clone());
@@ -735,4 +764,448 @@ async fn join_ticket_happy_path_for_joinable_friend(pool: PgPool) {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// BUG-1: a credential-only friend (registered, never bootstrapped → NULL
+/// `minecraft_uuid`) must not 500 the friends/requests/presence endpoints. The row
+/// structs used to decode the nullable column into a non-`Option` `String`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn credential_only_friend_does_not_500_friend_endpoints(pool: PgPool) {
+    let app = app(pool.clone());
+
+    // `caller` is a fully-bootstrapped user; `creduser` registers but NEVER
+    // bootstraps, so its minecraft_uuid stays NULL (migration 0003 drops NOT NULL).
+    let caller = seed_user(
+        &pool,
+        &app,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1",
+        "callerb1",
+    )
+    .await;
+    let (cred_id, cred_token) = mint_session(&pool, "creduser").await;
+    let cred = TestUser {
+        token: cred_token,
+        id: cred_id.to_string(),
+    };
+
+    // Sanity: the credential-only user genuinely has NULL minecraft_uuid.
+    let mc: Option<String> = sqlx::query_scalar("SELECT minecraft_uuid FROM users WHERE id = $1")
+        .bind(cred_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        mc.is_none(),
+        "credential-only user must carry NULL minecraft_uuid"
+    );
+
+    // caller sends a request to the credential-only user. Building the request DTO
+    // reads the credential-only user's NULL minecraft_uuid — this 500'd before the fix.
+    let resp = authed(
+        &app,
+        &caller,
+        "POST",
+        "/friends/requests",
+        Some(json!({ "toUserId": cred.id })),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "creating a request to a credential-only user must be 200, not 500"
+    );
+    let req = body_json(resp).await;
+    let request_id = req["id"].as_str().unwrap().to_string();
+    assert!(
+        req["toUser"]["minecraftUuid"].is_null(),
+        "credential-only user's minecraftUuid serializes as null"
+    );
+
+    // The credential-only user can list it as incoming (DTO assembly again).
+    let incoming = authed(&app, &cred, "GET", "/friends/requests/incoming", None).await;
+    assert_eq!(incoming.status(), StatusCode::OK);
+    assert_eq!(body_json(incoming).await.as_array().unwrap().len(), 1);
+
+    // caller lists it as outgoing.
+    let outgoing = authed(&app, &caller, "GET", "/friends/requests/outgoing", None).await;
+    assert_eq!(outgoing.status(), StatusCode::OK);
+
+    // The credential-only user accepts → both become friends, then both list and
+    // both presence endpoints must be 200 with the credential-only user present.
+    let accept = authed(
+        &app,
+        &cred,
+        "POST",
+        &format!("/friends/requests/{request_id}/accept"),
+        None,
+    )
+    .await;
+    assert_eq!(accept.status(), StatusCode::OK);
+
+    for (user, label) in [(&caller, "caller"), (&cred, "credential-only")] {
+        let friends = authed(&app, user, "GET", "/friends", None).await;
+        assert_eq!(friends.status(), StatusCode::OK, "GET /friends for {label}");
+        let presence = authed(&app, user, "GET", "/presence/friends", None).await;
+        assert_eq!(
+            presence.status(),
+            StatusCode::OK,
+            "GET /presence/friends for {label}"
+        );
+    }
+
+    // caller's friends list must include the credential-only user with null uuid.
+    let caller_friends = body_json(authed(&app, &caller, "GET", "/friends", None).await).await;
+    let arr = caller_friends.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["username"], "creduser");
+    assert!(arr[0]["minecraftUuid"].is_null());
+}
+
+/// ARCH-1: the bootstrap hot path now emits a `bootstrap` analytics event off-thread,
+/// so the admin dashboard timeseries (which reads `user_events`) is no longer empty in
+/// production. The write is fire-and-forget, so poll briefly for the row, then run the
+/// same aggregation the admin timeseries query uses and confirm it counts the event.
+#[sqlx::test(migrations = "../../migrations")]
+async fn bootstrap_emits_user_event_read_by_aggregation(pool: PgPool) {
+    let app = app(pool.clone());
+    let user = seed_user(
+        &pool,
+        &app,
+        "cccccccc-cccc-cccc-cccc-ccccccccccc1",
+        "analyticsuser",
+    )
+    .await;
+    let user_id = uuid::Uuid::parse_str(&user.id).unwrap();
+
+    // The event write is spawned (off the request), so poll until it lands.
+    let mut events = 0i64;
+    for _ in 0..40 {
+        events = sqlx::query_scalar(
+            "SELECT count(*) FROM user_events WHERE event_type = 'bootstrap' AND user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if events > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        events, 1,
+        "bootstrap must write exactly one user_events row"
+    );
+
+    // Mirror the admin timeseries aggregation (date_trunc bucketed count over the
+    // indexed (event_type, created_at) range) to confirm the read side picks it up.
+    let bucketed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_events \
+         WHERE event_type = 'bootstrap' AND created_at > now() - interval '7 days'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bucketed, 1, "admin aggregation reads the bootstrap event");
+}
+
+/// BUG-3: a PATCH that transitions a world open→closed must run the same cleanup as
+/// DELETE — close the world's active relay sessions, reset host presence to plain
+/// online + null current_world_session_id, and zero current_players.
+#[sqlx::test(migrations = "../../migrations")]
+async fn patch_world_session_closed_runs_cleanup(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
+        "patchhost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2",
+        "patchguest",
+    )
+    .await;
+
+    // Host opens a world and enters it (presence points at the world).
+    let world =
+        body_json(authed(&app, &host, "POST", "/world-sessions", Some(json!({}))).await).await;
+    let world_id = world["id"].as_str().unwrap().to_string();
+    let resp = authed(
+        &app,
+        &host,
+        "POST",
+        "/presence/status",
+        Some(json!({ "status": "inWorld", "currentWorldSessionId": world_id })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Seed an ACTIVE relay session + an inflated player count directly, simulating a
+    // guest in-world (the relay WS path can't be driven through oneshot).
+    sqlx::query(
+        "INSERT INTO relay_sessions (world_session_id, host_user_id, guest_user_id, status) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'active')",
+    )
+    .bind(&world_id)
+    .bind(&host.id)
+    .bind(&guest.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE world_sessions SET current_players = 3 WHERE id = $1::uuid")
+        .bind(&world_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // PATCH the world to status=closed.
+    let resp = authed(
+        &app,
+        &host,
+        "PATCH",
+        &format!("/world-sessions/{world_id}"),
+        Some(json!({ "status": "closed" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let patched = body_json(resp).await;
+    assert_eq!(patched["status"], "closed");
+    assert_eq!(
+        patched["currentPlayers"], 0,
+        "current_players zeroed on close"
+    );
+
+    // Relay sessions for the world are all closed.
+    let active_relays: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM relay_sessions WHERE world_session_id = $1::uuid AND status = 'active'",
+    )
+    .bind(&world_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        active_relays, 0,
+        "active relay sessions are closed on PATCH-close"
+    );
+
+    // Host presence is back to plain online with no current world.
+    let (status, current): (String, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT status, current_world_session_id FROM presence WHERE user_id = $1::uuid",
+    )
+    .bind(&host.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "online", "host presence reset to online");
+    assert!(current.is_none(), "host current_world_session_id nulled");
+
+    // current_players is zeroed in the row, too.
+    let players: i32 =
+        sqlx::query_scalar("SELECT current_players FROM world_sessions WHERE id = $1::uuid")
+            .bind(&world_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(players, 0);
+}
+
+/// TEST-1: friend-of-friend eligibility is re-validated at accept time, not just at
+/// request time. A FoF requester legitimately creates a join-request (policy is FoF
+/// AND they are a friend of an active member). If that trust link is then severed
+/// before the host approves, accept must 403 — the host approving must not admit a
+/// guest whose only path in has disappeared.
+#[sqlx::test(migrations = "../../migrations")]
+async fn fof_eligibility_revalidated_at_accept(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd1",
+        "fofhost",
+    )
+    .await;
+    let member = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd2",
+        "fofmember",
+    )
+    .await;
+    let requester = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd3",
+        "fofreq",
+    )
+    .await;
+
+    // member is a direct friend of host; requester is a friend of member only (the
+    // friend-of-friend trust link), NOT a friend of host.
+    befriend(&app, &host, &member).await;
+    befriend(&app, &member, &requester).await;
+
+    // Host opens an inWorld friends_of_friends world.
+    let world =
+        body_json(authed(&app, &host, "POST", "/world-sessions", Some(json!({}))).await).await;
+    let world_id = world["id"].as_str().unwrap().to_string();
+    authed(
+        &app,
+        &host,
+        "PATCH",
+        &format!("/world-sessions/{world_id}"),
+        Some(json!({ "invitePolicy": "friends_of_friends" })),
+    )
+    .await;
+    authed(
+        &app,
+        &host,
+        "POST",
+        "/presence/status",
+        Some(json!({ "status": "inWorld", "currentWorldSessionId": world_id })),
+    )
+    .await;
+
+    // member is an ACTIVE guest in the world (the live FoF anchor for requester).
+    sqlx::query(
+        "INSERT INTO relay_sessions (world_session_id, host_user_id, guest_user_id, status) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'active')",
+    )
+    .bind(&world_id)
+    .bind(&host.id)
+    .bind(&member.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // requester legitimately creates a join-request: not a host friend, but policy is
+    // FoF and they are a friend of the active member.
+    let resp = authed(
+        &app,
+        &requester,
+        "POST",
+        &format!("/world-sessions/{world_id}/join-requests"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "FoF requester may create a join-request while the trust link is live"
+    );
+    let req_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // Sever the trust link: the anchoring member leaves (relay closed). The FoF path
+    // for requester is now gone.
+    sqlx::query("UPDATE relay_sessions SET status = 'closed' WHERE guest_user_id = $1::uuid")
+        .bind(&member.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Host approves — but re-validation at accept must now reject the stale request.
+    let resp = authed(
+        &app,
+        &host,
+        "POST",
+        &format!("/join-requests/{req_id}/accept"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "accept must re-check FoF eligibility and reject once the link is severed"
+    );
+
+    // No relay session was minted for the rejected requester.
+    let minted: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM relay_sessions WHERE guest_user_id = $1::uuid")
+            .bind(&requester.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        minted, 0,
+        "no ticket/relay issued for the rejected requester"
+    );
+}
+
+/// TEST-1: the capacity gate rejects a join once the world is at max_players. The
+/// atomic in-relay admission gate can't be driven through oneshot, but the
+/// join-ticket handler's capacity precheck is — inflate current_players to the cap
+/// and the next ticket request must 409, not over-admit.
+#[sqlx::test(migrations = "../../migrations")]
+async fn join_ticket_rejected_when_world_at_capacity(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee1",
+        "caphost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee2",
+        "capguest",
+    )
+    .await;
+    befriend(&app, &host, &guest).await;
+
+    // Host opens a 1-slot world and is joinable.
+    let world = body_json(
+        authed(
+            &app,
+            &host,
+            "POST",
+            "/world-sessions",
+            Some(json!({ "maxPlayers": 1 })),
+        )
+        .await,
+    )
+    .await;
+    let world_id = world["id"].as_str().unwrap().to_string();
+    authed(
+        &app,
+        &host,
+        "POST",
+        "/presence/status",
+        Some(json!({ "status": "joinable", "currentWorldSessionId": world_id })),
+    )
+    .await;
+
+    // Fill the single slot.
+    sqlx::query("UPDATE world_sessions SET current_players = 1 WHERE id = $1::uuid")
+        .bind(&world_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = authed(
+        &app,
+        &guest,
+        "POST",
+        &format!("/world-sessions/{world_id}/join-ticket"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "a full world must reject a new join-ticket with 409"
+    );
+
+    // No relay session was created for the rejected guest.
+    let relays: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM relay_sessions WHERE guest_user_id = $1::uuid")
+            .bind(&guest.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(relays, 0);
 }

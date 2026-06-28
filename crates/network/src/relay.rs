@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use loontail_core::auth::{self, hash_token};
 use loontail_core::error::{AppError, AppResult};
-use loontail_core::realtime::PendingPeer;
+use loontail_core::realtime::{PendingPeer, RelayRole};
 use loontail_core::AppState;
 use loontail_core::Metrics;
 
@@ -79,18 +79,20 @@ pub async fn relay_ws(
         return Err(AppError::Conflict("relay session is closed".into()));
     }
 
-    match query.role.as_str() {
+    let role = match query.role.as_str() {
         "host" => {
             let user = auth::user_from_token(&state.pool, &token).await?;
             if user.id != relay.host_user_id {
                 return Err(AppError::Forbidden);
             }
+            RelayRole::Host
         }
         "guest" => {
             validate_guest_ticket(&state, &relay, &token).await?;
+            RelayRole::Guest
         }
         _ => return Err(AppError::BadRequest("role must be host or guest".into())),
-    }
+    };
 
     let world_session_id = relay.world_session_id;
     let guest_user_id = relay.guest_user_id;
@@ -99,6 +101,7 @@ pub async fn relay_ws(
             socket,
             state,
             relay_session_id,
+            role,
             world_session_id,
             guest_user_id,
         )
@@ -152,11 +155,13 @@ async fn handle_relay(
     socket: WebSocket,
     state: AppState,
     relay_session_id: Uuid,
+    role: RelayRole,
     world_session_id: Uuid,
     guest_user_id: Option<Uuid>,
 ) {
-    // Are we the second party? If so, a peer is already waiting.
-    let pending = state.realtime.relay.take(relay_session_id);
+    // Are we the second party? If so, a peer of the OPPOSITE role is already
+    // waiting. A same-role waiter is left parked and we fall through to park.
+    let pending = state.realtime.relay.take(relay_session_id, role);
 
     match pending {
         Some(peer) => {
@@ -197,20 +202,29 @@ async fn handle_relay(
             }
         }
         None => {
-            // First party: park our socket and wait for the peer to pipe.
+            // First party: park our socket and wait for the peer to pipe. If
+            // the slot is already occupied (a same-role waiter or a
+            // double-connect), park hands our socket back; refuse this
+            // connection cleanly so the original waiter keeps its slot.
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            state.realtime.relay.park(
+            let refused = state.realtime.relay.park(
                 relay_session_id,
+                role,
                 PendingPeer {
                     socket,
                     done: done_tx,
                 },
             );
+            if refused.is_some() {
+                return;
+            }
 
             let _ = tokio::time::timeout(RENDEZVOUS_TIMEOUT, done_rx).await;
 
-            // Clean up if we timed out before a peer arrived.
-            let _ = state.realtime.relay.take(relay_session_id);
+            // Clean up if we timed out before a peer arrived. This drops only
+            // our own parked socket: had a peer paired, `take` would already
+            // have removed it, so anything still here is ours.
+            let _ = state.realtime.relay.remove_waiting(relay_session_id);
         }
     }
 }
@@ -318,6 +332,7 @@ async fn pipe(host: WebSocket, guest: WebSocket, state: &AppState) {
 }
 
 /// A peer frame's disposition after counting forwarded bytes.
+#[cfg_attr(test, derive(Debug))]
 enum Forward {
     /// Forward this frame to the other side.
     Send(Message),
@@ -337,5 +352,59 @@ fn classify(message: Message, bytes_counter: &std::sync::atomic::AtomicU64) -> F
         Message::Text(text) => Forward::Send(Message::Text(text)),
         Message::Close(_) => Forward::Stop,
         _ => Forward::Skip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify, Forward};
+    use axum::extract::ws::Message;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn binary_frame_is_forwarded_and_metered() {
+        let counter = AtomicU64::new(0);
+        let payload = vec![1u8, 2, 3, 4];
+        match classify(Message::Binary(payload.clone().into()), &counter) {
+            Forward::Send(Message::Binary(data)) => assert_eq!(data, payload),
+            other => panic!("binary should forward as binary: {other:?}"),
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            4,
+            "forwarded binary bytes are metered"
+        );
+    }
+
+    #[test]
+    fn text_frame_is_forwarded_without_metering() {
+        let counter = AtomicU64::new(0);
+        match classify(Message::Text("hi".into()), &counter) {
+            Forward::Send(Message::Text(t)) => assert_eq!(t.as_str(), "hi"),
+            other => panic!("text should forward as text: {other:?}"),
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "text frames are not byte-metered"
+        );
+    }
+
+    #[test]
+    fn close_frame_stops_the_tunnel() {
+        let counter = AtomicU64::new(0);
+        assert!(matches!(
+            classify(Message::Close(None), &counter),
+            Forward::Stop
+        ));
+    }
+
+    #[test]
+    fn ping_frame_is_skipped() {
+        let counter = AtomicU64::new(0);
+        assert!(matches!(
+            classify(Message::Ping(Vec::new().into()), &counter),
+            Forward::Skip
+        ));
     }
 }

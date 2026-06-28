@@ -23,10 +23,14 @@ use loontail_yggdrasil_protocol::uuid::undash_uuid;
 use crate::store::{self, Kind};
 use crate::{absolutize_url, relative_texture_url, MAX_UPLOAD_BYTES};
 
-/// `GET /textures/{uuid}` — the texture lookup. Reads the `skins`/`capes` rows by
-/// `profile_uuid` (undashed) and returns `{skin?:{url,variant},cape?:{url}}` with
-/// URLs absolutized. Absent entries are `null` (omitted) rather than a 404, so a
-/// profile with no textures still resolves with an empty body `{}`.
+/// `GET /textures/{uuid}` — the texture lookup. `users.profile_uuid` is the
+/// authoritative key (BUG-2 fix a): resolve the user by the requested
+/// `profile_uuid`, then read its `skins`/`capes` rows by `users.id`, so a row's
+/// denormalized `profile_uuid` going stale after identity reconciliation can never
+/// orphan the texture. The served URL is re-derived from the requested
+/// `profile_uuid` rather than the (possibly stale) stored `file_url`. Returns
+/// `{skin?:{url,variant},cape?:{url}}`; absent entries are `null`, and an unknown
+/// profile resolves to `{skin:null,cape:null}` rather than a 404.
 pub async fn lookup(
     State(state): State<AppState>,
     Path(uuid): Path<String>,
@@ -34,31 +38,56 @@ pub async fn lookup(
     let profile_uuid =
         undash_uuid(&uuid).map_err(|_| AppError::BadRequest("invalid profile uuid".into()))?;
 
-    let skin = sqlx::query_as::<_, (String, String)>(
-        "SELECT file_url, variant FROM skins WHERE profile_uuid = $1",
-    )
-    .bind(&profile_uuid)
-    .fetch_optional(&state.pool)
-    .await?
-    .map(|(file_url, variant)| LookupSkin {
-        url: absolutize_url(&state.config, &file_url),
-        variant: parse_variant(&variant),
-    });
+    let Some(user_id) = resolve_user_id(&state, &profile_uuid).await? else {
+        return Ok(Json(TexturesLookupResponse {
+            skin: None,
+            cape: None,
+        }));
+    };
 
-    let cape = sqlx::query_as::<_, (String,)>("SELECT file_url FROM capes WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
+    let skin = sqlx::query_as::<_, (String,)>("SELECT variant FROM skins WHERE user_id = $1")
+        .bind(user_id)
         .fetch_optional(&state.pool)
         .await?
-        .map(|(file_url,)| LookupCape {
-            url: absolutize_url(&state.config, &file_url),
+        .map(|(variant,)| LookupSkin {
+            url: absolutize_url(
+                &state.config,
+                &relative_texture_url(&profile_uuid, Kind::Skin),
+            ),
+            variant: parse_variant(&variant),
         });
+
+    let has_cape =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM capes WHERE user_id = $1)")
+            .bind(user_id)
+            .fetch_one(&state.pool)
+            .await?;
+    let cape = has_cape.then(|| LookupCape {
+        url: absolutize_url(
+            &state.config,
+            &relative_texture_url(&profile_uuid, Kind::Cape),
+        ),
+    });
 
     Ok(Json(TexturesLookupResponse { skin, cape }))
 }
 
-/// `GET /textures/{uuid}/{skin|cape}` — the raw PNG bytes for the profile. Reads
-/// the row's on-disk `file_path` and streams it back as `image/png`. 404 when the
-/// profile has no texture of that kind (or the file went missing).
+/// Resolve the authoritative `users.id` for a `profile_uuid`. `None` when no user
+/// carries that profile UUID. Textures are joined off this id (BUG-2 fix a) so a
+/// stale denormalized `skins/capes.profile_uuid` cannot hide a live texture.
+async fn resolve_user_id(state: &AppState, profile_uuid: &str) -> AppResult<Option<uuid::Uuid>> {
+    Ok(
+        sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE profile_uuid = $1")
+            .bind(profile_uuid)
+            .fetch_optional(&state.pool)
+            .await?,
+    )
+}
+
+/// `GET /textures/{uuid}/{skin|cape}` — the raw PNG bytes for the profile. Resolves
+/// the user by `profile_uuid` (authoritative) then reads the row's on-disk
+/// `file_path` by `users.id` and streams it back as `image/png` (BUG-2 fix a). 404
+/// when the profile has no texture of that kind (or the file went missing).
 pub async fn read_png(
     State(state): State<AppState>,
     Path((uuid, kind)): Path<(String, String)>,
@@ -67,14 +96,18 @@ pub async fn read_png(
     let profile_uuid =
         undash_uuid(&uuid).map_err(|_| AppError::BadRequest("invalid profile uuid".into()))?;
 
+    let user_id = resolve_user_id(&state, &profile_uuid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("texture not found".into()))?;
+
     let table = match kind {
         Kind::Skin => "skins",
         Kind::Cape => "capes",
     };
     let row = sqlx::query_as::<_, (String,)>(&format!(
-        "SELECT file_path FROM {table} WHERE profile_uuid = $1"
+        "SELECT file_path FROM {table} WHERE user_id = $1"
     ))
-    .bind(&profile_uuid)
+    .bind(user_id)
     .fetch_optional(&state.pool)
     .await?;
 

@@ -7,7 +7,6 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 
 use loontail_core::auth::AdminUser;
 use loontail_core::error::AppResult;
@@ -132,22 +131,4 @@ pub async fn timeseries(
         window: window_label,
         series,
     }))
-}
-
-/// Record an analytics event. Trivial enough to live here so other crates can
-/// emit `bootstrap`/`new_user`/etc. off their hot paths (`tokio::spawn` the call)
-/// without re-deriving the insert. `user_id` is optional for anonymous events.
-pub async fn record_event(
-    state: &AppState,
-    event_type: &str,
-    user_id: Option<Uuid>,
-    event_data: Option<serde_json::Value>,
-) -> AppResult<()> {
-    sqlx::query("INSERT INTO user_events (user_id, event_type, event_data) VALUES ($1, $2, $3)")
-        .bind(user_id)
-        .bind(event_type)
-        .bind(event_data)
-        .execute(&state.pool)
-        .await?;
-    Ok(())
 }

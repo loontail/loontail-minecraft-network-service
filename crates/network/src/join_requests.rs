@@ -12,7 +12,7 @@ use loontail_core::AppState;
 use loontail_core::Metrics;
 use loontail_core::ServerEvent;
 
-use crate::presence::effective_status;
+use crate::presence;
 use crate::worlds;
 
 // --- Shared helpers --------------------------------------------------------
@@ -43,21 +43,7 @@ pub(crate) async fn are_friends(pool: &PgPool, a: Uuid, b: Uuid) -> AppResult<bo
 }
 
 async fn host_effective_status(state: &AppState, host_id: Uuid) -> AppResult<UserStatus> {
-    let row = sqlx::query_as::<_, (String, DateTime<Utc>)>(
-        "SELECT status, last_heartbeat_at FROM presence WHERE user_id = $1",
-    )
-    .bind(host_id)
-    .fetch_optional(&state.pool)
-    .await?;
-
-    Ok(match row {
-        Some((status, heartbeat)) => effective_status(
-            UserStatus::from_db(&status),
-            heartbeat,
-            state.config.heartbeat_timeout,
-        ),
-        None => UserStatus::Offline,
-    })
+    presence::effective_status_for(state, host_id).await
 }
 
 /// Whether `requester` is a friend of someone currently AND LIVELY connected to

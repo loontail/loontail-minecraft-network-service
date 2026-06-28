@@ -12,17 +12,15 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use loontail_core::auth::AdminUser;
-use loontail_core::error::{AppError, AppResult};
+use loontail_core::error::{
+    is_foreign_key_violation, is_unique_violation as unique_violation, AppError, AppResult,
+};
 use loontail_core::AppState;
 
 use crate::dto::ClientAdminList;
 use crate::query::CatalogQuery;
 use crate::store;
 use crate::{repo, MAX_MEDIA_UPLOAD_BYTES};
-
-fn unique_violation(err: &sqlx::Error) -> bool {
-    matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
-}
 
 // --- Clients ---------------------------------------------------------------
 
@@ -115,6 +113,7 @@ pub async fn create_client(
     write_client_locales(&mut tx, id, &body.locales).await?;
 
     let LinkedBundle {
+        bundle_id: _,
         effective_slug,
         provisioned,
     } = link_owned_bundle(&mut tx, id, &body).await?;
@@ -134,9 +133,12 @@ pub async fn create_client(
     ))
 }
 
-/// Result of [`link_owned_bundle`]: the slug that was linked and whether a new bundle
-/// row was provisioned (so the caller knows to create the on-disk dir after commit).
+/// Result of [`link_owned_bundle`]: the bundle id and slug that were linked and whether
+/// a new bundle row was provisioned (so the caller knows to create the on-disk dir after
+/// commit). `bundle_id` lets [`update_client`] detect when the link moved to a different
+/// bundle and tear down the now-unreferenced old one.
 struct LinkedBundle {
+    bundle_id: Uuid,
     effective_slug: String,
     provisioned: bool,
 }
@@ -185,6 +187,7 @@ async fn link_owned_bundle(
         .await?;
 
     Ok(LinkedBundle {
+        bundle_id,
         effective_slug,
         provisioned,
     })
@@ -197,7 +200,20 @@ pub async fn update_client(
     Json(body): Json<UpsertClient>,
 ) -> AppResult<Json<Value>> {
     let mut tx = state.pool.begin().await?;
-    let affected = sqlx::query(
+
+    // Capture the currently-linked bundle before re-pointing, so a slug change that moves
+    // the link to a different bundle can tear the old one down (see below) instead of
+    // orphaning its row, artifacts, and on-disk tree. Outer Option = 404 guard, inner =
+    // the nullable `bundle_id`.
+    let old_bundle_id: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT bundle_id FROM catalog_clients WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("client not found".into()))?;
+
+    sqlx::query(
         "UPDATE catalog_clients SET slug=$2, available=$3, minecraft_version=$4, \
          forge_version=$5, fabric_version=$6, runtime_version=$7, bundle_slug=$8, \
          sort_order=$9, updated_at=now() WHERE id=$1",
@@ -219,11 +235,7 @@ pub async fn update_client(
         } else {
             e.into()
         }
-    })?
-    .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("client not found".into()));
-    }
+    })?;
     if !body.locales.is_empty() {
         sqlx::query("DELETE FROM catalog_client_locales WHERE client_id = $1")
             .bind(id)
@@ -237,9 +249,33 @@ pub async fn update_client(
     // from the effective slug whenever `bundleSlug`/`slug` changed (no slug/bundle_id
     // divergence).
     let LinkedBundle {
+        bundle_id: new_bundle_id,
         effective_slug,
         provisioned,
     } = link_owned_bundle(&mut tx, id, &body).await?;
+
+    // When the slug change re-pointed the client to a different bundle, the previously
+    // owned bundle is now stranded by the `ON DELETE SET NULL` FK. Tear it down in the
+    // same tx (row + CASCADE artifacts), but only when nothing else still links to it —
+    // an explicit `bundleSlug` can be shared across builds. The on-disk dir is removed
+    // best-effort after commit, mirroring `delete_client`.
+    let orphaned_slug = match old_bundle_id {
+        Some(old) if old != new_bundle_id => {
+            let still_referenced: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM catalog_clients WHERE bundle_id = $1")
+                    .bind(old)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if still_referenced == 0 {
+                let slug = loontail_bundles::bundle_slug_by_id(&mut *tx, old).await?;
+                loontail_bundles::delete_bundle_row(&mut *tx, old).await?;
+                slug
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
 
     tx.commit().await?;
 
@@ -247,6 +283,12 @@ pub async fn update_client(
     // provisioned, mirroring create.
     if provisioned {
         loontail_bundles::ensure_bundle_dir(&state.config.bundles.storage_root, &effective_slug)?;
+    }
+
+    // Best-effort removal of the orphaned bundle's on-disk tree after the DB deletes are
+    // durable.
+    if let Some(slug) = orphaned_slug {
+        loontail_bundles::remove_bundle_dir(&state.config.bundles.storage_root, &slug);
     }
 
     Ok(Json(json!({ "id": id })))
@@ -342,7 +384,7 @@ pub async fn publish_client(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    set_published(&state, "catalog_clients", id, true).await
+    set_published(&state, PublishableTable::Clients, id, true).await
 }
 
 pub async fn unpublish_client(
@@ -350,17 +392,36 @@ pub async fn unpublish_client(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    set_published(&state, "catalog_clients", id, false).await
+    set_published(&state, PublishableTable::Clients, id, false).await
+}
+
+/// The tables whose `published_at` flag the admin can toggle. An enum (not a
+/// `&str`) so `set_published` can only ever interpolate a fixed, in-code table
+/// name — a future caller cannot pass arbitrary text into the formatted SQL.
+#[derive(Clone, Copy)]
+enum PublishableTable {
+    Clients,
+    Keywords,
+    Servers,
+}
+
+impl PublishableTable {
+    fn name(self) -> &'static str {
+        match self {
+            PublishableTable::Clients => "catalog_clients",
+            PublishableTable::Keywords => "catalog_keywords",
+            PublishableTable::Servers => "catalog_servers",
+        }
+    }
 }
 
 async fn set_published(
     state: &AppState,
-    table: &str,
+    table: PublishableTable,
     id: Uuid,
     published: bool,
 ) -> AppResult<Json<Value>> {
-    // `table` is a fixed internal literal (never user input), so interpolating it
-    // is safe here.
+    let table = table.name();
     let setter = if published {
         "published_at = now()"
     } else {
@@ -780,7 +841,7 @@ pub async fn publish_keyword(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    set_published(&state, "catalog_keywords", id, true).await
+    set_published(&state, PublishableTable::Keywords, id, true).await
 }
 
 pub async fn unpublish_keyword(
@@ -788,7 +849,7 @@ pub async fn unpublish_keyword(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    set_published(&state, "catalog_keywords", id, false).await
+    set_published(&state, PublishableTable::Keywords, id, false).await
 }
 
 // --- Servers ---------------------------------------------------------------
@@ -877,7 +938,7 @@ pub async fn publish_server(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    set_published(&state, "catalog_servers", id, true).await
+    set_published(&state, PublishableTable::Servers, id, true).await
 }
 
 pub async fn unpublish_server(
@@ -885,7 +946,7 @@ pub async fn unpublish_server(
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    set_published(&state, "catalog_servers", id, false).await
+    set_published(&state, PublishableTable::Servers, id, false).await
 }
 
 // --- Relations -------------------------------------------------------------
@@ -955,7 +1016,7 @@ pub async fn detach_server(
 }
 
 fn map_fk(err: sqlx::Error) -> AppError {
-    if matches!(&err, sqlx::Error::Database(db) if db.is_foreign_key_violation()) {
+    if is_foreign_key_violation(&err) {
         AppError::NotFound("client, keyword, or server not found".into())
     } else {
         err.into()

@@ -1,6 +1,10 @@
-//! Yggdrasil token namespace: access+client token pairs stored as 64-hex
-//! plaintext. The Mojang protocol requires the client to echo these verbatim, so
-//! unlike network/admin sessions they cannot be hashed at rest.
+//! Yggdrasil token namespace: access+client token pairs. The Mojang protocol
+//! requires the client to echo both verbatim, so they are minted and returned to
+//! the client in plaintext. At rest, the access token — the credential that
+//! authenticates a session — is stored only as a SHA-256 hash (SEC-5); the column
+//! is named `access_token` for legacy reasons but holds the hash. The client token
+//! stays plaintext at rest because refresh must hand the same value back to the
+//! client across an access-token rotation (and it is not a standalone credential).
 //!
 //! Lifecycle: issue (capped per user, evicting the oldest), validate, refresh
 //! (revoke old + reissue preserving the client token), invalidate, and an hourly
@@ -13,7 +17,7 @@ use rand::RngCore;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::bearer_token_from_headers;
+use super::{bearer_token_from_headers, hash_token};
 use crate::error::{AppError, AppResult};
 use crate::models::User;
 use crate::state::AppState;
@@ -48,6 +52,9 @@ pub async fn issue_yggdrasil_tokens(
     let expires_at =
         Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(15));
 
+    // why (SEC-5): persist only the SHA-256 of the access token so a read-only DB
+    // leak does not yield usable in-game credentials; the plaintext is returned to
+    // the client below and never stored.
     sqlx::query(
         r#"
         INSERT INTO yggdrasil_tokens (user_id, access_token, client_token, expires_at)
@@ -55,7 +62,7 @@ pub async fn issue_yggdrasil_tokens(
         "#,
     )
     .bind(user_id)
-    .bind(&access_token)
+    .bind(hash_token(&access_token))
     .bind(&client_token)
     .bind(expires_at)
     .execute(pool)
@@ -103,7 +110,7 @@ pub async fn validate_yggdrasil(
         WHERE access_token = $1 AND expires_at > now()
         "#,
     )
-    .bind(access_token)
+    .bind(hash_token(access_token))
     .fetch_optional(pool)
     .await?;
 
@@ -136,13 +143,14 @@ pub async fn refresh_yggdrasil(
     ttl: std::time::Duration,
     max_per_user: i64,
 ) -> AppResult<(User, YggdrasilTokens)> {
+    let access_hash = hash_token(access_token);
     let row = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         SELECT user_id, client_token FROM yggdrasil_tokens
         WHERE access_token = $1 AND expires_at > now()
         "#,
     )
-    .bind(access_token)
+    .bind(&access_hash)
     .fetch_optional(pool)
     .await?;
 
@@ -163,7 +171,7 @@ pub async fn refresh_yggdrasil(
     }
 
     sqlx::query("DELETE FROM yggdrasil_tokens WHERE access_token = $1")
-        .bind(access_token)
+        .bind(&access_hash)
         .execute(pool)
         .await?;
 
@@ -179,17 +187,18 @@ pub async fn invalidate_yggdrasil(
     access_token: &str,
     client_token: Option<&str>,
 ) -> AppResult<u64> {
+    let access_hash = hash_token(access_token);
     let affected = match client_token {
         Some(ct) => sqlx::query(
             "DELETE FROM yggdrasil_tokens WHERE access_token = $1 AND client_token = $2",
         )
-        .bind(access_token)
+        .bind(&access_hash)
         .bind(ct)
         .execute(pool)
         .await?
         .rows_affected(),
         None => sqlx::query("DELETE FROM yggdrasil_tokens WHERE access_token = $1")
-            .bind(access_token)
+            .bind(&access_hash)
             .execute(pool)
             .await?
             .rows_affected(),

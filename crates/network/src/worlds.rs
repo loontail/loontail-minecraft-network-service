@@ -122,6 +122,14 @@ pub async fn update(
         }
     };
 
+    // A PATCH that transitions open→closed must perform the SAME cleanup as the
+    // DELETE close path (close relay sessions, reset host presence, zero player
+    // count) — otherwise dangling 'active' relay rows + stale host presence leak,
+    // and the FoF policy gate can still pass for a closed world (BUG-3). Run the
+    // status update and cleanup in one transaction.
+    let closing = status == "closed" && world.status == "open";
+
+    let mut tx = state.pool.begin().await?;
     let updated = sqlx::query_as::<_, WorldSession>(
         r#"
         UPDATE world_sessions
@@ -137,8 +145,15 @@ pub async fn update(
     .bind(max_players)
     .bind(&status)
     .bind(&invite_policy)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    let updated = if closing {
+        close_world_cleanup(&mut tx, id, world.host_user_id).await?
+    } else {
+        updated
+    };
+    tx.commit().await?;
 
     // Toggling friend-of-friends changes what the world's active guests can do
     // and how they surface. Tell each active guest directly (so their own
@@ -197,6 +212,31 @@ pub async fn close(
     .execute(&mut *tx)
     .await?;
 
+    // host == auth.id() here (validated above).
+    close_world_cleanup(&mut tx, id, auth.id()).await?;
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({ "closed": true })))
+}
+
+/// Shared cleanup for closing a world (used by both `DELETE` and a `PATCH
+/// status=closed`): close the world's open relay sessions, reset the host's
+/// presence to plain online + unlink the world, and zero the world's player
+/// count. Runs inside the caller's transaction. Returns the refreshed world row.
+async fn close_world_cleanup(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    world_id: Uuid,
+    host_id: Uuid,
+) -> AppResult<WorldSession> {
+    // Close any open relay sessions for this world so guests are no longer
+    // counted as active (presence FoF visibility + the policy gate key on this).
+    sqlx::query(
+        "UPDATE relay_sessions SET status = 'closed', closed_at = now() WHERE world_session_id = $1 AND status <> 'closed'",
+    )
+    .bind(world_id)
+    .execute(&mut **tx)
+    .await?;
+
     // Host returns to plain online and unlinks the world.
     sqlx::query(
         r#"
@@ -205,19 +245,17 @@ pub async fn close(
         WHERE user_id = $1
         "#,
     )
-    .bind(auth.id())
-    .execute(&mut *tx)
+    .bind(host_id)
+    .execute(&mut **tx)
     .await?;
 
-    // Close any open relay sessions for this world.
-    sqlx::query(
-        "UPDATE relay_sessions SET status = 'closed', closed_at = now() WHERE world_session_id = $1 AND status <> 'closed'",
+    // Zero the player count so a stale value can't leak after close.
+    let world = sqlx::query_as::<_, WorldSession>(
+        "UPDATE world_sessions SET current_players = 0 WHERE id = $1 RETURNING *",
     )
-    .bind(id)
-    .execute(&mut *tx)
+    .bind(world_id)
+    .fetch_one(&mut **tx)
     .await?;
 
-    tx.commit().await?;
-
-    Ok(Json(serde_json::json!({ "closed": true })))
+    Ok(world)
 }

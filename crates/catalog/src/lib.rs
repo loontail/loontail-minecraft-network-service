@@ -3,10 +3,10 @@
 //! `populate[...]`): relations are always inlined, `id` is the entity's UUID as an
 //! undashed 32-char hex string, media `url`s stay server-relative (the launcher
 //! absolutizes; the admin SPA is same-origin), and the `published_at` draft filter
-//! + locale fallback are applied in `repo`. Public `routes()` mount under `/api`;
-//! `admin_routes()` mount under `/admin/catalog` (AdminUser-guarded). Uploaded
-//! image bytes are served from `media_routes()` (AuthUser-guarded) mounted at
-//! `/catalog-media`.
+//! plus locale fallback are applied in `repo`. Public `routes()` mount under
+//! `/api`; `admin_routes()` mount under `/admin/catalog` (AdminUser-guarded).
+//! Uploaded image bytes are served from `media_routes()` (AuthUser-guarded)
+//! mounted at `/catalog-media`.
 
 mod admin;
 mod dto;

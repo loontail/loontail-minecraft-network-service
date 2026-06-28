@@ -52,7 +52,7 @@ impl UserStatus {
 
 /// A row from the `users` table. Mirrors every column even where a field is
 /// not yet read in Rust, so `SELECT *` mappings stay complete. The identity
-/// columns (`email`..`yggdrasil_validated_at`) are added in migration `0003`.
+/// columns (`email`..`is_admin`) are added in migration `0003`.
 #[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
 pub struct User {
@@ -76,7 +76,6 @@ pub struct User {
     pub confirmed: bool,
     pub blocked: bool,
     pub is_admin: bool,
-    pub yggdrasil_validated_at: Option<DateTime<Utc>>,
 }
 
 /// Public representation of a user, returned by the API.
@@ -156,9 +155,31 @@ pub fn escape_like_pattern(needle: &str) -> String {
     escaped
 }
 
+/// A pragmatic email-shape check (not RFC 5322): exactly one `@`, a non-empty
+/// local part, and a domain with at least one dot and no whitespace. Catches the
+/// obviously-malformed addresses public self-registration would otherwise accept;
+/// real deliverability is only proven by an email-confirmation flow (not present
+/// in this MVP — see SEC-4 note in `identity::register_user`).
+pub fn is_valid_email(email: &str) -> bool {
+    let email = email.trim();
+    if email.is_empty() || email.len() > 254 || email.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return false;
+    }
+    match domain.split_once('.') {
+        Some((host, tld)) => !host.is_empty() && !tld.is_empty() && !tld.starts_with('.'),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::escape_like_pattern;
+    use super::{escape_like_pattern, is_valid_email};
 
     #[test]
     fn escape_like_pattern_escapes_metacharacters() {
@@ -168,5 +189,24 @@ mod tests {
         assert_eq!(escape_like_pattern("a\\b"), "a\\\\b");
         // A backslash followed by a metachar both get their own escape.
         assert_eq!(escape_like_pattern("%_\\"), "\\%\\_\\\\");
+    }
+
+    #[test]
+    fn is_valid_email_accepts_plausible_addresses() {
+        assert!(is_valid_email("user@example.com"));
+        assert!(is_valid_email("a.b+tag@sub.example.co.uk"));
+    }
+
+    #[test]
+    fn is_valid_email_rejects_malformed() {
+        assert!(!is_valid_email(""));
+        assert!(!is_valid_email("nodomain"));
+        assert!(!is_valid_email("no-at-sign.com"));
+        assert!(!is_valid_email("user@"));
+        assert!(!is_valid_email("@example.com"));
+        assert!(!is_valid_email("user@nodot"));
+        assert!(!is_valid_email("user@@example.com"));
+        assert!(!is_valid_email("user name@example.com"));
+        assert!(!is_valid_email("user@example."));
     }
 }
