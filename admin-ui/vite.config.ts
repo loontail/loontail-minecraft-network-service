@@ -15,6 +15,17 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Isolate recharts (the largest dependency, used only by the lazily
+        // loaded Dashboard/Logs pages) into its own chunk.
+        manualChunks: {
+          recharts: ["recharts"],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/admin/auth": "http://localhost:8080",

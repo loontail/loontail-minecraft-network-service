@@ -35,7 +35,10 @@
   --color-text-hi: oklch(0.985 0 0);
   --color-text: oklch(0.87 0 0);
   --color-text-mute: oklch(0.708 0 0);
-  --color-text-faint: oklch(0.556 0 0);
+  /* Bumped from 0.556 → 0.62: at 0.556 on card/surface-1 (0.205) the contrast was
+     ~4:1, under the WCAG AA 4.5:1 floor for the 11-12px captions this token is used
+     for pervasively (hints, page counts, SHA cells). */
+  --color-text-faint: oklch(0.62 0 0);
 
   /* Neutral "accent" — focus ring / active nav / selection. */
   --color-accent-soft: oklch(1 0 0 / 0.1);
@@ -55,6 +58,11 @@
   --color-muted-foreground: oklch(0.708 0 0);
   --color-accent: oklch(0.269 0 0);
   --color-accent-foreground: oklch(0.985 0 0);
+
+  /* Loading placeholders — a hair above the card/surface-1 ladder (0.205) so the
+     pulse reads as a recessed shimmer, not brighter than the content it stands in
+     for (the old bg-accent at 0.269 read backwards). */
+  --color-skeleton: oklch(0.23 0 0);
   --color-border: oklch(1 0 0 / 0.1);
   --color-input: oklch(1 0 0 / 0.15);
   --color-ring: oklch(0.708 0 0);

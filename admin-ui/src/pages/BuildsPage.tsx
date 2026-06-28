@@ -1,4 +1,5 @@
 import {
+  AlertCircle,
   ArrowRight,
   EyeOff,
   Loader2,
@@ -13,6 +14,10 @@ import { useNavigate } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { PageHeader } from "@/components/shared/PageHeader";
+import {
+  TableSkeletonRows,
+  TableStateRow,
+} from "@/components/shared/TableStates";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,7 +30,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -39,6 +43,7 @@ import {
   useCreateClient,
   useDeleteClient,
 } from "@/features/builds/api";
+import { errorMessage } from "@/shared/api/toast";
 import type { ClientAdmin } from "@/shared/types";
 
 const COLUMN_COUNT = 6;
@@ -77,9 +82,12 @@ function CreateBuildDialog({
         locales: [{ locale: "en", title: trimmedTitle }],
       },
       {
-        onSuccess: (res) => {
+        onSuccess: () => {
           handleOpenChange(false);
-          navigate(`/builds/${res.bundleSlug ?? trimmedSlug}`);
+          // BuildDetailPage resolves the build by the CLIENT slug (useBuildBySlug
+          // matches client.slug), so navigate with that — not the owned-bundle
+          // slug, which the backend may derive differently and would 404.
+          navigate(`/builds/${trimmedSlug}`);
         },
       },
     );
@@ -88,7 +96,7 @@ function CreateBuildDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <DialogHeader>
             <DialogTitle>New build</DialogTitle>
             <DialogDescription>
@@ -96,7 +104,7 @@ function CreateBuildDialog({
               and its bundle, then open it so you can add details and files.
             </DialogDescription>
           </DialogHeader>
-          <div className="mt-4 space-y-4">
+          <div className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="build-slug">Slug</Label>
               <Input
@@ -116,7 +124,7 @@ function CreateBuildDialog({
               />
             </div>
           </div>
-          <DialogFooter className="mt-6">
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"
@@ -143,36 +151,6 @@ function CreateBuildDialog({
   );
 }
 
-function SkeletonRows() {
-  return (
-    <>
-      {Array.from({ length: 6 }).map((_, index) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: static placeholder rows
-        <TableRow key={index}>
-          <TableCell>
-            <Skeleton className="h-4 w-40" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-32" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-16" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-8" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-5 w-24" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="ml-auto h-8 w-20" />
-          </TableCell>
-        </TableRow>
-      ))}
-    </>
-  );
-}
-
 export function BuildsPage() {
   const navigate = useNavigate();
   const builds = useAdminClients();
@@ -180,7 +158,7 @@ export function BuildsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [confirm, setConfirm] = useState<ClientAdmin | null>(null);
   const rows = builds.data ?? [];
-  const showEmpty = !builds.isLoading && rows.length === 0;
+  const showEmpty = !builds.isLoading && !builds.isError && rows.length === 0;
 
   return (
     <div className="flex flex-col gap-6">
@@ -207,7 +185,16 @@ export function BuildsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {builds.isLoading && <SkeletonRows />}
+            {builds.isLoading && <TableSkeletonRows columns={COLUMN_COUNT} />}
+
+            {builds.isError && (
+              <TableStateRow
+                columns={COLUMN_COUNT}
+                icon={AlertCircle}
+                title="Could not load builds"
+                description={errorMessage(builds.error, "Please try again.")}
+              />
+            )}
 
             {showEmpty && (
               <TableRow className="hover:bg-transparent">
@@ -232,6 +219,7 @@ export function BuildsPage() {
             )}
 
             {!builds.isLoading &&
+              !builds.isError &&
               rows.map((build) => (
                 <TableRow key={build.id}>
                   <TableCell className="font-medium text-text-hi">

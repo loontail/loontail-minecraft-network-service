@@ -40,11 +40,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { EmptyChartState } from "@/components/shared/EmptyChartState";
+import { SegmentedControl } from "@/components/shared/SegmentedControl";
+import { StatCard } from "@/pages/dashboard/StatCard";
 import {
   useRequestsSummary,
   useRequestsTimeseries,
 } from "@/features/requestLogs/api";
-import { cn } from "@/shared/lib/cn";
 import type {
   RequestMetric,
   StatusClass,
@@ -89,43 +91,14 @@ function MetricSelector({
   onChange: (next: RequestMetric) => void;
 }) {
   return (
-    <div
-      role="radiogroup"
-      aria-label="Timeseries metric"
-      className="inline-flex items-center gap-1 rounded-md border border-edge bg-surface-1 p-1"
-    >
-      {TIMESERIES_METRICS.map((option) => {
-        const active = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => onChange(option.value)}
-            className={cn(
-              "rounded px-2.5 py-1 text-caption font-semibold transition-colors",
-              "outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-              active
-                ? "bg-surface-3 text-text-hi"
-                : "text-text-mute hover:text-text",
-            )}
-          >
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function EmptyChartState({ title, detail }: { title: string; detail: string }) {
-  return (
-    <div className="flex aspect-video max-h-72 w-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-edge text-center">
-      <LineChartIcon className="size-7 text-text-faint" aria-hidden />
-      <p className="text-body-med text-text">{title}</p>
-      <p className="max-w-xs text-caption text-text-faint">{detail}</p>
-    </div>
+    <SegmentedControl
+      mode="radio"
+      ariaLabel="Timeseries metric"
+      items={TIMESERIES_METRICS}
+      value={value}
+      onChange={onChange}
+      itemClassName="px-2.5 py-1 text-caption font-semibold"
+    />
   );
 }
 
@@ -203,7 +176,7 @@ export function TrafficSection({ window }: { window: TrafficWindow }) {
           {KPIS.map((def, i) => {
             const raw = kpiValues[i];
             return (
-              <StatCardDisplay
+              <StatCard
                 key={def.label}
                 label={def.label}
                 icon={def.icon}
@@ -414,37 +387,5 @@ export function TrafficSection({ window }: { window: TrafficWindow }) {
         </CardContent>
       </Card>
     </section>
-  );
-}
-
-/// Like the dashboard StatCard, but renders a preformatted string (rate/latency)
-/// rather than a raw number through toLocaleString.
-function StatCardDisplay({
-  label,
-  icon: Icon,
-  hint,
-  display,
-  isLoading,
-}: {
-  label: string;
-  icon: LucideIcon;
-  hint: string;
-  display: string | undefined;
-  isLoading?: boolean;
-}) {
-  const showSkeleton = isLoading || display === undefined;
-  return (
-    <Card className="gap-3 py-5 transition-colors hover:border-edge-md">
-      <CardHeader className="gap-2">
-        <CardDescription className="flex items-center gap-2 text-text-mute">
-          <Icon className="size-4 text-text-faint" aria-hidden />
-          {label}
-        </CardDescription>
-        <CardTitle className="text-display tabular-nums text-text-hi">
-          {showSkeleton ? <Skeleton className="h-8 w-20" /> : display}
-        </CardTitle>
-        <p className="text-caption text-text-faint">{hint}</p>
-      </CardHeader>
-    </Card>
   );
 }

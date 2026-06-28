@@ -1,5 +1,6 @@
-import { Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, RefreshCw, Trash2 } from "lucide-react";
 
+import { EmptyState } from "@/components/shared/EmptyState";
 import { FileUpload } from "@/components/shared/FileUpload";
 import { Button } from "@/components/ui/button";
 import {
@@ -208,6 +209,26 @@ export function ClientMediaSection({ clientId }: { clientId: string }) {
           <Loader2 className="size-4 animate-spin" />
           Loading media…
         </div>
+      ) : media.isError ? (
+        <EmptyState
+          icon={AlertTriangle}
+          title="Couldn’t load media"
+          description="The media for this build failed to load. Retry before re-uploading — existing images may still be attached."
+          action={
+            <Button
+              variant="outline"
+              onClick={() => media.refetch()}
+              disabled={media.isFetching}
+            >
+              {media.isFetching ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
+              Retry
+            </Button>
+          }
+        />
       ) : (
         <div className="space-y-5">
           <div className="grid gap-4 sm:grid-cols-3">

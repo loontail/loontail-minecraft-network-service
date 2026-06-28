@@ -14,6 +14,7 @@ import { EmptyState } from "@/components/shared/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useUpdateClient } from "@/features/builds/api";
 import {
   type FileMenuAction,
@@ -45,6 +46,7 @@ import {
   useBuild,
   useBulkDelete,
   useDeleteFile,
+  useInvalidateBuild,
   useMoveFiles,
   useRegenerateManifest,
   useRehashFile,
@@ -76,7 +78,7 @@ function StatusBadge({ status }: { status: string }) {
   }
   if (status === "processing") {
     return (
-      <Badge variant="secondary">
+      <Badge variant="secondary" aria-live="polite">
         <Loader2 className="size-3 animate-spin" />
         Processing
       </Badge>
@@ -109,9 +111,8 @@ function FooterStatus({ build }: { build: Bundle }) {
   );
 }
 
-/// The no-bundle heal CTA: re-saving the build with `bundleSlug: null` makes the
-/// backend re-derive + re-provision the owned bundle (Layer C), after which the live
-/// bundle read succeeds and the file manager loads.
+// why: re-saving with bundleSlug:null makes the backend re-derive + re-provision the
+// owned bundle, after which the live bundle read succeeds and the file manager loads.
 function NoBundleState({ build }: { build: ClientAdmin }) {
   const updateClient = useUpdateClient();
 
@@ -165,6 +166,7 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [dropActive, setDropActive] = useState(false);
+  const [batchUploading, setBatchUploading] = useState(false);
   const lastClickedRef = useRef<string | null>(null);
 
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -177,6 +179,7 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const uploadFile = useUploadFile();
+  const invalidateBuild = useInvalidateBuild();
   const uploadArchive = useUploadArchive();
   const regenerate = useRegenerateManifest();
   const validate = useValidateBuild();
@@ -240,9 +243,43 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     setSelectedKeys(new Set());
   }
 
-  function uploadFiles(files: FileList | File[], dir = currentPath) {
-    for (const file of Array.from(files)) {
+  // Upload sequentially (await each) so N files don't fire N parallel POSTs that
+  // each trigger a manifest regen + invalidation and race on the same bundle. The
+  // batch shares one busy state, invalidates once, and emits a single summary toast.
+  async function uploadFiles(files: FileList | File[], dir = currentPath) {
+    const list = Array.from(files);
+    if (list.length === 0) {
+      return;
+    }
+    if (list.length === 1) {
+      const file = list[0];
       uploadFile.mutate({ slug, file, targetPath: joinPath(dir, file.name) });
+      return;
+    }
+    setBatchUploading(true);
+    let ok = 0;
+    let failed = 0;
+    for (const file of list) {
+      try {
+        await uploadFile.mutateAsync({
+          slug,
+          file,
+          targetPath: joinPath(dir, file.name),
+          silent: true,
+        });
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setBatchUploading(false);
+    invalidateBuild(slug);
+    if (failed === 0) {
+      toast.success(`Uploaded ${ok} file${ok === 1 ? "" : "s"}`);
+    } else if (ok === 0) {
+      toast.error(`Failed to upload ${failed} file${failed === 1 ? "" : "s"}`);
+    } else {
+      toast.warning(`Uploaded ${ok}, failed ${failed}`);
     }
   }
 
@@ -470,10 +507,10 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
         <CardContent>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
             {Array.from({ length: 8 }).map((_, i) => (
-              <div
+              <Skeleton
                 // biome-ignore lint/suspicious/noArrayIndexKey: static skeletons
                 key={i}
-                className="h-24 animate-pulse rounded-lg border border-edge-md bg-surface-1"
+                className="h-24 rounded-lg"
               />
             ))}
           </div>
@@ -493,7 +530,7 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
           onUploadArchive={(file) => uploadArchive.mutate({ slug, file })}
           onRegenerate={() => regenerate.mutate(slug)}
           onValidate={runValidate}
-          uploadPending={uploadFile.isPending}
+          uploadPending={uploadFile.isPending || batchUploading}
           archivePending={uploadArchive.isPending}
           regeneratePending={regenerate.isPending}
           validatePending={validate.isPending}

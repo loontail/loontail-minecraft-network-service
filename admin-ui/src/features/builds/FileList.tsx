@@ -17,11 +17,8 @@ import type { TreeEntry } from "@/features/builds/fileTree";
 import { cn } from "@/shared/lib/cn";
 import { formatBytes } from "@/shared/lib/format";
 
-/// The shared interaction contract for both the list and grid views. Every click
-/// does exactly one obvious thing (FM-1): folder name navigates, file name selects,
-/// the checkbox wrapper toggles (carrying `shiftKey` for range extension), the kebab
-/// opens the context menu. Folders carry no artifact id, so only artifact-backed
-/// entries are selectable.
+// The interaction contract shared by the list and grid views. Folders carry no
+// artifact id, so only artifact-backed entries are selectable.
 export interface FileViewProps {
   entries: TreeEntry[];
   selectedKeys: Set<string>;
@@ -29,15 +26,11 @@ export interface FileViewProps {
   onToggleAll: (checked: boolean) => void;
   allSelected: boolean;
   someSelected: boolean;
-  /// Folder → navigate, file → select (resolved by the parent's `openEntry` for the
-  /// kebab "Open", but for the name button the parent routes to navigate/select).
   onAction: (relativePath: string) => void;
   onOpenMenu: (entry: TreeEntry, position: { x: number; y: number }) => void;
   onToggleDownloadOnce: (entry: TreeEntry) => void;
 }
 
-/// First + last 6 hex chars of the SHA-256, monospaced; empty for folders / rows
-/// without a hash yet. Keeps the column narrow while still showing a fingerprint.
 function ShaCell({ sha256 }: { sha256: string | null }) {
   if (!sha256) {
     return <span className="text-text-faint">—</span>;
@@ -52,12 +45,11 @@ function ShaCell({ sha256 }: { sha256: string | null }) {
   );
 }
 
-/// The checkbox column / corner reveals on hover only where hover is meaningful;
-/// on coarse pointers (touch) it is always visible, as is a selected row.
+// why: reveal the checkbox/kebab only on hover where hover exists; on coarse
+// pointers (touch) and selected rows it stays visible.
 export const REVEAL =
   "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-data-[state=selected]:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100";
 
-/// Long-press (coarse pointers) opens the context menu at the press point.
 export function useLongPress(
   onLongPress: (position: { x: number; y: number }) => void,
 ) {
@@ -153,7 +145,7 @@ function FileRow({
   onToggleDownloadOnce: (entry: TreeEntry) => void;
 }) {
   const longPress = useLongPress((position) => onOpenMenu(entry, position));
-  const selectable = entry.artifact !== null && !entry.isDir ? true : false;
+  const selectable = entry.artifact !== null && !entry.isDir;
 
   return (
     <TableRow

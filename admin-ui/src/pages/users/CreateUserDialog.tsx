@@ -83,14 +83,21 @@ export function CreateUserDialog() {
   }
 
   async function onSubmit(values: FormValues) {
-    const user = await createUser.mutateAsync({
-      username: values.username.trim(),
-      email: values.email.trim(),
-      password: values.password,
-      minecraftUuid: values.minecraftUuid.trim() || null,
-      isAdmin: values.isAdmin,
-    });
-    setCreated(user);
+    // handleSubmit re-throws from an async onValid callback, so an un-caught
+    // rejection here becomes an "Uncaught (in promise)". The mutation's onError
+    // already toasts; swallow it.
+    try {
+      const user = await createUser.mutateAsync({
+        username: values.username.trim(),
+        email: values.email.trim(),
+        password: values.password,
+        minecraftUuid: values.minecraftUuid.trim() || null,
+        isAdmin: values.isAdmin,
+      });
+      setCreated(user);
+    } catch {
+      // onError toasts
+    }
   }
 
   async function copyProfileUuid() {

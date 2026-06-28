@@ -1,7 +1,6 @@
 import {
   AlertCircle,
-  ChevronLeft,
-  ChevronRight,
+  Flag,
   ImageOff,
   Search,
   Shirt,
@@ -13,6 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { SectionTabs } from "@/components/shared/SectionTabs";
+import { TablePager } from "@/components/shared/TablePager";
 import {
   TableSkeletonRows,
   TableStateRow,
@@ -79,7 +79,7 @@ function TexturePreview({ row, kind }: { row: TextureRow; kind: TextureKind }) {
 
 const TABS = [
   { value: "skins" as const, label: "Skins", icon: Shirt },
-  { value: "capes" as const, label: "Capes" },
+  { value: "capes" as const, label: "Capes", icon: Flag },
 ];
 
 export function TexturesPage() {
@@ -163,7 +163,11 @@ export function TexturesPage() {
             </Button>
             <Button
               variant="destructive"
-              disabled={purgeMissing.isPending || orphanCount === 0}
+              disabled={
+                purgeMissing.isPending ||
+                orphanCount === null ||
+                orphanCount === 0
+              }
               onClick={() => setPurgeOpen(true)}
             >
               <Trash2 className="size-4" />
@@ -272,39 +276,16 @@ export function TexturesPage() {
         </Table>
       </div>
 
-      <footer className="flex items-center justify-between gap-4">
-        <p className="text-caption text-text-faint">
-          {isLoading
-            ? "Loading…"
-            : total === 0
-              ? `No ${kind}`
-              : `${total.toLocaleString()} ${kind === "skins" ? (total === 1 ? "skin" : "skins") : total === 1 ? "cape" : "capes"}`}
-          {isFetching && !isLoading && " · refreshing…"}
-        </p>
-        <div className="flex items-center gap-2">
-          <span className="text-caption text-text-mute">
-            Page {meta?.page ?? page} of {Math.max(pageCount, 1)}
-          </span>
-          <Button
-            variant="outline"
-            size="icon"
-            aria-label="Previous page"
-            disabled={page <= 1 || isLoading}
-            onClick={() => setPage((value) => Math.max(1, value - 1))}
-          >
-            <ChevronLeft className="size-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            aria-label="Next page"
-            disabled={page >= pageCount || isLoading}
-            onClick={() => setPage((value) => value + 1)}
-          >
-            <ChevronRight className="size-4" />
-          </Button>
-        </div>
-      </footer>
+      <TablePager
+        page={meta?.page ?? page}
+        pageCount={pageCount}
+        total={total}
+        isLoading={isLoading}
+        isFetching={isFetching}
+        noun={kind === "skins" ? ["skin", "skins"] : ["cape", "capes"]}
+        onPrev={() => setPage((value) => Math.max(1, value - 1))}
+        onNext={() => setPage((value) => value + 1)}
+      />
 
       <ConfirmDialog
         open={deleteTarget !== null}

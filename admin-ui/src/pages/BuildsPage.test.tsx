@@ -97,4 +97,24 @@ describe("BuildsPage", () => {
       screen.getByRole("button", { name: /open/i }),
     ).toBeInTheDocument();
   });
+
+  it("shows an error state (distinct from empty) when the list fails to load", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ message: "boom" }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<BuildsPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/could not load builds/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/no builds yet/i)).not.toBeInTheDocument();
+  });
 });

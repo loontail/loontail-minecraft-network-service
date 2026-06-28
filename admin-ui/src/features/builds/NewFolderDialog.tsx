@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react";
 import type * as React from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -30,12 +30,14 @@ export function NewFolderDialog({
   const [name, setName] = useState("");
   const createFolder = useCreateFolder();
 
-  function handleOpenChange(next: boolean) {
-    if (next) {
+  // The dialog stays mounted and the parent opens it by setting state directly
+  // (bypassing Radix onOpenChange), so reset the name on every open here rather
+  // than relying on handleOpenChange — otherwise a previously typed name lingers.
+  useEffect(() => {
+    if (open) {
       setName("");
     }
-    onOpenChange(next);
-  }
+  }, [open]);
 
   function submit(event: React.SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,9 +52,9 @@ export function NewFolderDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <form onSubmit={submit}>
+        <form onSubmit={submit} className="flex flex-col gap-4">
           <DialogHeader>
             <DialogTitle>New folder</DialogTitle>
             <DialogDescription>
@@ -63,7 +65,7 @@ export function NewFolderDialog({
               .
             </DialogDescription>
           </DialogHeader>
-          <div className="mt-4 space-y-1.5">
+          <div className="space-y-1.5">
             <Label htmlFor="folder-name">Folder name</Label>
             <Input
               id="folder-name"
@@ -73,7 +75,7 @@ export function NewFolderDialog({
               onChange={(event) => setName(event.target.value)}
             />
           </div>
-          <DialogFooter className="mt-6">
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"

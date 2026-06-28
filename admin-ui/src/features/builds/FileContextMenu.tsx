@@ -17,8 +17,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { TreeEntry } from "@/features/builds/fileTree";
 
-/// What `onAction` reports back to the orchestrator; each maps to a reused mutation
-/// or navigation. Folder-only / file-only items are filtered out before render.
 export type FileMenuAction =
   | "open"
   | "download"
@@ -29,19 +27,13 @@ export type FileMenuAction =
   | "delete";
 
 export interface FileMenuTarget {
-  /// Screen-space coordinates the menu opens at: the cursor for a right-click, or the
-  /// ⋮ button's rect for a click. A single cursor-anchored menu serves both.
   position: { x: number; y: number };
   entry: TreeEntry;
 }
 
-/// The single Google-Drive-style context menu, shared by the per-card ⋮ button and
-/// the right-click handler. Radix has no virtual-anchor prop, so a zero-size
-/// fixed-positioned trigger is rendered at `target.position` and the Radix menu opens
-/// under it — identical behaviour whether the open came from a right-click or the ⋮.
-///
-/// Implied folders (`artifact === null`) disable every mutating item — they have no
-/// backing row to rename / move / delete / rehash.
+// why: Radix has no virtual-anchor prop, so a zero-size fixed-positioned trigger is
+// rendered at `target.position` and the menu opens under it — the same behaviour
+// whether the open came from a right-click or the ⋮ button.
 export function FileContextMenu({
   open,
   onOpenChange,

@@ -1,5 +1,5 @@
 import { ChevronRight, Folder, FolderRoot, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -19,8 +19,6 @@ interface FolderOption {
   depth: number;
 }
 
-/// Flatten the tree to its folders (depth-first, folders only), so the dialog can
-/// render an indented destination list.
 function flattenFolders(nodes: FileTreeNode[], depth = 0): FolderOption[] {
   const out: FolderOption[] = [];
   for (const node of nodes) {
@@ -33,8 +31,8 @@ function flattenFolders(nodes: FileTreeNode[], depth = 0): FolderOption[] {
   return out;
 }
 
-/// True when `targetDir` is one of the moved paths itself or a descendant — an
-/// illegal destination (mirrors the server + DnD guard).
+// why: a move into one of the sources or its own subtree is illegal (mirrors the
+// server + DnD guard); such destinations are disabled.
 function isSelfOrDescendant(targetDir: string, sourcePaths: string[]): boolean {
   for (const src of sourcePaths) {
     if (targetDir === src || targetDir.startsWith(`${src}/`)) {
@@ -44,9 +42,6 @@ function isSelfOrDescendant(targetDir: string, sourcePaths: string[]): boolean {
   return false;
 }
 
-/// Destination-folder picker for the SelectionToolbar "Move" and the context-menu
-/// "Move to…". Lists Root + every folder in the build; the source entries' own
-/// subtree is disabled, as is each source's current parent (a no-op move).
 export function MoveDialog({
   open,
   onOpenChange,
@@ -58,7 +53,6 @@ export function MoveDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   roots: FileTreeNode[];
-  /// relativePaths of the entries being moved (for the self/descendant guard).
   sourcePaths: string[];
   pending: boolean;
   onMove: (targetDir: string) => void;
@@ -75,6 +69,16 @@ export function MoveDialog({
     return isSelfOrDescendant(path, sourcePaths);
   }
 
+  // The dialog stays mounted, so a prior pick could survive into a new open with a
+  // different source set (where it may now be a disabled self/descendant). Clear
+  // the selection whenever the dialog opens or the sources change.
+  const sourceKey = sourcePaths.join("\n");
+  useEffect(() => {
+    if (open) {
+      setSelected(null);
+    }
+  }, [open, sourceKey]);
+
   return (
     <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
       <DialogContent>
@@ -88,7 +92,7 @@ export function MoveDialog({
             .
           </DialogDescription>
         </DialogHeader>
-        <ul className="mt-2 max-h-72 space-y-0.5 overflow-auto rounded-md border border-edge-md bg-surface-0 p-1.5">
+        <ul className="max-h-72 space-y-0.5 overflow-auto rounded-md border border-edge-md bg-surface-0 p-1.5">
           {options.map((option) => {
             const disabled = disabledFor(option.relativePath);
             const isSelected = selected === option.relativePath;
@@ -121,7 +125,7 @@ export function MoveDialog({
             );
           })}
         </ul>
-        <DialogFooter className="mt-4">
+        <DialogFooter>
           <Button
             type="button"
             variant="outline"
@@ -132,8 +136,12 @@ export function MoveDialog({
           </Button>
           <Button
             type="button"
-            disabled={pending || selected === null}
-            onClick={() => selected !== null && onMove(selected)}
+            disabled={
+              pending || selected === null || disabledFor(selected)
+            }
+            onClick={() =>
+              selected !== null && !disabledFor(selected) && onMove(selected)
+            }
           >
             {pending ? <Loader2 className="size-4 animate-spin" /> : null}
             Move here

@@ -17,21 +17,40 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
   );
 }
 
-function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
+function TableHeader({
+  className,
+  sticky,
+  ...props
+}: React.ComponentProps<"thead"> & { sticky?: boolean }) {
   return (
     <thead
       data-slot="table-header"
-      className={cn("[&_tr]:border-b", className)}
+      className={cn(
+        "[&_tr]:border-b",
+        // Sticky header for long scrollable tables (e.g. request logs); the bg keeps
+        // rows from showing through underneath the pinned header.
+        sticky && "sticky top-0 z-10 bg-card",
+        className,
+      )}
       {...props}
     />
   );
 }
 
-function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
+function TableBody({
+  className,
+  striped,
+  ...props
+}: React.ComponentProps<"tbody"> & { striped?: boolean }) {
   return (
     <tbody
       data-slot="table-body"
-      className={cn("[&_tr:last-child]:border-0", className)}
+      className={cn(
+        "[&_tr:last-child]:border-0",
+        // Subtle zebra banding to keep dense, monochrome rows scannable.
+        striped && "[&_tr:nth-child(even)]:bg-surface-0/40",
+        className,
+      )}
       {...props}
     />
   );

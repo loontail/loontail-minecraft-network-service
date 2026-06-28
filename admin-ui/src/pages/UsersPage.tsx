@@ -1,7 +1,5 @@
 import {
   AlertCircle,
-  ChevronLeft,
-  ChevronRight,
   Search,
   ShieldCheck,
   UserX,
@@ -10,12 +8,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "@/components/shared/PageHeader";
+import { TablePager } from "@/components/shared/TablePager";
 import {
   TableSkeletonRows,
   TableStateRow,
 } from "@/components/shared/TableStates";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Table,
@@ -36,16 +34,6 @@ import { ResetPasswordDialog } from "./users/ResetPasswordDialog";
 import { UserRowActions } from "./users/UserRowActions";
 
 const COLUMN_COUNT = 7;
-
-function originVariant(origin: string): "default" | "secondary" | "outline" {
-  if (origin === "admin") {
-    return "default";
-  }
-  if (origin === "yggdrasil") {
-    return "secondary";
-  }
-  return "outline";
-}
 
 function UserFlags({ user }: { user: AdminUser }) {
   return (
@@ -159,9 +147,7 @@ export function UsersPage() {
                     {user.email ?? "—"}
                   </TableCell>
                   <TableCell>
-                    <Badge variant={originVariant(user.origin)}>
-                      {user.origin}
-                    </Badge>
+                    <Badge variant="secondary">{user.origin}</Badge>
                   </TableCell>
                   <TableCell>
                     <code
@@ -189,39 +175,16 @@ export function UsersPage() {
         </Table>
       </div>
 
-      <footer className="flex items-center justify-between gap-4">
-        <p className="text-caption text-text-faint">
-          {isLoading
-            ? "Loading…"
-            : total === 0
-              ? "No users"
-              : `${total.toLocaleString()} ${total === 1 ? "user" : "users"}`}
-          {isFetching && !isLoading && " · refreshing…"}
-        </p>
-        <div className="flex items-center gap-2">
-          <span className="text-caption text-text-mute">
-            Page {meta?.page ?? page} of {Math.max(pageCount, 1)}
-          </span>
-          <Button
-            variant="outline"
-            size="icon"
-            aria-label="Previous page"
-            disabled={page <= 1 || isLoading}
-            onClick={() => setPage((value) => Math.max(1, value - 1))}
-          >
-            <ChevronLeft className="size-4" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            aria-label="Next page"
-            disabled={page >= pageCount || isLoading}
-            onClick={() => setPage((value) => value + 1)}
-          >
-            <ChevronRight className="size-4" />
-          </Button>
-        </div>
-      </footer>
+      <TablePager
+        page={meta?.page ?? page}
+        pageCount={pageCount}
+        total={total}
+        isLoading={isLoading}
+        isFetching={isFetching}
+        noun={["user", "users"]}
+        onPrev={() => setPage((value) => Math.max(1, value - 1))}
+        onNext={() => setPage((value) => value + 1)}
+      />
 
       <ResetPasswordDialog
         user={resetTarget}

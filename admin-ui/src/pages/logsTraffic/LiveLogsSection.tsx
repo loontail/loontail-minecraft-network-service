@@ -155,7 +155,7 @@ export function LiveLogsSection() {
                 <TableHead>Time</TableHead>
               </TableRow>
             </TableHeader>
-            <TableBody>
+            <TableBody striped>
               {entries.map((entry, i) => (
                 <LogRow
                   // why: ring-buffer entries have no id; ts+i is stable within a snapshot.

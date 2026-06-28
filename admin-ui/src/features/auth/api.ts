@@ -46,8 +46,11 @@ export function useLogout() {
   return useMutation({
     mutationFn: () => api.post<Ack>("/admin/auth/logout"),
     onSuccess: () => {
-      qc.setQueryData(authKeys.me, null);
+      // Clear first, then seed me=null: clear() wipes every entry (including a
+      // pre-set me=null), so setting it afterwards lets RequireAuth redirect
+      // immediately without the session observer refetching /admin/auth/me.
       qc.clear();
+      qc.setQueryData(authKeys.me, null);
     },
   });
 }

@@ -57,8 +57,17 @@ export function ResetPasswordDialog({
     if (!user) {
       return;
     }
-    await resetPassword.mutateAsync({ id: user.id, password: values.password });
-    onOpenChange(false);
+    // handleSubmit re-throws from an async onValid callback; swallow the rejection
+    // (the mutation's onError already toasts) and only close on success.
+    try {
+      await resetPassword.mutateAsync({
+        id: user.id,
+        password: values.password,
+      });
+      onOpenChange(false);
+    } catch {
+      // onError toasts
+    }
   }
 
   return (

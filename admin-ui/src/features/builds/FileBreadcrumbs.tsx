@@ -62,25 +62,33 @@ export function FileBreadcrumbs({
                   types.has(DRAG_TYPE) || types.has("file") ? "move" : "cancel"
                 }
                 onDrop={async (e) => {
-                  const fileItems = e.items.filter(isFileDropItem);
-                  if (fileItems.length > 0) {
-                    const files = await Promise.all(
-                      fileItems.map((item) => item.getFile()),
+                  // A foreign/malformed payload (or a getFile rejection) would
+                  // otherwise surface as an unhandled rejection — react-aria's
+                  // DropZone doesn't catch async onDrop errors.
+                  try {
+                    const fileItems = e.items.filter(isFileDropItem);
+                    if (fileItems.length > 0) {
+                      const files = await Promise.all(
+                        fileItems.map((item) => item.getFile()),
+                      );
+                      onUploadToRoot(files);
+                      return;
+                    }
+                    const textItem = e.items.find(
+                      (item) =>
+                        isTextDropItem(item) && item.types.has(DRAG_TYPE),
                     );
-                    onUploadToRoot(files);
-                    return;
-                  }
-                  const textItem = e.items.find(
-                    (item) => isTextDropItem(item) && item.types.has(DRAG_TYPE),
-                  );
-                  if (!textItem || !isTextDropItem(textItem)) {
-                    return;
-                  }
-                  const payload = JSON.parse(
-                    await textItem.getText(DRAG_TYPE),
-                  ) as DragPayload;
-                  if (payload.ids.length > 0) {
-                    onMoveToRoot(payload.ids);
+                    if (!textItem || !isTextDropItem(textItem)) {
+                      return;
+                    }
+                    const payload = JSON.parse(
+                      await textItem.getText(DRAG_TYPE),
+                    ) as DragPayload;
+                    if (Array.isArray(payload.ids) && payload.ids.length > 0) {
+                      onMoveToRoot(payload.ids);
+                    }
+                  } catch {
+                    // Ignore malformed drops.
                   }
                 }}
                 className={cn(

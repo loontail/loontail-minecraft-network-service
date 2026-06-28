@@ -25,8 +25,6 @@ export {
   useUploadMedia,
 };
 
-/// Resolve a single build by slug from the admin clients list. Mirrors the list's
-/// loading/error state so callers can show a skeleton while it resolves.
 export function useBuildBySlug(slug: string | undefined) {
   const query = useAdminClients();
   const build = slug

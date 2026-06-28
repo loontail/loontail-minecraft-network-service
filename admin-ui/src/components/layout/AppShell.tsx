@@ -34,7 +34,7 @@ export function AppShell() {
           <div className="flex size-7 items-center justify-center rounded-md bg-cta text-on-cta">
             <span className="text-caption font-extrabold">L</span>
           </div>
-          <span className="text-h2 font-bold tracking-tight">Loontail</span>
+          <span className="text-h2 tracking-tight">Loontail</span>
         </div>
         <Separator />
         <nav className="flex flex-1 flex-col gap-1 p-2">

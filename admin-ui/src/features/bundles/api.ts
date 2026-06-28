@@ -43,7 +43,13 @@ function invalidateBuild(
   qc.invalidateQueries({ queryKey: ["catalog", "clients"] });
 }
 
-/// Upload a ZIP archive under form field `archive` to a build.
+// A single build-invalidation callback for callers (e.g. a sequential upload batch)
+// that drive `silent` mutations and want to invalidate once at the end.
+export function useInvalidateBuild() {
+  const qc = useQueryClient();
+  return (slug: string) => invalidateBuild(qc, slug);
+}
+
 export function useUploadArchive() {
   const qc = useQueryClient();
   return useMutation({
@@ -61,7 +67,8 @@ export function useUploadArchive() {
   });
 }
 
-/// Upload a single file (form field `file`, optional `targetPath`).
+// `silent` skips the per-call toast + invalidation so a batch caller can emit one
+// summary toast and invalidate once at the end instead of per file.
 export function useUploadFile() {
   const qc = useQueryClient();
   return useMutation({
@@ -73,6 +80,7 @@ export function useUploadFile() {
       slug: string;
       file: File;
       targetPath?: string;
+      silent?: boolean;
     }) => {
       const form = new FormData();
       form.append("file", file);
@@ -81,12 +89,19 @@ export function useUploadFile() {
       }
       return api.upload<Bundle>(`${BASE}/builds/${slug}/files`, form);
     },
-    onSuccess: (bundle) => {
+    onSuccess: (bundle, { silent }) => {
+      if (silent) {
+        return;
+      }
       invalidateBuild(qc, bundle.slug);
       toast.success("File uploaded");
     },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to upload file")),
+    onError: (error, { silent }) => {
+      if (silent) {
+        return;
+      }
+      toast.error(errorMessage(error, "Failed to upload file"));
+    },
   });
 }
 
@@ -189,36 +204,9 @@ export function useBulkDelete() {
   });
 }
 
-/// Move a single entry into `targetDir` (the destination folder's relativePath;
-/// `""` = build root). The backend recomputes the new path as `join(targetDir,
-/// name)`, recursing into folders. A name collision returns 409 and an illegal move
-/// (e.g. into the entry's own subtree) a 4xx — both surfaced via `errorMessage`.
-export function useMoveFile() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      slug,
-      entryId,
-      targetDir,
-    }: {
-      slug: string;
-      entryId: string;
-      targetDir: string;
-    }) =>
-      api.post<Bundle>(`${BASE}/builds/${slug}/files/${entryId}/move`, {
-        targetDir,
-      }),
-    onSuccess: (bundle) => {
-      invalidateBuild(qc, bundle.slug);
-      toast.success("Moved");
-    },
-    onError: (error) => toast.error(errorMessage(error, "Failed to move entry")),
-  });
-}
-
-/// Move many entries into `targetDir` in a single all-or-nothing request (one
-/// manifest regen at the end). Same 409 (collision) / 4xx (illegal move) semantics
-/// as `useMoveFile`.
+// Move many entries into `targetDir` in a single all-or-nothing request (one
+// manifest regen at the end). A name collision returns 409 and an illegal move
+// (e.g. into the entry's own subtree) a 4xx — both surfaced via `errorMessage`.
 export function useMoveFiles() {
   const qc = useQueryClient();
   return useMutation({

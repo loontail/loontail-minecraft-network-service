@@ -377,7 +377,7 @@ describe("BuildFilesTab", () => {
       expect(
         fetchCalls.some(
           (c) =>
-            c.url.endsWith(`/admin/bundles/builds/atm9-overlay/files`) &&
+            c.url.endsWith("/admin/bundles/builds/atm9-overlay/files") &&
             (c.init?.method ?? "GET") === "POST",
         ),
       ).toBe(true);

@@ -53,7 +53,7 @@ export function RenameDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
-        <form onSubmit={submit}>
+        <form onSubmit={submit} className="flex flex-col gap-4">
           <DialogHeader>
             <DialogTitle>Rename “{entry.name}”</DialogTitle>
             <DialogDescription>
@@ -61,7 +61,7 @@ export function RenameDialog({
               folder.
             </DialogDescription>
           </DialogHeader>
-          <div className="mt-4 space-y-1.5">
+          <div className="space-y-1.5">
             <Label htmlFor="rename-name">New name</Label>
             <Input
               id="rename-name"
@@ -70,7 +70,7 @@ export function RenameDialog({
               onChange={(event) => setName(event.target.value)}
             />
           </div>
-          <DialogFooter className="mt-6">
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"

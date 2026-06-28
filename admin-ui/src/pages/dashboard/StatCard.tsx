@@ -12,22 +12,29 @@ import { cn } from "@/shared/lib/cn";
 interface StatCardProps {
   label: string;
   icon: LucideIcon;
-  value: number | undefined;
   hint?: string;
   isLoading?: boolean;
+  // Either a raw numeric value (rendered via toLocaleString, with a muted style at
+  // zero) or a pre-formatted display string (rate/latency). Exactly one is used:
+  // `display`, when provided, overrides the numeric path.
+  value?: number;
+  display?: string;
 }
 
 export function StatCard({
   label,
   icon: Icon,
   value,
+  display,
   hint,
   isLoading,
 }: StatCardProps) {
-  const showSkeleton = isLoading || value === undefined;
+  const isDisplay = display !== undefined || value === undefined;
+  const showSkeleton =
+    isLoading || (display === undefined && value === undefined);
 
   return (
-    <Card className="gap-3 py-5 transition-colors hover:border-edge-md">
+    <Card className="gap-3 py-5 transition-colors hover:border-edge-lg">
       <CardHeader className="gap-2">
         <CardDescription className="flex items-center gap-2 text-text-mute">
           <Icon className="size-4 text-text-faint" aria-hidden />
@@ -36,18 +43,18 @@ export function StatCard({
         <CardTitle
           className={cn(
             "text-display tabular-nums text-text-hi",
-            value === 0 && !showSkeleton && "text-text-mute",
+            value === 0 && !isDisplay && !showSkeleton && "text-text-mute",
           )}
         >
           {showSkeleton ? (
             <Skeleton className="h-8 w-14" />
+          ) : isDisplay ? (
+            display
           ) : (
-            value.toLocaleString()
+            value?.toLocaleString()
           )}
         </CardTitle>
-        {hint ? (
-          <p className="text-caption text-text-faint">{hint}</p>
-        ) : null}
+        {hint ? <p className="text-caption text-text-faint">{hint}</p> : null}
       </CardHeader>
     </Card>
   );

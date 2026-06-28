@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import type * as React from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -142,6 +142,13 @@ function buildToForm(build: ClientAdmin): BuildFormState {
   };
 }
 
+// A stable token over the persisted fields the form mirrors. When it changes the
+// server's copy diverged from what we hold (e.g. slug casing normalization on
+// save), so the form must re-seed.
+function buildFormToken(build: ClientAdmin): string {
+  return JSON.stringify(buildToForm(build));
+}
+
 function nullable(value: string): string | null {
   const trimmed = value.trim();
   return trimmed === "" ? null : trimmed;
@@ -218,6 +225,19 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   const [javaCustom, setJavaCustom] = useState(false);
   const updateClient = useUpdateClient();
   const versions = useVersions();
+
+  // Re-seed the form when the persisted build changes (e.g. the backend
+  // normalized a field on save), so it never silently diverges from the server
+  // copy. Tracked by a server-value token rather than `build.id` so the panel's
+  // key={build.id} (which only remounts on identity change) doesn't mask updates.
+  const seededToken = useRef(buildFormToken(build));
+  useEffect(() => {
+    const token = buildFormToken(build);
+    if (token !== seededToken.current) {
+      seededToken.current = token;
+      setForm(buildToForm(build));
+    }
+  }, [build]);
 
   function field<K extends keyof BuildFormState>(
     key: K,
@@ -308,7 +328,10 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   return (
     <Card>
       <CardContent>
-        <form onSubmit={handleSubmit} className="grid grid-cols-2 gap-4">
+        <form
+          onSubmit={handleSubmit}
+          className="grid grid-cols-1 gap-4 sm:grid-cols-2"
+        >
           <div className="space-y-1.5">
             <Label htmlFor="build-slug">Slug</Label>
             <Input
@@ -327,7 +350,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
               onChange={(event) => field("title", event.target.value)}
             />
           </div>
-          <div className="col-span-2 space-y-1.5">
+          <div className="space-y-1.5 sm:col-span-2">
             <Label htmlFor="build-short">Short description</Label>
             <Input
               id="build-short"
@@ -337,7 +360,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
               }
             />
           </div>
-          <div className="col-span-2 space-y-1.5">
+          <div className="space-y-1.5 sm:col-span-2">
             <Label htmlFor="build-desc">Description</Label>
             <Textarea
               id="build-desc"
@@ -502,7 +525,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
               aria-label="Available"
             />
           </div>
-          <div className="col-span-2 flex justify-end">
+          <div className="flex justify-end sm:col-span-2">
             <Button
               type="submit"
               disabled={
@@ -524,6 +547,74 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
 }
 
 // --- Servers & Tags --------------------------------------------------------
+
+// Shared "attach an existing entity, or create a new one" control used verbatim by
+// both the Keywords and Servers sections: a Select of available items + Add button
+// + a "Create new" toggle. The create form itself differs per entity, so it stays
+// in each section and is toggled via `creating`/`onToggleCreate`.
+function AddExistingPicker<T extends { id: string }>({
+  available,
+  pickId,
+  onPick,
+  onAdd,
+  onToggleCreate,
+  pending,
+  ariaLabel,
+  emptyLabel,
+  selectLabel,
+  renderOption,
+}: {
+  available: T[];
+  pickId: string;
+  onPick: (id: string) => void;
+  onAdd: () => void;
+  onToggleCreate: () => void;
+  pending: boolean;
+  ariaLabel: string;
+  emptyLabel: string;
+  selectLabel: string;
+  renderOption: (item: T) => React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Select
+        value={pickId}
+        disabled={pending || available.length === 0}
+        onValueChange={onPick}
+      >
+        <SelectTrigger aria-label={ariaLabel} className="w-56">
+          <SelectValue
+            placeholder={available.length === 0 ? emptyLabel : selectLabel}
+          />
+        </SelectTrigger>
+        <SelectContent>
+          {available.map((item) => (
+            <SelectItem key={item.id} value={item.id}>
+              {renderOption(item)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Button
+        type="button"
+        variant="outline"
+        disabled={pending || !pickId}
+        onClick={onAdd}
+      >
+        <Plus className="size-4" />
+        Add
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        disabled={pending}
+        onClick={onToggleCreate}
+      >
+        Create new
+      </Button>
+    </div>
+  );
+}
 
 function KeywordsSection({ build }: { build: ClientAdmin }) {
   const allKeywords = useKeywords();
@@ -611,47 +702,18 @@ function KeywordsSection({ build }: { build: ClientAdmin }) {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={pickId}
-            disabled={pending || available.length === 0}
-            onValueChange={setPickId}
-          >
-            <SelectTrigger aria-label="Add keyword" className="w-56">
-              <SelectValue
-                placeholder={
-                  available.length === 0
-                    ? "No more keywords"
-                    : "Select a keyword…"
-                }
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {available.map((keyword) => (
-                <SelectItem key={keyword.id} value={keyword.id}>
-                  {keyword.title}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={pending || !pickId}
-            onClick={attachExisting}
-          >
-            <Plus className="size-4" />
-            Add
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={pending}
-            onClick={() => setCreating((prev) => !prev)}
-          >
-            Create new
-          </Button>
-        </div>
+        <AddExistingPicker
+          available={available}
+          pickId={pickId}
+          onPick={setPickId}
+          onAdd={attachExisting}
+          onToggleCreate={() => setCreating((prev) => !prev)}
+          pending={pending}
+          ariaLabel="Add keyword"
+          emptyLabel="No more keywords"
+          selectLabel="Select a keyword…"
+          renderOption={(keyword) => keyword.title}
+        />
 
         {creating ? (
           <form
@@ -788,47 +850,18 @@ function ServersSection({ build }: { build: ClientAdmin }) {
           </ul>
         )}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={pickId}
-            disabled={pending || available.length === 0}
-            onValueChange={setPickId}
-          >
-            <SelectTrigger aria-label="Add server" className="w-56">
-              <SelectValue
-                placeholder={
-                  available.length === 0
-                    ? "No more servers"
-                    : "Select a server…"
-                }
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {available.map((server) => (
-                <SelectItem key={server.id} value={server.id}>
-                  {server.name ?? server.address}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={pending || !pickId}
-            onClick={attachExisting}
-          >
-            <Plus className="size-4" />
-            Add
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={pending}
-            onClick={() => setCreating((prev) => !prev)}
-          >
-            Create new
-          </Button>
-        </div>
+        <AddExistingPicker
+          available={available}
+          pickId={pickId}
+          onPick={setPickId}
+          onAdd={attachExisting}
+          onToggleCreate={() => setCreating((prev) => !prev)}
+          pending={pending}
+          ariaLabel="Add server"
+          emptyLabel="No more servers"
+          selectLabel="Select a server…"
+          renderOption={(server) => server.name ?? server.address}
+        />
 
         {creating ? (
           <form

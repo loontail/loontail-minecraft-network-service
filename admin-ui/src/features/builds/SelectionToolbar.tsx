@@ -2,9 +2,6 @@ import { Download, FolderInput, Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
-/// The contextual action bar shown while one or more entries are selected
-/// (Google-Drive style). Mirrors GDrive's selection chrome: a count, a clear
-/// button, then Move / Download / Delete.
 export function SelectionToolbar({
   count,
   onClear,

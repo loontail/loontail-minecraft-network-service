@@ -3,7 +3,6 @@ import {
   Activity,
   Boxes,
   Gamepad2,
-  LineChart as LineChartIcon,
   Radio,
   Users,
   Wifi,
@@ -11,6 +10,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
+import { EmptyChartState } from "@/components/shared/EmptyChartState";
 import { PageHeader } from "@/components/shared/PageHeader";
 import {
   Card,
@@ -28,11 +28,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useOverview, useTimeseries } from "@/features/analytics/api";
 import { StatCard } from "@/pages/dashboard/StatCard";
-import {
-  type TimeseriesWindow,
-  WindowSelector,
-} from "@/pages/dashboard/WindowSelector";
-import type { AnalyticsOverview } from "@/shared/types";
+import { WindowSelector } from "@/pages/dashboard/WindowSelector";
+import type { AnalyticsOverview, TrafficWindow } from "@/shared/types";
 
 interface StatDef {
   key: keyof AnalyticsOverview;
@@ -83,7 +80,7 @@ const chartConfig = {
   },
 } satisfies ChartConfig;
 
-function formatBucketTick(value: string, window: TimeseriesWindow): string {
+function formatBucketTick(value: string, window: TrafficWindow): string {
   const date = new Date(value);
   if (window === "24h") {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -91,7 +88,7 @@ function formatBucketTick(value: string, window: TimeseriesWindow): string {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-function formatBucketLabel(value: string, window: TimeseriesWindow): string {
+function formatBucketLabel(value: string, window: TrafficWindow): string {
   const date = new Date(value);
   if (window === "24h") {
     return date.toLocaleString([], {
@@ -109,7 +106,7 @@ function formatBucketLabel(value: string, window: TimeseriesWindow): string {
 }
 
 export function DashboardPage() {
-  const [window, setWindow] = useState<TimeseriesWindow>("24h");
+  const [window, setWindow] = useState<TrafficWindow>("24h");
   const overview = useOverview();
   const series = useTimeseries(TIMESERIES_METRIC, window);
 
@@ -242,22 +239,6 @@ export function DashboardPage() {
           )}
         </CardContent>
       </Card>
-    </div>
-  );
-}
-
-function EmptyChartState({
-  title,
-  detail,
-}: {
-  title: string;
-  detail: string;
-}) {
-  return (
-    <div className="flex aspect-video max-h-72 w-full flex-col items-center justify-center gap-2 rounded-md border border-dashed border-edge text-center">
-      <LineChartIcon className="size-7 text-text-faint" aria-hidden />
-      <p className="text-body-med text-text">{title}</p>
-      <p className="max-w-xs text-caption text-text-faint">{detail}</p>
     </div>
   );
 }

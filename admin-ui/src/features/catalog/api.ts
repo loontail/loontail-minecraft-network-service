@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { api } from "@/shared/api/client";
 import { errorMessage } from "@/shared/api/toast";
 import type {
-  AttachMedia,
   CatalogMutationResult,
   ClientAdminList,
   KeywordList,
@@ -118,20 +117,6 @@ export function usePublishClient() {
     },
     onError: (error) =>
       toast.error(errorMessage(error, "Failed to change publish state")),
-  });
-}
-
-export function useAttachMedia() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, ...body }: { id: string } & AttachMedia) =>
-      api.post<CatalogMutationResult>(`/admin/catalog/clients/${id}/media`, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: catalogKeys.clients() });
-      toast.success("Media attached");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to attach media")),
   });
 }
 
@@ -265,20 +250,6 @@ export function useCreateKeyword() {
   });
 }
 
-export function useDeleteKeyword() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) =>
-      api.delete<void>(`/admin/catalog/keywords/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: catalogKeys.keywords() });
-      toast.success("Keyword deleted");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to delete keyword")),
-  });
-}
-
 // --- Servers ---------------------------------------------------------------
 
 export function useCreateServer() {
@@ -295,31 +266,4 @@ export function useCreateServer() {
   });
 }
 
-export function useUpdateServer() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, ...body }: { id: string } & UpsertServer) =>
-      api.patch<CatalogMutationResult>(`/admin/catalog/servers/${id}`, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: catalogKeys.servers() });
-      toast.success("Server updated");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to update server")),
-  });
-}
-
-export function useDeleteServer() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) =>
-      api.delete<void>(`/admin/catalog/servers/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: catalogKeys.servers() });
-      toast.success("Server deleted");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to delete server")),
-  });
-}
 
