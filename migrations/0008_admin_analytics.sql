@@ -1,5 +1,5 @@
 -- Admin sessions (opaque cookie tokens, stored hashed), launcher API tokens
--- (catalog/manifest auth, replaces strapi_api_tokens), and append-only analytics
+-- (catalog/manifest auth), and append-only analytics
 -- events written off the hot paths.
 CREATE TABLE admin_sessions (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,8 +1,6 @@
 -- Launcher catalog: clients, keywords, servers, their localized text, media, and
--- the join tables. Shapes are driven by the launcher's Strapi-compatible JSON
--- (see the design doc §5 CATALOG and the launcher `client.ts`/`strapi.ts`
--- contracts): camelCase wire fields, `{data,meta:{pagination}}` envelope, draft
--- filter via `published_at`, server-relative media URLs, nullable version cols.
+-- the join tables. camelCase wire fields, draft filter via `published_at`,
+-- server-relative media URLs, nullable version cols.
 
 -- ---------------------------------------------------------------------------
 -- Clients: one launcher "build" entry. Locale-independent fields live here;
@@ -39,7 +37,7 @@ CREATE INDEX catalog_client_locales_client ON catalog_client_locales (client_id)
 
 -- ---------------------------------------------------------------------------
 -- Media: one row per image. `role` selects the launcher slot
--- (poster | background | titleImage | screenshot). `formats` is the Strapi
+-- (poster | background | titleImage | screenshot). `formats` is the image
 -- formats map (thumbnail/large/medium/small) stored verbatim as JSONB. `url` is
 -- server-relative; the launcher absolutizes it.
 -- ---------------------------------------------------------------------------
