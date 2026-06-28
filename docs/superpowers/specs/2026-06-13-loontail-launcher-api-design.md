@@ -18,7 +18,7 @@ used to be three systems:
 - the existing Rust **network service** (friends / presence / world-sessions /
   join flow / relay / signaling / metrics) — kept as-is,
 - the **Yggdrasil** Mojang-compatible auth/session/textures server (ported from the
-  Strapi plugin, **online-mode, RSA-SHA1 signed textures**),
+  legacy-backend plugin, **online-mode, RSA-SHA1 signed textures**),
 - the **skin/cape registry**, the launcher **catalog** (clients/keywords/servers),
   and the **bundle registry** (builds/artifacts/manifests),
 - a new **admin panel** (React + shadcn SPA) with user management (create users
@@ -234,7 +234,7 @@ Keep the existing network migrations, append new ones. All new tables FK `users(
     token_hash TEXT NOT NULL UNIQUE, expires_at TIMESTAMPTZ NOT NULL,
     revoked_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE TABLE api_tokens (                      -- replaces strapi_api_tokens (launcher catalog/manifest auth)
+  CREATE TABLE api_tokens (                      -- replaces the legacy backend's API tokens table (launcher catalog/manifest auth)
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, scopes TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_used_at TIMESTAMPTZ
@@ -278,7 +278,7 @@ served statically.
 
 **CATALOG** (launcher contract 1:1; Bearer `API_TOKEN` or public read):
 `GET /api/clients?populate[...]=true&locale=` → `{data:Client[],meta:{pagination}}`,
-`GET /api/clients/{id}`, `GET /api/keywords`, `GET /api/servers`. Preserve: Strapi
+`GET /api/clients/{id}`, `GET /api/keywords`, `GET /api/servers`. Preserve: the legacy backend's
 `populate[field]=true` query parsing, `{data,meta:{pagination}}` envelope,
 `publishedAt` draft filter, i18n locale fallback, media `url` left server-relative
 (launcher absolutizes), version-field shape. Match field names the launcher coerces.
@@ -325,7 +325,7 @@ activeRelays, totalUsers), `GET /admin/analytics/timeseries?metric=&window=`;
   64x32 only. base64 normalizer: standard alphabet, reject len%4==1, pad to /4.
 - **Golden-vector test**: fixed (timestamp, uuid, name, skinUrl) must yield a
   byte-identical `value` and a signature that verifies against the existing SPKI key.
-  Capture the Node reference output once (run the Strapi plugin / a tiny node script)
+  Capture the Node reference output once (run the legacy-backend plugin / a tiny node script)
   and assert equality. Yggdrasil is not "done" until this is green.
 
 ---

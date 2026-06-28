@@ -4,7 +4,7 @@ Follow-up to `merge-builds-bundles-plan.md`. Driven by an investigation workflow
 
 ## Locked decisions
 - **Keywords + Servers move INTO Builds, per-build.** No global Catalog/Settings page — DELETE `CatalogPage` + its nav/route. Manage a build's keywords + servers from the Build detail page (attach existing via combobox + create-new inline + detach). Keep the global `catalog_keywords`/`catalog_servers` tables + the `catalog_client_keywords`/`catalog_client_servers` join tables (the launcher `Client` DTO inlines `keywords[]`/`servers[]` — frozen contract). "Not global" = no global management page; the entities stay shared in the DB but are reached through a build.
-- **Versions** → build-time `admin-ui/scripts/generate-versions.mjs` (imports `@loontail/minecraft-kit` as a **devDependency**, calls the 4 resolvers the old Strapi controller used, writes `public/versions.json`); cascading shadcn `Select` pickers (Forge/Fabric gated on chosen MC). `runtimeVersion` stays free-text (kit's runtime API is OS/arch-coupled via `node:os`). `@loontail/minecraft-kit` must NOT enter the browser bundle (Node-only: tsup platform:node, re-exports node:child_process/fs/os).
+- **Versions** → build-time `admin-ui/scripts/generate-versions.mjs` (imports `@loontail/minecraft-kit` as a **devDependency**, calls the 4 resolvers the old legacy-backend controller used, writes `public/versions.json`); cascading shadcn `Select` pickers (Forge/Fabric gated on chosen MC). `runtimeVersion` stays free-text (kit's runtime API is OS/arch-coupled via `node:os`). `@loontail/minecraft-kit` must NOT enter the browser bundle (Node-only: tsup platform:node, re-exports node:child_process/fs/os).
 - **File manager** → `react-aria-components` `Tree` + `useDragAndDrop` (Apache-2.0, React 19 peer, headless → fits shadcn, native drop-onto-folder). Move == rename to a new path prefix (server already supports recursive rename of files AND folders).
 - Do all 6 waves now, verify each.
 
@@ -30,7 +30,7 @@ Follow-up to `merge-builds-bundles-plan.md`. Driven by an investigation workflow
 - P2: remove dead bundles hooks (`useBuilds`/`useCreateBuild`/`useUpdateBuild`/`useDeleteBuild`/`useDiskSpace`) after confirming no caller (keep `useBuild` + the file-op hooks).
 
 ### Wave C — Version dropdowns (build-time versions.json)
-- `admin-ui/scripts/generate-versions.mjs` imports `@loontail/minecraft-kit`, emits `public/versions.json` ({ minecraft:[], fabricFor(mc), forgeFor(mc) } — mirror the 4 Strapi resolvers + cascade). Add `@loontail/minecraft-kit` as devDependency; wire `prebuild`/`build` in package.json; refresh lockfile.
+- `admin-ui/scripts/generate-versions.mjs` imports `@loontail/minecraft-kit`, emits `public/versions.json` ({ minecraft:[], fabricFor(mc), forgeFor(mc) } — mirror the 4 legacy-backend resolvers + cascade). Add `@loontail/minecraft-kit` as devDependency; wire `prebuild`/`build` in package.json; refresh lockfile.
 - `BuildDetailPage.tsx`: replace the 4 free-text version Inputs with cascading shadcn `Select`s (MC list; Forge/Fabric disabled until MC chosen, filtered by MC). Keep `runtimeVersion` free-text. No schema change (fields already `string|null`). Allow a custom/empty value so legacy versions not in the list still display.
 - Verify the bundle has no `node:` leak (build succeeds).
 

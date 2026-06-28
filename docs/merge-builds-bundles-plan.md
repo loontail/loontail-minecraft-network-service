@@ -5,7 +5,7 @@ domain with the bundle registry in the loontail-launcher-api admin panel.
 
 ## Goal (user)
 1. Fix new-build creation: admins must be able to add background/title/poster
-   images and publish — matching and exceeding the old Strapi media UX. **(Wave 0 — DONE)**
+   images and publish — matching and exceeding the old legacy-backend media UX. **(Wave 0 — DONE)**
 2. Embed the bundle INTO the build: the build page has a file-system widget to
    upload files; the build then IS a manifest with a working launcher link.
 3. Net: one "Build" concept end-to-end (builds + bundle registry merged).
@@ -81,7 +81,7 @@ domain with the bundle registry in the loontail-launcher-api admin panel.
 - Details tab: auto-slug from title, version fields, available, Publish/Unpublish with real
   state, copyable Manifest URL panel.
 - Media tab: poster/background/titleImage + screenshots, rendered unconditionally (the row
-  exists before this page is reached). Beat Strapi: drag-drop onto slots, in-place replace,
+  exists before this page is reached). Beat the legacy backend: drag-drop onto slots, in-place replace,
   required poster+background, screenshot reorder via `sortOrder`.
 
 ## Wave 4 — File-system widget (frontend; wires existing backend)

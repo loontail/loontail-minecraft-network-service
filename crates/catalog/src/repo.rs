@@ -2,6 +2,8 @@
 //! (`published_at IS NOT NULL`), i18n locale fallback (requested locale row, else
 //! the default-locale row, else any row), and always inline relations.
 
+use std::collections::HashMap;
+
 use loontail_core::error::AppResult;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -56,9 +58,7 @@ impl ClientAdminRow {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct ClientLocaleRow {
-    locale: String,
     title: String,
     description: Option<String>,
     short_description: Option<String>,
@@ -90,6 +90,56 @@ struct ServerRow {
     address: String,
 }
 
+/// Batch-loader rows carry the owning `client_id` so a single `WHERE client_id =
+/// ANY($1)` read across the whole list can be grouped per client in memory.
+#[derive(sqlx::FromRow)]
+struct ClientLocaleBatchRow {
+    client_id: Uuid,
+    locale: String,
+    title: String,
+    description: Option<String>,
+    short_description: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct MediaBatchRow {
+    client_id: Uuid,
+    role: String,
+    url: String,
+    width: Option<i32>,
+    height: Option<i32>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ClientKeywordBatchRow {
+    client_id: Uuid,
+    id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct KeywordLocaleBatchRow {
+    keyword_id: Uuid,
+    locale: String,
+    title: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ServerBatchRow {
+    client_id: Uuid,
+    id: Uuid,
+    name: Option<String>,
+    address: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct BundleBatchRow {
+    id: Uuid,
+    slug: String,
+    version: Option<String>,
+    status: String,
+    files_count: i64,
+}
+
 const CLIENT_COLS: &str = "id, slug, available, minecraft_version, forge_version, \
     fabric_version, runtime_version, bundle_id";
 
@@ -116,48 +166,32 @@ fn pick_locale<'a, T>(rows: &'a [(String, T)], requested: &str) -> Option<&'a T>
         .map(|(_, t)| t)
 }
 
-async fn client_locale(
-    pool: &PgPool,
-    client_id: Uuid,
+/// Resolve a single client's localized text from its already-grouped locale rows,
+/// applying the [`pick_locale`] fallback (exact → default → first).
+fn resolve_client_locale(
+    rows: &[(String, ClientLocaleRow)],
     requested: &str,
-) -> AppResult<(String, Option<String>, Option<String>)> {
-    let rows = sqlx::query_as::<_, ClientLocaleRow>(
-        "SELECT locale, title, description, short_description \
-         FROM catalog_client_locales WHERE client_id = $1",
-    )
-    .bind(client_id)
-    .fetch_all(pool)
-    .await?;
-
-    let indexed: Vec<(String, ClientLocaleRow)> =
-        rows.into_iter().map(|r| (r.locale.clone(), r)).collect();
-    match pick_locale(&indexed, requested) {
-        Some(row) => Ok((
+) -> (String, Option<String>, Option<String>) {
+    match pick_locale(rows, requested) {
+        Some(row) => (
             row.title.clone(),
             row.description.clone(),
             row.short_description.clone(),
-        )),
-        None => Ok((String::new(), None, None)),
+        ),
+        None => (String::new(), None, None),
     }
 }
 
-async fn client_media(
-    pool: &PgPool,
-    client_id: Uuid,
-) -> AppResult<(
+/// Fold a single client's `sort_order, created_at`-ordered media rows into the
+/// `(background, poster, titleImage, screenshots)` slots the DTO carries.
+fn assemble_media(
+    rows: Vec<MediaRow>,
+) -> (
     Option<MediaDto>,
     Option<MediaDto>,
     Option<MediaDto>,
     Vec<MediaDto>,
-)> {
-    let rows = sqlx::query_as::<_, MediaRow>(
-        "SELECT role, url, width, height FROM catalog_media WHERE client_id = $1 \
-         ORDER BY sort_order, created_at",
-    )
-    .bind(client_id)
-    .fetch_all(pool)
-    .await?;
-
+) {
     let mut background = None;
     let mut poster = None;
     let mut title_image = None;
@@ -173,34 +207,7 @@ async fn client_media(
         }
     }
 
-    Ok((background, poster, title_image, screenshots))
-}
-
-async fn client_keywords(
-    pool: &PgPool,
-    client_id: Uuid,
-    requested: &str,
-) -> AppResult<Vec<KeywordDto>> {
-    let rows = sqlx::query_as::<_, KeywordRow>(
-        "SELECT k.id \
-         FROM catalog_keywords k \
-         JOIN catalog_client_keywords ck ON ck.keyword_id = k.id \
-         WHERE ck.client_id = $1 AND k.published_at IS NOT NULL \
-         ORDER BY ck.sort_order, k.created_at",
-    )
-    .bind(client_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let title = keyword_title(pool, row.id, requested).await?;
-        out.push(KeywordDto {
-            id: id_hex(row.id),
-            title,
-        });
-    }
-    Ok(out)
+    (background, poster, title_image, screenshots)
 }
 
 async fn keyword_title(pool: &PgPool, keyword_id: Uuid, requested: &str) -> AppResult<String> {
@@ -216,73 +223,223 @@ async fn keyword_title(pool: &PgPool, keyword_id: Uuid, requested: &str) -> AppR
         .unwrap_or_default())
 }
 
-async fn client_servers(pool: &PgPool, client_id: Uuid) -> AppResult<Vec<ServerDto>> {
-    let rows = sqlx::query_as::<_, ServerRow>(
-        "SELECT s.id, s.name, s.address \
-         FROM catalog_servers s \
-         JOIN catalog_client_servers cs ON cs.server_id = s.id \
-         WHERE cs.client_id = $1 AND s.published_at IS NOT NULL \
-         ORDER BY cs.sort_order, s.created_at",
+/// Per-client relation data preloaded for a whole client set in a fixed number of
+/// queries (one per relation type), so [`assemble_client_dto`] builds each DTO from
+/// memory instead of issuing per-client round-trips.
+#[derive(Default)]
+struct ClientRelations {
+    locales: HashMap<Uuid, Vec<(String, ClientLocaleRow)>>,
+    media: HashMap<Uuid, Vec<MediaRow>>,
+    keywords: HashMap<Uuid, Vec<KeywordDto>>,
+    servers: HashMap<Uuid, Vec<ServerDto>>,
+    bundles: HashMap<Uuid, BundleSummaryDto>,
+}
+
+/// Load every relation for `client_ids` in one query per relation type
+/// (`WHERE client_id = ANY($1)`), preserving each per-client ordering, then group
+/// the rows by client for in-memory DTO assembly. Keyword titles are resolved with
+/// a single batched locale read across all linked keywords (was the N×M hot spot).
+/// `bundle_links` carries each client's non-NULL `bundle_id` so owned bundles load
+/// in one read keyed back to the client.
+async fn load_client_relations(
+    pool: &PgPool,
+    client_ids: &[Uuid],
+    bundle_links: &[(Uuid, Uuid)],
+    locale: &str,
+) -> AppResult<ClientRelations> {
+    if client_ids.is_empty() {
+        return Ok(ClientRelations::default());
+    }
+
+    let mut relations = ClientRelations::default();
+
+    let locale_rows = sqlx::query_as::<_, ClientLocaleBatchRow>(
+        "SELECT client_id, locale, title, description, short_description \
+         FROM catalog_client_locales WHERE client_id = ANY($1)",
     )
-    .bind(client_id)
+    .bind(client_ids)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| ServerDto {
-            id: id_hex(r.id),
-            name: r.name,
-            address: r.address,
-        })
-        .collect())
-}
+    for row in locale_rows {
+        relations.locales.entry(row.client_id).or_default().push((
+            row.locale,
+            ClientLocaleRow {
+                title: row.title,
+                description: row.description,
+                short_description: row.short_description,
+            },
+        ));
+    }
 
-#[derive(sqlx::FromRow)]
-struct BundleSummaryRow {
-    slug: String,
-    version: Option<String>,
-    status: String,
-    files_count: i64,
-}
-
-/// Read the linked bundle's summary for inlining into [`ClientDto`]. `None` when
-/// the client has no `bundle_id` or the referenced bundle row is missing (the read
-/// stays tolerant though a build owns its bundle 1:1).
-async fn bundle_summary(
-    pool: &PgPool,
-    bundle_id: Option<Uuid>,
-) -> AppResult<Option<BundleSummaryDto>> {
-    let Some(bundle_id) = bundle_id else {
-        return Ok(None);
-    };
-    let row = sqlx::query_as::<_, BundleSummaryRow>(
-        "SELECT slug, version, status, files_count::BIGINT AS files_count FROM bundles WHERE id = $1",
+    let media_rows = sqlx::query_as::<_, MediaBatchRow>(
+        "SELECT client_id, role, url, width, height FROM catalog_media \
+         WHERE client_id = ANY($1) ORDER BY client_id, sort_order, created_at",
     )
-    .bind(bundle_id)
-    .fetch_optional(pool)
+    .bind(client_ids)
+    .fetch_all(pool)
     .await?;
-    Ok(row.map(|r| BundleSummaryDto {
-        manifest_url: format!("/api/bundle-registry/builds/{}/manifest", r.slug),
-        slug: r.slug,
-        version: r.version,
-        status: r.status,
-        files_count: r.files_count,
-    }))
+    for row in media_rows {
+        relations
+            .media
+            .entry(row.client_id)
+            .or_default()
+            .push(MediaRow {
+                role: row.role,
+                url: row.url,
+                width: row.width,
+                height: row.height,
+            });
+    }
+
+    let keyword_rows = sqlx::query_as::<_, ClientKeywordBatchRow>(
+        "SELECT ck.client_id, k.id \
+         FROM catalog_keywords k \
+         JOIN catalog_client_keywords ck ON ck.keyword_id = k.id \
+         WHERE ck.client_id = ANY($1) AND k.published_at IS NOT NULL \
+         ORDER BY ck.client_id, ck.sort_order, k.created_at",
+    )
+    .bind(client_ids)
+    .fetch_all(pool)
+    .await?;
+    let keyword_titles = load_keyword_titles(pool, &keyword_rows, locale).await?;
+    for row in keyword_rows {
+        let title = keyword_titles.get(&row.id).cloned().unwrap_or_default();
+        relations
+            .keywords
+            .entry(row.client_id)
+            .or_default()
+            .push(KeywordDto {
+                id: id_hex(row.id),
+                title,
+            });
+    }
+
+    let server_rows = sqlx::query_as::<_, ServerBatchRow>(
+        "SELECT cs.client_id, s.id, s.name, s.address \
+         FROM catalog_servers s \
+         JOIN catalog_client_servers cs ON cs.server_id = s.id \
+         WHERE cs.client_id = ANY($1) AND s.published_at IS NOT NULL \
+         ORDER BY cs.client_id, cs.sort_order, s.created_at",
+    )
+    .bind(client_ids)
+    .fetch_all(pool)
+    .await?;
+    for row in server_rows {
+        relations
+            .servers
+            .entry(row.client_id)
+            .or_default()
+            .push(ServerDto {
+                id: id_hex(row.id),
+                name: row.name,
+                address: row.address,
+            });
+    }
+
+    relations.bundles = load_bundles(pool, bundle_links).await?;
+
+    Ok(relations)
 }
 
-async fn build_client_dto(
+/// Resolve the localized title for every keyword id in `keyword_rows` with a single
+/// `catalog_keyword_locales` read, applying the [`pick_locale`] fallback per keyword.
+async fn load_keyword_titles(
     pool: &PgPool,
-    row: ClientRow,
-    query: &CatalogQuery,
-) -> AppResult<ClientDto> {
-    let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
-    let (title, description, short_description) = client_locale(pool, row.id, locale).await?;
-    let (background, poster, title_image, screenshots) = client_media(pool, row.id).await?;
-    let keywords = client_keywords(pool, row.id, locale).await?;
-    let servers = client_servers(pool, row.id).await?;
-    let bundle = bundle_summary(pool, row.bundle_id).await?;
+    keyword_rows: &[ClientKeywordBatchRow],
+    requested: &str,
+) -> AppResult<HashMap<Uuid, String>> {
+    let mut keyword_ids: Vec<Uuid> = keyword_rows.iter().map(|r| r.id).collect();
+    keyword_ids.sort_unstable();
+    keyword_ids.dedup();
+    if keyword_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
 
-    Ok(ClientDto {
+    let rows = sqlx::query_as::<_, KeywordLocaleBatchRow>(
+        "SELECT keyword_id, locale, title FROM catalog_keyword_locales \
+         WHERE keyword_id = ANY($1)",
+    )
+    .bind(&keyword_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut grouped: HashMap<Uuid, Vec<(String, String)>> = HashMap::new();
+    for row in rows {
+        grouped
+            .entry(row.keyword_id)
+            .or_default()
+            .push((row.locale, row.title));
+    }
+
+    let mut out = HashMap::with_capacity(keyword_ids.len());
+    for id in keyword_ids {
+        let title = grouped
+            .get(&id)
+            .and_then(|locales| pick_locale(locales, requested).cloned())
+            .unwrap_or_default();
+        out.insert(id, title);
+    }
+    Ok(out)
+}
+
+/// Load the owned-bundle summary for each `(client_id, bundle_id)` link in one read
+/// over the distinct bundle ids, returned keyed by `client_id`. Tolerant like the
+/// single read: a NULL `bundle_id` is never in `bundle_links`, and a dangling
+/// `bundle_id` (no matching `bundles` row) simply yields no entry for that client.
+async fn load_bundles(
+    pool: &PgPool,
+    bundle_links: &[(Uuid, Uuid)],
+) -> AppResult<HashMap<Uuid, BundleSummaryDto>> {
+    if bundle_links.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut bundle_ids: Vec<Uuid> = bundle_links
+        .iter()
+        .map(|(_, bundle_id)| *bundle_id)
+        .collect();
+    bundle_ids.sort_unstable();
+    bundle_ids.dedup();
+
+    let rows = sqlx::query_as::<_, BundleBatchRow>(
+        "SELECT id, slug, version, status, files_count::BIGINT AS files_count \
+         FROM bundles WHERE id = ANY($1)",
+    )
+    .bind(&bundle_ids)
+    .fetch_all(pool)
+    .await?;
+    let by_bundle: HashMap<Uuid, BundleBatchRow> = rows.into_iter().map(|b| (b.id, b)).collect();
+
+    let mut out = HashMap::with_capacity(bundle_links.len());
+    for (client_id, bundle_id) in bundle_links {
+        if let Some(b) = by_bundle.get(bundle_id) {
+            out.insert(
+                *client_id,
+                BundleSummaryDto {
+                    manifest_url: format!("/api/bundle-registry/builds/{}/manifest", b.slug),
+                    slug: b.slug.clone(),
+                    version: b.version.clone(),
+                    status: b.status.clone(),
+                    files_count: b.files_count,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Build one [`ClientDto`] from the preloaded relation set. Pure (no I/O), so it
+/// produces a byte-identical DTO whether the relations came from a list batch or a
+/// one-element `get` batch.
+fn assemble_client_dto(row: ClientRow, relations: &mut ClientRelations, locale: &str) -> ClientDto {
+    let locale_rows = relations.locales.remove(&row.id).unwrap_or_default();
+    let (title, description, short_description) = resolve_client_locale(&locale_rows, locale);
+    let media_rows = relations.media.remove(&row.id).unwrap_or_default();
+    let (background, poster, title_image, screenshots) = assemble_media(media_rows);
+    let keywords = relations.keywords.remove(&row.id).unwrap_or_default();
+    let servers = relations.servers.remove(&row.id).unwrap_or_default();
+    let bundle = relations.bundles.remove(&row.id);
+
+    ClientDto {
         id: id_hex(row.id),
         slug: row.slug,
         title,
@@ -303,7 +460,7 @@ async fn build_client_dto(
         keywords,
         servers,
         bundle,
-    })
+    }
 }
 
 pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<ClientDto>> {
@@ -314,11 +471,18 @@ pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<
     .fetch_all(pool)
     .await?;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(build_client_dto(pool, row, query).await?);
-    }
-    Ok(out)
+    let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
+    let client_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let bundle_links: Vec<(Uuid, Uuid)> = rows
+        .iter()
+        .filter_map(|r| r.bundle_id.map(|b| (r.id, b)))
+        .collect();
+    let mut relations = load_client_relations(pool, &client_ids, &bundle_links, locale).await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| assemble_client_dto(row, &mut relations, locale))
+        .collect())
 }
 
 /// List all clients including drafts, each with its `published` flag. The public
@@ -334,13 +498,22 @@ pub async fn list_clients_admin(
     .fetch_all(pool)
     .await?;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let (client_row, published) = row.split();
-        let client = build_client_dto(pool, client_row, query).await?;
-        out.push(ClientAdminDto { client, published });
-    }
-    Ok(out)
+    let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
+    let split: Vec<(ClientRow, bool)> = rows.into_iter().map(ClientAdminRow::split).collect();
+    let client_ids: Vec<Uuid> = split.iter().map(|(r, _)| r.id).collect();
+    let bundle_links: Vec<(Uuid, Uuid)> = split
+        .iter()
+        .filter_map(|(r, _)| r.bundle_id.map(|b| (r.id, b)))
+        .collect();
+    let mut relations = load_client_relations(pool, &client_ids, &bundle_links, locale).await?;
+
+    Ok(split
+        .into_iter()
+        .map(|(client_row, published)| ClientAdminDto {
+            client: assemble_client_dto(client_row, &mut relations, locale),
+            published,
+        })
+        .collect())
 }
 
 pub async fn get_client(
@@ -350,7 +523,16 @@ pub async fn get_client(
 ) -> AppResult<Option<ClientDto>> {
     let row = fetch_client_row(pool, ident).await?;
     match row {
-        Some(row) => Ok(Some(build_client_dto(pool, row, query).await?)),
+        Some(row) => {
+            // Single-client path reuses the batch loader with a one-element set so the
+            // DTO is assembled identically to the list path.
+            let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
+            let bundle_links: Vec<(Uuid, Uuid)> =
+                row.bundle_id.map(|b| (row.id, b)).into_iter().collect();
+            let mut relations =
+                load_client_relations(pool, &[row.id], &bundle_links, locale).await?;
+            Ok(Some(assemble_client_dto(row, &mut relations, locale)))
+        }
         None => Ok(None),
     }
 }

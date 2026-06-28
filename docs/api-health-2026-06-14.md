@@ -1,7 +1,7 @@
 # Loontail Launcher API — Health Report (2026-06-14)
 
 > Live functional health check of `loontail-launcher-api` running on `:80`
-> (origin behind the `cms.loontail.dev` Cloudflare tunnel), DB `loontail_app`
+> (origin behind the legacy backend's Cloudflare tunnel), DB `loontail_app`
 > on docker PG `:5433`. Method: full route inventory (114 routes) + launcher /
 > admin contract cross-check + live probing of 9 endpoint groups.
 
@@ -15,7 +15,7 @@ surface**: the launcher + `@loontail/yggdrasil-client` target
 `/api/yggdrasil/textures/*`, but the API serves textures at top-level
 `/textures/*` — every skin/cape lookup, upload, and clear request 404s.
 Separately, the new admin panel has **no skin/texture registry** (a
-high-severity regression vs the old Strapi Yggdrasil plugin).
+high-severity regression vs the old legacy-backend Yggdrasil plugin).
 
 ## 2. Status table
 
@@ -59,15 +59,15 @@ high-severity regression vs the old Strapi Yggdrasil plugin).
 
 > Net effect of BUG-1/2/3: **the entire skin/cape feature in the launcher is non-functional today** (every request 404s), despite the server-side textures crate being healthy and correctly auth-gated. This is a single-prefix client-config defect, not multiple unrelated breaks.
 
-## 4. Admin gaps vs Strapi
+## 4. Admin gaps vs the legacy backend
 
 | Gap | Severity | Detail | Recommendation |
 |---|---|---|---|
-| **Skin/Cape (texture) registry admin** | **HIGH** | Old Strapi Yggdrasil plugin had a full Textures admin (`TexturesPage` + `textures-admin.routes.ts`): list skins, list capes (paginated + search), upload skin (CLASSIC/SLIM)/cape, delete by id, 3D SkinViewer/2D preview, detail modal. New SPA nav (`admin-ui/src/App.tsx`) is Dashboard/Users/Catalog/Bundles/Logs only; `crates/admin/src/lib.rs` registers **no** textures routes; `crates/textures` exposes only the public per-UUID endpoints; `store.rs` has **no list/find_many**. Live: `GET /admin/textures/skins` → SPA HTML shell (route absent), vs real admin routes → JSON 401. | Add a Textures admin page (SPA) + `/admin/textures/*` routes in `crates/admin`, backed by new `store.rs` list/find_many over skins/capes. API + admin-UI work. |
-| Texture orphan validate + purge-missing | MEDIUM | Strapi had `POST /yggdrasil/textures/validate` (rows whose file is missing) and `/purge-missing` (bulk cleanup). No equivalent → DB/disk drift undetectable/unrepairable from the panel. | Add admin maintenance endpoints + UI action under the new Textures page. |
-| Admin upload skin/cape on behalf of a user | MEDIUM | Strapi let an admin set a user's skin/cape (base64 + variant, keyed by userId). New per-UUID `PUT /textures/{skin\|cape}` is the self-service/game path, not moderation; Users page has no skin/cape controls. | Add admin-initiated texture assignment/moderation (Users row + Textures page). |
-| Yggdrasil sessions / issued-token list | LOW | Strapi's Sessions sub-page was an empty placeholder, so functional loss is minimal. New admin has no global sessions/tokens view; per-user `/admin/users/{id}/revoke-tokens` partially covers invalidation. | Optional global token/session list if operationally needed. |
-| Strapi Users & Permissions / Content Manager / Media Library / version pickers | LOW | Generic Strapi surfaces (roles/permissions, media library, minecraft-version autocomplete) not reproduced; new Catalog/Users pages cover equivalent domain CRUD. | Accept as intentional consolidation unless a specific Strapi-only workflow is still required. |
+| **Skin/Cape (texture) registry admin** | **HIGH** | Old legacy-backend Yggdrasil plugin had a full Textures admin (`TexturesPage` + `textures-admin.routes.ts`): list skins, list capes (paginated + search), upload skin (CLASSIC/SLIM)/cape, delete by id, 3D SkinViewer/2D preview, detail modal. New SPA nav (`admin-ui/src/App.tsx`) is Dashboard/Users/Catalog/Bundles/Logs only; `crates/admin/src/lib.rs` registers **no** textures routes; `crates/textures` exposes only the public per-UUID endpoints; `store.rs` has **no list/find_many**. Live: `GET /admin/textures/skins` → SPA HTML shell (route absent), vs real admin routes → JSON 401. | Add a Textures admin page (SPA) + `/admin/textures/*` routes in `crates/admin`, backed by new `store.rs` list/find_many over skins/capes. API + admin-UI work. |
+| Texture orphan validate + purge-missing | MEDIUM | The legacy backend had `POST /yggdrasil/textures/validate` (rows whose file is missing) and `/purge-missing` (bulk cleanup). No equivalent → DB/disk drift undetectable/unrepairable from the panel. | Add admin maintenance endpoints + UI action under the new Textures page. |
+| Admin upload skin/cape on behalf of a user | MEDIUM | The legacy backend let an admin set a user's skin/cape (base64 + variant, keyed by userId). New per-UUID `PUT /textures/{skin\|cape}` is the self-service/game path, not moderation; Users page has no skin/cape controls. | Add admin-initiated texture assignment/moderation (Users row + Textures page). |
+| Yggdrasil sessions / issued-token list | LOW | The legacy backend's Sessions sub-page was an empty placeholder, so functional loss is minimal. New admin has no global sessions/tokens view; per-user `/admin/users/{id}/revoke-tokens` partially covers invalidation. | Optional global token/session list if operationally needed. |
+| Legacy-backend Users & Permissions / Content Manager / Media Library / version pickers | LOW | Generic legacy-backend surfaces (roles/permissions, media library, minecraft-version autocomplete) not reproduced; new Catalog/Users pages cover equivalent domain CRUD. | Accept as intentional consolidation unless a specific legacy-backend-only workflow is still required. |
 
 ## 5. Broken (5xx) / Not-implemented needing attention
 - **No 5xx observed** on any well-formed request across infra, auth, Yggdrasil, catalog, or bundle-registry. The server is structurally sound.
@@ -79,7 +79,7 @@ high-severity regression vs the old Strapi Yggdrasil plugin).
 **P0 — breaks a live launcher feature**
 1. Fix the textures base-path so skin/cape calls hit top-level `/textures/*` instead of `/api/yggdrasil/textures/*` (resolves BUG-1/2/3 in one change). Either client-side (`@loontail/yggdrasil-client` decouple textures base + launcher rebuild) or an API-side `/api/yggdrasil/textures` alias mount (no launcher rebuild; compat for already-deployed launchers). Methods/bodies are already correct. Add a regression test asserting the resolved textures URL.
 
-**P1 — operational regression vs Strapi**
+**P1 — operational regression vs the legacy backend**
 2. Restore the **skin/cape registry admin** (HIGH gap): SPA Textures page + `/admin/textures/*` routes + `store.rs` list/find_many. Bundle in admin upload-on-behalf-of-user and validate/purge-missing (the two MEDIUM gaps) — same page/data layer.
 
 **P2 — nice-to-have / accept-as-is**

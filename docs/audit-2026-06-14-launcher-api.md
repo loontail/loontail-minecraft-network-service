@@ -186,7 +186,7 @@ No `biome.json`, no `@biomejs/biome` devDependency, no `lint`/`format`/`check` s
 
 ### 4.1 Launcher (Electron — `loontail-launcher`)
 
-Today the launcher uses **two** client layers: a generic Strapi client (`src/main/infra/http.ts`) that attaches the static `API_TOKEN` only for `auth:'apiToken'` (used by exactly two callers — catalog `clientsApi.ts:103`, bundles `api.ts:48`), and `@loontail/yggdrasil-client` which already does password login + validate/refresh/invalidate + textures with the Yggdrasil token (encrypted in `safeStorage`/sqlite, rotation already wired). `src/shared/contracts/auth.ts:88-90` explicitly documents "the Yggdrasil access token is NOT a valid bearer for the Strapi content API" — the redesign inverts exactly this.
+Today the launcher uses **two** client layers: a generic legacy-backend client (`src/main/infra/http.ts`) that attaches the static `API_TOKEN` only for `auth:'apiToken'` (used by exactly two callers — catalog `clientsApi.ts:103`, bundles `api.ts:48`), and `@loontail/yggdrasil-client` which already does password login + validate/refresh/invalidate + textures with the Yggdrasil token (encrypted in `safeStorage`/sqlite, rotation already wired). `src/shared/contracts/auth.ts:88-90` explicitly documents "the Yggdrasil access token is NOT a valid bearer for the legacy backend content API" — the redesign inverts exactly this.
 
 | Method | Endpoint | Auth today |
 |---|---|---|
