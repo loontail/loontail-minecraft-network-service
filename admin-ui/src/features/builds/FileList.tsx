@@ -17,8 +17,8 @@ import type { TreeEntry } from "@/features/builds/fileTree";
 import { cn } from "@/shared/lib/cn";
 import { formatBytes } from "@/shared/lib/format";
 
-// The interaction contract shared by the list and grid views. Folders carry no
-// artifact id, so only artifact-backed entries are selectable.
+// Shared by the list and grid views. Folders carry no artifact id, so only
+// artifact-backed entries are selectable.
 export interface FileViewProps {
   entries: TreeEntry[];
   selectedKeys: Set<string>;

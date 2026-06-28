@@ -22,8 +22,6 @@ pub async fn list_friends(
     Ok(Json(friends))
 }
 
-// --- Friend requests -------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateFriendRequest {
@@ -274,12 +272,9 @@ async fn accept_internal(
         },
     );
 
-    // Nudge BOTH new friends to reload in real time. The requester gets the
-    // FriendRequestAccepted above, but the accepter would otherwise only learn
-    // of the new friend via the HTTP response it is already handling; pushing a
-    // presence update to each side's friends (which now include each other)
-    // guarantees the new friend appears immediately on both, without reopening
-    // the menu.
+    // Nudge BOTH new friends so each appears on the other's list immediately:
+    // pushing presence to each side's friends (which now include each other)
+    // covers the accepter, who otherwise only learns via its own HTTP response.
     if let Err(e) = presence::broadcast_presence(state, from_user_id).await {
         tracing::warn!(error = %e, user_id = %from_user_id, "failed to broadcast presence after friend request accept");
     }

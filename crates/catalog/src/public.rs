@@ -1,9 +1,5 @@
-//! Public catalog handlers (mounted at `/api`). They serve the native contract:
-//! flat camelCase JSON, no envelopes, `{ clients|keywords|servers: [...] }` for
-//! lists and the bare entity for single reads, the optional `locale=` param, the
-//! draft filter, and locale fallback. Every read requires a valid session
-//! (`AuthUser`), so the launcher attaches its Bearer token — there is no anonymous
-//! catalog read.
+//! Public catalog read handlers. Every read requires a valid session (`AuthUser`):
+//! there is no anonymous catalog read.
 
 use axum::extract::{OriginalUri, Path, State};
 use axum::Json;
@@ -20,8 +16,6 @@ fn raw_query(uri: &OriginalUri) -> &str {
     uri.0.query().unwrap_or("")
 }
 
-/// `GET /clients?locale=` — the launcher's primary catalog call. Relations are
-/// always inlined.
 pub async fn list_clients(
     _auth: AuthUser,
     State(state): State<AppState>,
@@ -32,7 +26,6 @@ pub async fn list_clients(
     Ok(Json(ClientList { clients }))
 }
 
-/// `GET /clients/{id|slug}?locale=` — `id` is the undashed UUID; slug also works.
 pub async fn get_client(
     _auth: AuthUser,
     State(state): State<AppState>,
@@ -46,7 +39,6 @@ pub async fn get_client(
     Ok(Json(client))
 }
 
-/// `GET /keywords?locale=`
 pub async fn list_keywords(
     _auth: AuthUser,
     State(state): State<AppState>,
@@ -58,7 +50,6 @@ pub async fn list_keywords(
     Ok(Json(KeywordList { keywords }))
 }
 
-/// `GET /keywords/{id}`
 pub async fn get_keyword(
     _auth: AuthUser,
     State(state): State<AppState>,
@@ -73,7 +64,6 @@ pub async fn get_keyword(
     Ok(Json(keyword))
 }
 
-/// `GET /servers`
 pub async fn list_servers(
     _auth: AuthUser,
     State(state): State<AppState>,
@@ -82,7 +72,6 @@ pub async fn list_servers(
     Ok(Json(ServerList { servers }))
 }
 
-/// `GET /servers/{id}`
 pub async fn get_server(
     _auth: AuthUser,
     State(state): State<AppState>,

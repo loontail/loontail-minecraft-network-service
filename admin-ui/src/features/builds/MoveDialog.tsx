@@ -31,8 +31,8 @@ function flattenFolders(nodes: FileTreeNode[], depth = 0): FolderOption[] {
   return out;
 }
 
-// why: a move into one of the sources or its own subtree is illegal (mirrors the
-// server + DnD guard); such destinations are disabled.
+// why: a move into a source or its own subtree is illegal (mirrors the server
+// guard); such destinations are disabled.
 function isSelfOrDescendant(targetDir: string, sourcePaths: string[]): boolean {
   for (const src of sourcePaths) {
     if (targetDir === src || targetDir.startsWith(`${src}/`)) {
@@ -69,9 +69,8 @@ export function MoveDialog({
     return isSelfOrDescendant(path, sourcePaths);
   }
 
-  // The dialog stays mounted, so a prior pick could survive into a new open with a
-  // different source set (where it may now be a disabled self/descendant). Clear
-  // the selection whenever the dialog opens or the sources change.
+  // The dialog stays mounted, so clear a prior pick on open / source change — it
+  // may now be a disabled self/descendant of the new source set.
   const sourceKey = sourcePaths.join("\n");
   useEffect(() => {
     if (open) {

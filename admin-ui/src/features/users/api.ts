@@ -38,7 +38,6 @@ export function useUser(id: string | undefined) {
   });
 }
 
-/// Create a Yggdrasil-bound user (origin `admin`, confirmed, profile assigned).
 export function useCreateUser() {
   const qc = useQueryClient();
   return useMutation({

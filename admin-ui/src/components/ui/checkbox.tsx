@@ -5,8 +5,7 @@ import { cn } from "@/shared/lib/cn";
 type CheckboxProps = {
   checked?: boolean;
   disabled?: boolean;
-  // when omitted the checkbox is decorative and the surrounding control owns the
-  // accessible role/state (e.g. a row button with role="checkbox")
+  // Omit to render a decorative checkbox whose accessible role/state is owned by a parent control.
   onCheckedChange?: (value: boolean) => void;
   id?: string;
   className?: string;

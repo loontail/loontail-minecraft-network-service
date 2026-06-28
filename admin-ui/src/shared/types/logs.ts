@@ -1,9 +1,4 @@
-// Mirrors the request-logs / traffic-analytics surface (serde camelCase).
-// Do not rename fields. Contract:
-//   GET /admin/logs/tail
-//   GET /admin/analytics/requests
-//   GET /admin/analytics/requests/summary
-//   GET /admin/analytics/requests/timeseries
+// Wire contract for /admin/logs/tail and /admin/analytics/requests*; field names are camelCase, do not rename.
 
 export type AuthKind = "session" | "admin" | "anon";
 
@@ -13,7 +8,7 @@ export type TrafficWindow = "24h" | "7d" | "30d";
 
 export type RequestMetric = "requests" | "errors" | "latency";
 
-/// One request as captured in the in-memory ring buffer (logs tail).
+/// One request from the in-memory ring buffer (logs tail).
 export interface RequestLogEntry {
   ts: string;
   method: string;
@@ -27,7 +22,7 @@ export interface RequestLogEntry {
   bytesOut: number | null;
 }
 
-/// Persisted request row (analytics table) — the tail shape plus a stable id.
+/// Persisted analytics row: the tail shape plus a stable id.
 export interface RequestLogRow extends RequestLogEntry {
   id: string;
 }

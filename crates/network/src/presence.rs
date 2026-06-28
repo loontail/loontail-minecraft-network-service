@@ -13,8 +13,7 @@ use loontail_core::AppState;
 use loontail_core::Metrics;
 use loontail_core::ServerEvent;
 
-/// Collapse a stored status to `offline` when the last heartbeat is older than
-/// the configured timeout.
+/// Collapse a stored status to `offline` once the last heartbeat exceeds the timeout.
 pub fn effective_status(
     stored: UserStatus,
     last_heartbeat: DateTime<Utc>,
@@ -28,11 +27,9 @@ pub fn effective_status(
     }
 }
 
-/// Resolve a friend's displayed status + joinable world from their effective base
-/// status and any active friend-of-friends guest world. A friend connected as a
-/// guest to a friend-of-friends world is shown as in-world (pointing at that world)
-/// so the viewer can ask to join it; host-only worlds never surface a `guest_world_id`
-/// here, so the guest stays plain online and no join/invite affordance appears.
+/// A friend who is an active guest in a friends-of-friends world surfaces as
+/// in-world pointing at that world, so the viewer can ask to join. Host-only
+/// worlds never pass a `guest_world_id` here, so the guest stays plain online.
 fn derive_friend_status(
     base: UserStatus,
     guest_world_id: Option<Uuid>,
@@ -51,7 +48,6 @@ struct PresenceRow {
     last_heartbeat_at: DateTime<Utc>,
 }
 
-/// Resolve the effective status for a single user (used by `/me`).
 pub async fn effective_status_for(state: &AppState, user_id: Uuid) -> AppResult<UserStatus> {
     let row = sqlx::query_as::<_, PresenceRow>(
         "SELECT status, last_heartbeat_at FROM presence WHERE user_id = $1",
@@ -100,8 +96,7 @@ pub async fn heartbeat(
     Ok(Json(StatusResponse { status }))
 }
 
-/// Mark a user online (used when a signaling connection opens). Mirrors the
-/// heartbeat upsert: only flips an offline row to online, preserving in-world.
+/// Mark a user online: only flips an offline row to online, preserving in-world.
 pub async fn mark_online(state: &AppState, user_id: Uuid) -> AppResult<()> {
     sqlx::query(
         r#"
@@ -119,7 +114,6 @@ pub async fn mark_online(state: &AppState, user_id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// Mark a user offline (used when their last signaling connection closes).
 pub async fn mark_offline(state: &AppState, user_id: Uuid) -> AppResult<()> {
     sqlx::query(
         "UPDATE presence SET status = 'offline', current_world_session_id = NULL, updated_at = now() WHERE user_id = $1",
@@ -130,7 +124,6 @@ pub async fn mark_offline(state: &AppState, user_id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// The user ids of a user's friends.
 async fn friend_ids(state: &AppState, user_id: Uuid) -> AppResult<Vec<Uuid>> {
     let ids = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -145,8 +138,7 @@ async fn friend_ids(state: &AppState, user_id: Uuid) -> AppResult<Vec<Uuid>> {
     Ok(ids)
 }
 
-/// Notify a user's friends that their presence changed, so each reloads their
-/// friends list and sees the new status in real time.
+/// Tell a user's friends to reload their list after this user's presence changed.
 pub async fn broadcast_presence(state: &AppState, user_id: Uuid) -> AppResult<()> {
     for friend_id in friend_ids(state, user_id).await? {
         state
@@ -174,8 +166,7 @@ pub async fn set_status(
     let status = UserStatus::from_client(&body.status)
         .ok_or_else(|| AppError::BadRequest("status must be online, inWorld or joinable".into()))?;
 
-    // When entering a world, the referenced session must be an open world
-    // owned by this user.
+    // Entering a world requires it to be an open world owned by this user.
     if status.is_in_world() {
         if let Some(world_id) = body.current_world_session_id {
             let owns: bool = sqlx::query_scalar(
@@ -221,7 +212,6 @@ pub async fn set_status(
     .execute(&state.pool)
     .await?;
 
-    // Push the new status to friends in real time.
     if let Err(e) = broadcast_presence(&state, auth.id()).await {
         tracing::warn!(error = %e, user_id = %auth.id(), "failed to broadcast presence after status change");
     }
@@ -239,12 +229,12 @@ struct FriendPresenceRow {
     status: Option<String>,
     last_heartbeat_at: Option<DateTime<Utc>>,
     current_world_session_id: Option<Uuid>,
-    /// The friend's last-reported Minecraft version + mod loader, used by the client to gate
-    /// joins/invites (both must match to play together).
+    /// The friend's reported Minecraft version + loader; both must match for the
+    /// client to allow joins/invites.
     minecraft_version: Option<String>,
     loader: Option<String>,
-    /// Set when this friend is an active guest in an open friend-of-friends
-    /// world — the world the viewer (their friend) may ask to join.
+    /// The open friends-of-friends world this friend is an active guest in — the
+    /// world the viewer may ask to join.
     guest_world_id: Option<Uuid>,
 }
 
@@ -255,13 +245,12 @@ pub struct FriendPresence {
     pub user: UserDto,
     pub status: UserStatus,
     pub current_world_session_id: Option<Uuid>,
-    /// The friend's reported Minecraft version + mod loader, so a client can gate joins/invites
-    /// against its own (both must match). Null until the friend bootstraps with the field.
+    /// The friend's reported Minecraft version + loader; both must match the
+    /// viewer's own to allow joins/invites. Null until the friend bootstraps.
     pub minecraft_version: Option<String>,
     pub loader: Option<String>,
 }
 
-/// Shared query: a user's friends with their effective presence.
 pub async fn friends_with_presence(
     state: &AppState,
     user_id: Uuid,

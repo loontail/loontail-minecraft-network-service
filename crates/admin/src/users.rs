@@ -1,8 +1,3 @@
-//! Admin user management: search, create (Yggdrasil-bound), read, patch, delete,
-//! and the block/unblock/reset-password/revoke-tokens actions. Every handler
-//! requires the `AdminUser` extractor, which also enforces the CSRF double-submit
-//! for cookie-authenticated mutations (Bearer tooling is exempt).
-
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use uuid::Uuid;
@@ -22,11 +17,9 @@ use crate::dto::{
     UserListResponse, UserSearchQuery,
 };
 
-/// Refuse an operation that would strip the LAST usable admin, locking everyone
-/// out. A usable admin is `is_admin = true AND blocked = false` (a blocked admin
-/// can't log in). When `target` is currently a usable admin and is the only one
-/// left, the delete/block/demote is rejected with a `409 Conflict`. Callers invoke
-/// this *before* mutating so the row count is the live pre-state.
+/// Reject (409) an operation that would strip the LAST usable admin
+/// (`is_admin AND NOT blocked`), locking everyone out. Call this *before*
+/// mutating, so the count reflects the live pre-state.
 async fn guard_last_admin(state: &AppState, target: Uuid) -> AppResult<()> {
     let target_is_usable_admin: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_admin = true AND blocked = false)",
@@ -105,16 +98,14 @@ pub async fn get(
     Ok(Json(AdminUserDto::from(user)))
 }
 
-/// `PATCH /admin/users/{id}` — patch username/email/is_admin/confirmed. Revokes
-/// the user's sessions when `is_admin` is lowered so a demotion takes effect at
-/// once (an active token must not keep authorizing admin routes).
+/// `PATCH /admin/users/{id}` — revokes the user's sessions when `is_admin` is
+/// lowered, so an active token can't keep authorizing admin routes after demotion.
 pub async fn patch(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserDto>> {
-    // Demoting the last admin would lock everyone out — refuse it (409).
     if body.is_admin == Some(false) {
         guard_last_admin(&state, id).await?;
     }
@@ -143,7 +134,6 @@ pub async fn delete(
 ) -> AppResult<Json<Ack>> {
     // Ensure it exists so a missing id surfaces a 404 rather than a silent no-op.
     get_user(&state.pool, id).await?;
-    // Deleting the last admin would lock everyone out — refuse it (409).
     guard_last_admin(&state, id).await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
@@ -153,13 +143,12 @@ pub async fn delete(
 }
 
 /// `POST /admin/users/{id}/block` — disable the account; live sessions stop
-/// resolving immediately because `user_from_token` re-checks `blocked`.
+/// resolving at once because `user_from_token` re-checks `blocked`.
 pub async fn block_user(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<AdminUserDto>> {
-    // Blocking the last admin would lock everyone out — refuse it (409).
     guard_last_admin(&state, id).await?;
     let user = block(&state.pool, id).await?;
     Ok(Json(AdminUserDto::from(user)))

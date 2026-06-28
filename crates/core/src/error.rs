@@ -3,8 +3,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-/// Application-wide error type. Every handler returns `Result<_, AppError>`
-/// so failures become well-formed JSON responses instead of panics.
+/// Application-wide error type; handlers return `Result<_, AppError>` so failures
+/// become well-formed JSON responses instead of panics.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("{0}")]
@@ -99,13 +99,11 @@ impl IntoResponse for AppError {
 pub type AppResult<T> = Result<T, AppError>;
 
 /// Whether a sqlx error is a Postgres unique-constraint violation, regardless of
-/// which constraint. Callers that need the specific constraint name inspect
-/// `db.constraint()` themselves.
+/// which constraint. Callers needing the specific name inspect `db.constraint()`.
 pub fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
-/// Whether a sqlx error is a Postgres foreign-key-constraint violation.
 pub fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.is_foreign_key_violation())
 }

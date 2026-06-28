@@ -1,9 +1,6 @@
-// Same-origin fetch wrapper for the backend. The Rust service serves this SPA
-// (under /admin) and the REST surface, so every call is same-origin and relies on
-// the httpOnly admin-session cookie (`credentials: "include"`). Mutations carry the
-// CSRF token the backend exposes as the readable `loontail_csrf` cookie via the
-// `x-csrf-token` header (double-submit, per core::auth). Admin endpoints live under
-// /admin/*; the public catalog reads live under /api/*. Callers pass the full path.
+// Same-origin fetch wrapper. Auth rides the httpOnly admin-session cookie
+// (`credentials: "include"`); mutations send the readable `loontail_csrf` cookie back
+// as an `x-csrf-token` header (CSRF double-submit). Callers pass the full path.
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
@@ -31,7 +28,6 @@ function readCsrfCookie(): string | null {
 
 type QueryValue = string | number | boolean | null | undefined;
 
-/// Serialize a flat record into a `?a=1&b=2` string (empty when no live params).
 export function queryString(params: Record<string, QueryValue>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -56,9 +52,8 @@ export async function apiFetch<T>(
   const { body, headers, method = "GET", ...rest } = options;
 
   const finalHeaders = new Headers(headers);
-  // Mark every API call as a JSON request so the backend can distinguish it from
-  // a browser page navigation (which prefers text/html) and serve the SPA shell
-  // for deep links to paths a REST route also claims (e.g. GET /admin/users).
+  // Accept: application/json marks this as an API call, not a page navigation, so the
+  // backend serves the REST response instead of the SPA shell for shared paths like /admin/users.
   if (!finalHeaders.has("Accept")) {
     finalHeaders.set("Accept", "application/json");
   }

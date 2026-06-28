@@ -1,7 +1,4 @@
-// Mirrors crates/catalog/src/dto.rs + admin.rs. Public reads are flat camelCase
-// JSON: `id` is the entity's UUID as an undashed 32-char hex string (also the id
-// used in admin CRUD paths). Lists are wrapped as { clients|keywords|servers }.
-// Media URLs stay server-relative; the admin SPA is same-origin as the API.
+// Catalog DTOs. `id` is a UUID as an undashed 32-char hex string; media URLs stay server-relative.
 
 export interface ClientList {
   clients: Client[];
@@ -32,7 +29,7 @@ export interface Server {
   address: string;
 }
 
-/// The owned bundle inlined onto a client (additive `bundle` field on reads).
+/// The owned bundle inlined onto a client's `bundle` field on reads.
 export interface BundleSummary {
   slug: string;
   version: string | null;
@@ -62,8 +59,7 @@ export interface Client {
   bundle: BundleSummary | null;
 }
 
-/// A client plus its admin-only `published` state, from GET /admin/catalog/clients
-/// (includes drafts the public /api/clients hides).
+/// A client plus its admin-only `published` state; includes drafts the public reads hide.
 export interface ClientAdmin extends Client {
   published: boolean;
 }
@@ -72,11 +68,8 @@ export interface ClientAdminList {
   clients: ClientAdmin[];
 }
 
-// --- Admin media management (admin.rs) -------------------------------------
-
 export type MediaRole = "poster" | "background" | "titleImage" | "screenshot";
 
-/// A row from GET /admin/catalog/clients/{id}/media.
 export interface MediaRow {
   id: string;
   role: MediaRole;
@@ -90,13 +83,10 @@ export interface MediaListResponse {
   media: MediaRow[];
 }
 
-/// `201 { id, url }` from a media upload.
 export interface UploadMediaResult {
   id: string;
   url: string;
 }
-
-// --- Admin write payloads (admin.rs) ---------------------------------------
 
 export interface ClientLocaleInput {
   locale: string;
@@ -147,7 +137,6 @@ export interface AttachMedia {
   sortOrder?: number;
 }
 
-/// `{ id }` from create/update, `{ id, published }` from publish toggles.
 /// Create also returns the auto-provisioned owned bundle's slug.
 export interface CatalogMutationResult {
   id: string;

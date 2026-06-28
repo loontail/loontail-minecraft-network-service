@@ -12,7 +12,6 @@ use loontail_core::ServerEvent;
 
 use crate::presence;
 
-/// A row from the `world_sessions` table.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorldSession {
@@ -26,7 +25,6 @@ pub struct WorldSession {
     pub closed_at: Option<DateTime<Utc>>,
 }
 
-/// Fetch an open world session by id, or 404.
 pub async fn open_world_session(pool: &PgPool, id: Uuid) -> AppResult<WorldSession> {
     sqlx::query_as::<_, WorldSession>(
         "SELECT * FROM world_sessions WHERE id = $1 AND status = 'open'",
@@ -44,8 +42,7 @@ pub struct CreateWorldSession {
     pub max_players: Option<i32>,
 }
 
-/// `POST /world-sessions` — open (or return the existing open) world session
-/// for the host. Idempotent: one open world per host.
+/// `POST /world-sessions` — idempotent: one open world per host.
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -122,11 +119,9 @@ pub async fn update(
         }
     };
 
-    // A PATCH that transitions open→closed must perform the SAME cleanup as the
-    // DELETE close path (close relay sessions, reset host presence, zero player
-    // count) — otherwise dangling 'active' relay rows + stale host presence leak,
-    // and the FoF policy gate can still pass for a closed world (BUG-3). Run the
-    // status update and cleanup in one transaction.
+    // A PATCH open→closed must run the SAME cleanup as the DELETE close path in
+    // one transaction, else dangling 'active' relay rows + stale host presence
+    // leak and the FoF policy gate still passes for a closed world.
     let closing = status == "closed" && world.status == "open";
 
     let mut tx = state.pool.begin().await?;
@@ -155,10 +150,9 @@ pub async fn update(
     };
     tx.commit().await?;
 
-    // Toggling friend-of-friends changes what the world's active guests can do
-    // and how they surface. Tell each active guest directly (so their own
-    // "invite" affordance flips live) and nudge their friends to re-evaluate the
-    // "ask to join" affordance.
+    // A friend-of-friends toggle changes what active guests can do; push it to
+    // each guest (their "invite" affordance flips live) and nudge their friends
+    // to re-evaluate the "ask to join" affordance.
     if invite_policy != world.invite_policy {
         let guests: Vec<Uuid> = sqlx::query_scalar(
             "SELECT guest_user_id FROM relay_sessions \
@@ -178,8 +172,7 @@ pub async fn update(
             );
             let _ = presence::broadcast_presence(&state, guest).await;
         }
-        // Also nudge the host's own friends: a friend-of-friends toggle changes
-        // whether they can ask to join, so their view must re-evaluate too.
+        // The toggle also changes whether the host's own friends can ask to join.
         let _ = presence::broadcast_presence(&state, world.host_user_id).await;
     }
 
@@ -219,17 +212,14 @@ pub async fn close(
     Ok(Json(serde_json::json!({ "closed": true })))
 }
 
-/// Shared cleanup for closing a world (used by both `DELETE` and a `PATCH
-/// status=closed`): close the world's open relay sessions, reset the host's
-/// presence to plain online + unlink the world, and zero the world's player
-/// count. Runs inside the caller's transaction. Returns the refreshed world row.
+/// Cleanup shared by both world-close paths; runs inside the caller's transaction.
 async fn close_world_cleanup(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     world_id: Uuid,
     host_id: Uuid,
 ) -> AppResult<WorldSession> {
-    // Close any open relay sessions for this world so guests are no longer
-    // counted as active (presence FoF visibility + the policy gate key on this).
+    // Close open relay sessions so guests stop counting as active (presence FoF
+    // visibility + the policy gate key on this).
     sqlx::query(
         "UPDATE relay_sessions SET status = 'closed', closed_at = now() WHERE world_session_id = $1 AND status <> 'closed'",
     )
@@ -237,7 +227,6 @@ async fn close_world_cleanup(
     .execute(&mut **tx)
     .await?;
 
-    // Host returns to plain online and unlinks the world.
     sqlx::query(
         r#"
         UPDATE presence

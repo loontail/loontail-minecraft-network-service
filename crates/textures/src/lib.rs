@@ -20,16 +20,13 @@ pub use store::Kind;
 /// this leaves generous headroom while bounding multipart buffering.
 pub const MAX_UPLOAD_BYTES: usize = 256 * 1024;
 
-/// The URL slug each kind is served under (`/textures/{uuid}/skin|cape`). The
-/// stored `file_url` is server-relative; the lookup handler absolutizes it.
 fn relative_texture_url(profile_uuid: &str, kind: Kind) -> String {
     format!("/textures/{profile_uuid}/{}", kind.slug())
 }
 
-/// Absolutize a server-relative texture URL against the configured public base
-/// (`config.yggdrasil.public_url`'s origin, when it carries one). Absolute URLs
-/// and bases without a scheme are passed through so a path-only deployment keeps
-/// the launcher's "server-relative, client absolutizes" contract intact.
+/// Absolutize a server-relative texture URL against the configured public origin
+/// (when one is set). Path-only configs leave URLs server-relative, preserving the
+/// launcher's "server-relative, client absolutizes" contract.
 fn absolutize_url(config: &Config, relative: &str) -> String {
     if let Some(origin) = public_origin(&config.yggdrasil.public_url) {
         format!("{origin}{relative}")
@@ -38,21 +35,18 @@ fn absolutize_url(config: &Config, relative: &str) -> String {
     }
 }
 
-/// Extract the `scheme://host[:port]` origin from a configured public URL. Returns
-/// `None` for path-only values (e.g. the default `/api/yggdrasil`), in which case
-/// texture URLs stay server-relative.
+/// The `scheme://host[:port]` origin of a configured public URL, or `None` for
+/// path-only values (e.g. the default `/api/yggdrasil`).
 fn public_origin(public_url: &str) -> Option<String> {
     loontail_core::config::parse_public_url(public_url).0
 }
 
-/// Build the textures domain router. The server crate nests this under `/textures`.
+/// The textures domain router, nested under `/textures`.
 ///
-/// A single dynamic `{segment}` is used for the top-level path so the literal
-/// write targets (`skin`/`cape`) and the lookup UUID never declare conflicting
-/// routes in matchit: GET treats `{segment}` as a UUID, PUT/DELETE treat it as a
-/// kind. The PNG read path is `{segment}/{kind}`. PUT routes raise the body limit
-/// so multipart uploads up to [`MAX_UPLOAD_BYTES`] are not rejected by axum's
-/// default 2 MiB cap (we enforce our own cap while reading the field).
+/// A single dynamic `{segment}` for the top-level path avoids conflicting matchit
+/// routes between the write targets (`skin`/`cape`) and the lookup UUID: GET treats
+/// it as a UUID, PUT/DELETE as a kind. The body limit is raised so multipart
+/// uploads up to [`MAX_UPLOAD_BYTES`] are not rejected by axum's default 2 MiB cap.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(

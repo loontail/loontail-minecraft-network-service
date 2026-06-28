@@ -7,8 +7,7 @@ use crate::metrics::Metrics;
 use crate::realtime::Realtime;
 use crate::request_log::RequestLogSink;
 
-/// Shared application state, cloned into every handler. All non-trivial fields
-/// are behind `Arc` so cloning stays cheap.
+/// Cloned into every handler; non-trivial fields are behind `Arc` so cloning stays cheap.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,

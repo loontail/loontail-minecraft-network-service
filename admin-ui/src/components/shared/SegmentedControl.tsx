@@ -16,13 +16,10 @@ interface SegmentedControlProps<T extends string> {
   items: SegmentedItem<T>[];
   value: T;
   onChange: (value: T) => void;
-  // "tabs" → role=tablist/tab (+ aria-selected); "radio" → role=radiogroup/radio
-  // (+ aria-checked). Both implement WAI-ARIA roving focus.
+  // "tabs" → tablist/aria-selected; "radio" → radiogroup/aria-checked. Both use WAI-ARIA roving focus.
   mode?: SegmentedMode;
   ariaLabel?: string;
-  // When set (tabs that drive panels), each tab gets a stable `id` and
-  // `aria-controls` pointing at `{idBase}-panel-{value}`. Use `tabId`/`panelId`
-  // to wire the matching `role="tabpanel"`.
+  // Set to wire `aria-controls` to a `{idBase}-panel-{value}` tabpanel.
   idBase?: string;
   className?: string;
   itemClassName?: string;
@@ -48,8 +45,7 @@ export function SegmentedControl<T extends string>({
 }: SegmentedControlProps<T>) {
   const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
 
-  // Roving focus: Arrow keys + Home/End move both focus and selection to the next
-  // enabled item, so the announced tablist/radiogroup role matches behaviour.
+  // Roving focus: Arrow/Home/End move focus and selection together so behaviour matches the announced role.
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const count = items.length;
     if (count === 0) {

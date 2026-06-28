@@ -111,8 +111,8 @@ function FooterStatus({ build }: { build: Bundle }) {
   );
 }
 
-// why: re-saving with bundleSlug:null makes the backend re-derive + re-provision the
-// owned bundle, after which the live bundle read succeeds and the file manager loads.
+// why: re-saving with bundleSlug:null makes the backend re-provision the owned
+// bundle, after which the bundle read succeeds and the file manager loads.
 function NoBundleState({ build }: { build: ClientAdmin }) {
   const updateClient = useUpdateClient();
 
@@ -212,10 +212,8 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     [data, currentPath],
   );
 
-  // Self-heal the phantom folder: after a delete / move / bulk-delete the current
-  // folder may no longer exist among the artifacts. Clamp `currentPath` to the
-  // nearest existing ancestor (or root) whenever the data changes so the breadcrumb
-  // never points nowhere.
+  // After a delete / move the current folder may vanish from the artifacts; clamp
+  // `currentPath` to the nearest existing ancestor so the breadcrumb never dangles.
   useEffect(() => {
     if (!data || currentPath === "") {
       return;
@@ -243,9 +241,8 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     setSelectedKeys(new Set());
   }
 
-  // Upload sequentially (await each) so N files don't fire N parallel POSTs that
-  // each trigger a manifest regen + invalidation and race on the same bundle. The
-  // batch shares one busy state, invalidates once, and emits a single summary toast.
+  // Upload sequentially so N files don't fire N parallel POSTs that each trigger a
+  // manifest regen and race on the same bundle; invalidate once at the end.
   async function uploadFiles(files: FileList | File[], dir = currentPath) {
     const list = Array.from(files);
     if (list.length === 0) {
@@ -290,9 +287,7 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     );
   }
 
-  // Selection is artifact-only: folders carry no id, so they are never selectable
-  // via a checkbox. Then `selectedCount` always equals `selectedArtifactIds.length`
-  // and the bulk-delete dialog count never lies.
+  // Selection is artifact-only: folders carry no id, so they are never selectable.
   const selectableChildren = useMemo(
     () => children.filter((c) => c.artifact),
     [children],
@@ -338,8 +333,6 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
   const someSelected =
     !allSelected && selectableChildren.some((c) => selectedKeys.has(c.relativePath));
 
-  // The name button: folders navigate, files select. (The kebab "Open" still
-  // downloads files via `openEntry`.)
   function onNameAction(relativePath: string) {
     const entry = children.find((e) => e.relativePath === relativePath);
     if (!entry) {
@@ -352,7 +345,6 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     }
   }
 
-  // The kebab "Open" action: folders navigate, files download.
   function openEntry(relativePath: string) {
     const entry = children.find((e) => e.relativePath === relativePath);
     if (!entry) {
@@ -424,7 +416,6 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     }
   }
 
-  // The selected artifact ids drive bulk delete / move; implied folders carry no id.
   const selectedEntries = [...selectedKeys]
     .map((key) => nodesById.get(String(key)))
     .filter((node): node is FileTreeNode => Boolean(node));
@@ -463,8 +454,7 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     }
   }
 
-  // --- Branches (order matters: error BEFORE loading; Layer A→null, B→error) ---
-
+  // Order matters: the error branch must come before the loading branch.
   if (bundleSlug === null) {
     return <NoBundleState build={build} />;
   }
@@ -556,8 +546,8 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
           />
         ) : null}
 
-        {/* Upload drop-wrapper around the table/grid body only — the FileBreadcrumbs
-            Root DropZone owns root drops, so the two regions are disjoint. */}
+        {/* Wraps the table/grid body only; the FileBreadcrumbs Root DropZone owns
+            root drops, so the two drop regions stay disjoint. */}
         <div
           className={cn(
             "rounded-lg outline-none transition-shadow",

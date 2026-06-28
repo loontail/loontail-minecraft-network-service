@@ -21,7 +21,6 @@ interface ConfirmDialogProps {
   destructive?: boolean;
   pending?: boolean;
   onConfirm: () => void;
-  /** Override the dialog width (e.g. `"sm:max-w-md"` for richer descriptions). */
   widthClassName?: string;
 }
 
@@ -43,8 +42,7 @@ export function ConfirmDialog({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? (
-            // asChild + div so a ReactNode description (block content) is valid
-            // markup (DialogDescription renders a <p> otherwise).
+            // asChild + div so block-content descriptions stay valid markup (DialogDescription renders a <p> otherwise).
             <DialogDescription asChild>
               <div className="text-text-mute">{description}</div>
             </DialogDescription>

@@ -1,17 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 
-// Build-time-generated version catalog served as a static asset under the SPA base
-// (`/admin/versions.json`). Populated by `scripts/generate-versions.mjs` from
-// `@loontail/minecraft-kit`; powers the cascading version dropdowns on the Build
-// detail page. The kit itself never reaches the browser bundle — only this JSON.
+// Build-time-generated version catalog served as a static asset under the SPA base.
+// The minecraft-kit it is generated from never reaches the browser bundle — only this JSON.
 
 export interface MinecraftVersionEntry {
   id: string;
   type: string;
 }
 
-// Per-Minecraft recommended picks emitted by the generator (catalog v2). Each
-// field is optional so a partial/legacy entry never breaks the UI.
+// Each field optional so a partial/legacy entry never breaks the UI.
 export interface RecommendedVersions {
   java?: number;
   forge?: string | null;
@@ -50,14 +47,11 @@ export function useVersions() {
         headers: { Accept: "application/json" },
       });
       if (!res.ok) {
-        // A missing/broken static asset must not break the page — fall back to an
-        // empty catalog so the selects render (and legacy values still show via the
-        // inject-current-value logic in the page).
+        // A missing/broken static asset must not break the page.
         return EMPTY_CATALOG;
       }
-      // A v1 payload (pre-cascade) carries no `java`/`recommended`/`version`;
-      // normalize it to the v2 shape so consumers never branch on the version.
-      // Overrides come AFTER the spread so the defaults win over any `undefined`.
+      // Normalize an older payload to the current shape; defaults must follow the
+      // spread so they win over any `undefined` field.
       const data = (await res.json()) as Partial<VersionsCatalog>;
       return {
         ...data,

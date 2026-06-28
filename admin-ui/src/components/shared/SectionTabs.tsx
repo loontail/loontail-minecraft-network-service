@@ -14,10 +14,7 @@ interface SectionTabsProps<T extends string> {
   value: T;
   onChange: (value: T) => void;
   ariaLabel?: string;
-  // When set, each tab is given a stable `id` and an `aria-controls` pointing at
-  // `{idBase}-panel-{value}`, associating it with a `role="tabpanel"` the consumer
-  // renders. Use `tabId`/`panelId` to wire those ids up. Omit when there are no
-  // panels (e.g. a tab strip that just swaps a table query).
+  // Set to wire `aria-controls` to a `{idBase}-panel-{value}` tabpanel; omit for tab strips without panels.
   idBase?: string;
 }
 

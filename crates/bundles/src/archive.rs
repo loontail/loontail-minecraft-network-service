@@ -1,6 +1,6 @@
-//! ZIP ingest and directory scanning. Archives are streamed to disk entry by
-//! entry (never the whole 10 GB buffered in memory) under strict guards, then the
-//! extracted tree is scanned to produce artifact rows with streamed SHA-256.
+//! ZIP ingest and directory scanning. Archives are streamed to disk entry by entry
+//! (never buffered whole) under strict guards, then the extracted tree is scanned to
+//! produce artifact rows with streamed SHA-256.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,14 +10,12 @@ use loontail_core::error::{AppError, AppResult};
 
 use crate::storage::{normalize_relative_path, split_relative_path};
 
-/// 10 GiB cap on total uncompressed size — the same limit as the previous CMS.
+/// 10 GiB cap on total uncompressed size.
 pub const MAX_UNCOMPRESSED: u64 = 10 * 1024 * 1024 * 1024;
-/// At most 100k entries per archive.
 pub const MAX_ENTRIES: usize = 100_000;
 
 const ZIP_READ_BUF: usize = 64 * 1024;
 
-/// One scanned file or directory ready to be upserted as a `bundle_artifacts` row.
 #[derive(Debug, Clone)]
 pub struct ScanEntry {
     pub relative_path: String,
@@ -31,8 +29,7 @@ pub struct ScanEntry {
 
 /// Extract a ZIP from `archive_path` into `dest` (the build's `files/` dir),
 /// streaming each entry to disk. Enforces the entry-count, uncompressed-size,
-/// zip-slip, absolute-path, and `__MACOSX/` guards. The destination directory
-/// must already exist.
+/// zip-slip, absolute-path, and `__MACOSX/` guards. `dest` must already exist.
 pub fn extract_zip(archive_path: &Path, dest: &Path) -> AppResult<()> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("open archive: {e}")))?;
@@ -55,12 +52,10 @@ pub fn extract_zip(archive_path: &Path, dest: &Path) -> AppResult<()> {
 
         let raw_name = entry.name().to_string();
 
-        // Skip macOS metadata directories outright.
         if raw_name == "__MACOSX" || raw_name.starts_with("__MACOSX/") {
             continue;
         }
 
-        // Strip leading slashes, unify separators, and reject escapes / absolutes.
         let trimmed = raw_name.trim_start_matches('/');
         if trimmed.is_empty() {
             continue;
@@ -78,7 +73,7 @@ pub fn extract_zip(archive_path: &Path, dest: &Path) -> AppResult<()> {
         };
 
         let dest_entry = dest.join(&safe);
-        // Defense in depth: ensure the joined path is still inside dest.
+        // why: defense in depth — confirm the joined path is still inside dest.
         if !is_within(&dest_entry, dest) {
             return Err(AppError::BadRequest(format!(
                 "zip-slip detected for entry: {raw_name}"
@@ -110,9 +105,8 @@ pub fn extract_zip(archive_path: &Path, dest: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Walk `files_root` recursively and produce a `ScanEntry` per file and directory,
-/// computing a streamed SHA-256 for each file. Paths are reported relative to
-/// `files_root` with forward slashes.
+/// Walk `files_root` recursively into a `ScanEntry` per file/directory, with a
+/// streamed SHA-256 per file. Paths are relative to `files_root`, forward-slashed.
 pub fn scan_directory(files_root: &Path) -> AppResult<Vec<ScanEntry>> {
     let mut out = Vec::new();
     if files_root.exists() {
@@ -171,7 +165,6 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<ScanEntry>) -> AppResult<()> {
     Ok(())
 }
 
-/// Streamed SHA-256 of a file on disk, hex-encoded lowercase.
 pub fn hash_file(path: &Path) -> AppResult<String> {
     use sha2::{Digest, Sha256};
 

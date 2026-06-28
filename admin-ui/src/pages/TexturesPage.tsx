@@ -50,8 +50,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
-// The raw texture PNG, served public at `/textures/{uuid}/{skin|cape}`. The URL
-// is revision-stable, so bust the browser cache with the row's `updatedAt`.
+// The texture URL is revision-stable, so cache-bust with the row's `updatedAt`.
 function TexturePreview({ row, kind }: { row: TextureRow; kind: TextureKind }) {
   const [failed, setFailed] = useState(false);
   const slug = kind === "skins" ? "skin" : "cape";
@@ -92,12 +91,10 @@ export function TexturesPage() {
 
   const debouncedSearch = useDebounced(search.trim());
 
-  // Reset to the first page whenever the kind or query changes.
   useEffect(() => {
     setPage(1);
   }, [debouncedSearch, kind]);
 
-  // Switching kind also clears the (now-stale) search box.
   useEffect(() => {
     setSearch("");
   }, [kind]);

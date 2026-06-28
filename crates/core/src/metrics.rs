@@ -1,7 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Lightweight in-process counters. Kept deliberately small for the MVP;
-/// the structure is ready to be swapped for a Prometheus registry later.
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub bootstraps: AtomicU64,

@@ -1,11 +1,9 @@
-//! In-memory join-session rendezvous between `/sessionserver/.../join` (the
-//! client tells us "I'm joining server X with this serverId hash") and
-//! `/sessionserver/.../hasJoined` (the server asks "did this user join X?").
+//! In-memory join-session rendezvous between `/sessionserver/.../join` and
+//! `/sessionserver/.../hasJoined`.
 //!
-//! Contract §5: a `Map<serverId, {userId, ip?, expiresAt}>` with a 30s TTL, a
-//! single-use atomic `take`, and an opportunistic sweep of expired entries. The
-//! map is held in a crate-level `OnceLock` (NOT `AppState`), since it is purely
-//! in-process ephemeral state with no DB backing.
+//! Contract §5: a `Map<serverId, {userId, ip?, expiresAt}>` with a 30s TTL and a
+//! single-use atomic `take`. Held in a crate-level `OnceLock` (NOT `AppState`)
+//! since it is purely in-process ephemeral state with no DB backing.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

@@ -6,9 +6,7 @@ import { RequireAuth } from "@/components/layout/RequireAuth";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LoginPage } from "@/pages/LoginPage";
 
-// Route pages are lazy so the heavy, route-only dependencies (recharts on the
-// Dashboard/Logs pages, react-aria-components on the build file manager) split
-// out of the initial chunk loaded for login.
+// Lazy so route-only deps (recharts, react-aria-components) stay out of the login chunk.
 const DashboardPage = lazy(() =>
   import("@/pages/DashboardPage").then((m) => ({ default: m.DashboardPage })),
 );

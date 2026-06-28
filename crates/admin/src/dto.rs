@@ -1,6 +1,3 @@
-//! Wire DTOs for the admin REST surface. All bodies are camelCase to match the
-//! SPA and the rest of the launcher API.
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -14,7 +11,6 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-/// The authenticated admin identity returned by `/admin/auth/me` and on login.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeResponse {
@@ -76,7 +72,6 @@ impl From<User> for AdminUserDto {
     }
 }
 
-/// Pagination metadata mirroring the launcher's envelope.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageMeta {
@@ -167,13 +162,11 @@ pub struct TimeseriesResponse {
     pub series: Vec<TimeseriesPoint>,
 }
 
-/// One request-log row as returned by `/admin/logs/tail` and (with `id`) by
-/// `/admin/analytics/requests`. `authKind` is `"session" | "admin" | "anon"`.
+/// A request-log row. `authKind` is `"session" | "admin" | "anon"`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestLogEntry {
-    /// Present only on persisted rows (`/analytics/requests`); omitted for the
-    /// live ring tail.
+    /// Present only on persisted rows; omitted for the live ring tail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
     pub ts: DateTime<Utc>,
@@ -201,7 +194,6 @@ pub struct RequestLogTailQuery {
     pub limit: Option<i64>,
 }
 
-/// Filters + pagination for `/admin/analytics/requests`. All filters optional.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestLogQuery {
@@ -233,7 +225,6 @@ pub struct RequestWindowQuery {
     pub window: Option<String>,
 }
 
-/// One status-class bucket in the summary's `statusMix`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusClassCount {
@@ -241,7 +232,6 @@ pub struct StatusClassCount {
     pub count: i64,
 }
 
-/// One hot path in the summary's `topPaths`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TopPath {
@@ -286,7 +276,6 @@ pub struct RequestTimeseriesResponse {
     pub series: Vec<RequestTimeseriesPoint>,
 }
 
-/// A bare success acknowledgement for mutations that have no body to return.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ack {

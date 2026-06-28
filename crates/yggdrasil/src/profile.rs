@@ -62,9 +62,9 @@ async fn has_cape(pool: &PgPool, user_id: Uuid) -> AppResult<bool> {
     )
 }
 
-/// The server-relative URL a profile's texture is served from. Derived from the
-/// authoritative `profile_uuid` (BUG-2): the skin/cape row's stored `file_url` can
-/// embed a now-stale UUID after identity reconciliation, so we never read it back.
+/// The server-relative texture URL, derived from the authoritative `profile_uuid`:
+/// the skin/cape row's stored `file_url` can embed a now-stale UUID after identity
+/// reconciliation, so we never read it back.
 fn texture_url(profile_uuid: &str, kind: &str) -> String {
     format!("/textures/{profile_uuid}/{kind}")
 }

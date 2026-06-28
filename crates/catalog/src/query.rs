@@ -1,8 +1,6 @@
-//! Parsing of the catalog query string. The native contract keeps only the
-//! optional `locale=` param (relations are always inlined). We parse the raw
-//! query because the handlers receive it via `OriginalUri`.
+//! Parsing of the catalog query string, which carries only the optional `locale=`
+//! param. The handlers receive the raw query via `OriginalUri`.
 
-/// The requested locale, if any. Everything else in the query is ignored.
 #[derive(Debug, Default, Clone)]
 pub struct CatalogQuery {
     pub locale: Option<String>,
@@ -26,8 +24,7 @@ impl CatalogQuery {
 }
 
 /// Minimal percent-decoding for query keys/values: turns `%XX` escapes and `+`
-/// back into their literals. Good enough for the small, well-formed query strings
-/// the launcher emits.
+/// back into their literals.
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

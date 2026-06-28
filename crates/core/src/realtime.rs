@@ -1,10 +1,6 @@
-//! In-memory realtime state shared across the network domain: the per-user
-//! signaling fan-out registry and the relay rendezvous map.
-//!
-//! This module owns only the generic data structures and their
-//! register/send/take operations — no axum WS handlers and no network business
-//! logic — so it stays free of dependency cycles. The domain crate's WS
-//! handlers drive these structures.
+//! In-memory realtime state (signaling fan-out registry + relay rendezvous map).
+//! Owns only the generic data structures, not the axum WS handlers, to avoid a
+//! dependency cycle with the network domain crate that drives them.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,8 +13,8 @@ use uuid::Uuid;
 
 use crate::models::{JoinTicketDto, UserDto};
 
-/// Events pushed from the service to a connected client over its signaling
-/// WebSocket. Serialized as `{ "type": "...", ... }`.
+/// Events pushed to a client over its signaling WebSocket, serialized as
+/// `{ "type": "...", ... }`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(
     tag = "type",
@@ -39,7 +35,7 @@ pub enum ServerEvent {
         world_session_id: Uuid,
         from_user: UserDto,
     },
-    /// Delivered to the guest: contains the join ticket needed to open relay.
+    /// Carries the join ticket the guest uses to open relay.
     JoinRequestAccepted {
         request_id: Uuid,
         ticket: JoinTicketDto,
@@ -47,42 +43,34 @@ pub enum ServerEvent {
     JoinRequestDeclined {
         request_id: Uuid,
     },
-    /// Delivered to the host: a guest is about to connect; open the relay
-    /// tunnel for `relay_session_id`.
+    /// Signals the host to open the relay tunnel for `relay_session_id`.
     GuestArriving {
         relay_session_id: Uuid,
         world_session_id: Uuid,
         guest_user: UserDto,
     },
-    /// Delivered to the invitee: someone invited them into a world.
     WorldInvite {
         invite_id: Uuid,
         world_session_id: Uuid,
         inviter: UserDto,
         host: UserDto,
     },
-    /// Delivered to the host: a friend-of-friend invite needs their approval.
     InviteApprovalRequest {
         invite_id: Uuid,
         world_session_id: Uuid,
         inviter: UserDto,
         invitee: UserDto,
     },
-    /// Delivered to the requester: their friend request was declined.
     FriendRequestDeclined {
         request_id: Uuid,
     },
-    /// Delivered to a user that was removed from someone's friend list.
     FriendRemoved {
         user_id: Uuid,
     },
-    /// Delivered to a user's friends when their presence changes; the recipient
-    /// should reload their friends list to pick up the new status.
+    /// Recipient should reload their friends list to pick up the new status.
     PresenceUpdate {
         user_id: Uuid,
     },
-    /// Delivered to a world's active guests when the host changes the invite
-    /// policy, so a guest's own "invite a friend" affordance turns on/off live.
     WorldPolicyChanged {
         world_session_id: Uuid,
         invite_policy: String,
@@ -91,7 +79,7 @@ pub enum ServerEvent {
 
 type Connection = (Uuid, mpsc::UnboundedSender<ServerEvent>);
 
-/// Fan-out hub keyed by user id. A user may have multiple live connections.
+/// Fan-out hub keyed by user id; a user may have multiple live connections.
 pub struct SignalingHub {
     connections: Mutex<HashMap<Uuid, Vec<Connection>>>,
 }
@@ -103,8 +91,7 @@ impl SignalingHub {
         }
     }
 
-    /// Register a new connection for a user; returns its id and the receiver the
-    /// caller pumps to the socket.
+    /// Returns the connection id and the receiver the caller pumps to the socket.
     pub fn add(&self, user_id: Uuid) -> (Uuid, mpsc::UnboundedReceiver<ServerEvent>) {
         let conn_id = Uuid::new_v4();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -113,7 +100,6 @@ impl SignalingHub {
         (conn_id, rx)
     }
 
-    /// Drop a previously registered connection.
     pub fn remove(&self, user_id: Uuid, conn_id: Uuid) {
         let mut map = self.connections.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = map.get_mut(&user_id) {
@@ -124,8 +110,8 @@ impl SignalingHub {
         }
     }
 
-    /// Deliver an event to all of a user's live connections. Dead senders are
-    /// pruned. No-op (and harmless) when the user is offline.
+    /// Deliver to all of a user's live connections, pruning dead senders. No-op
+    /// when the user is offline.
     pub fn send_to(&self, user_id: Uuid, event: ServerEvent) {
         let mut map = self.connections.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(conns) = map.get_mut(&user_id) {
@@ -143,7 +129,6 @@ impl SignalingHub {
             .len()
     }
 
-    /// Whether the user currently has any live signaling connection.
     pub fn is_online(&self, user_id: Uuid) -> bool {
         self.connections
             .lock()
@@ -158,29 +143,28 @@ impl Default for SignalingHub {
     }
 }
 
-/// Which side of a relay pair a connection is. The host serves the LAN world;
-/// the guest joins it. A valid pairing always has one of each.
+/// Which side of a relay pair a connection is; a valid pairing has one of each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayRole {
     Host,
     Guest,
 }
 
-/// Whether two relay roles form a valid pair (one host, one guest). Two
-/// connections of the same role must never be piped together.
+/// A valid pair is one host + one guest; two same-role connections must never be
+/// piped together.
 pub fn roles_pair(a: RelayRole, b: RelayRole) -> bool {
     a != b
 }
 
-/// The first party of a relay pair, parked until its peer arrives. The handler
-/// pipes `socket` to the second party's socket and signals `done` when finished.
+/// The first party of a relay pair, parked until its peer arrives; the handler
+/// pipes `socket` to the second party and signals `done` when finished.
 pub struct PendingPeer {
     pub socket: WebSocket,
     pub done: tokio::sync::oneshot::Sender<()>,
 }
 
-/// Rendezvous hub: holds the first party of each relay pair (tagged with its
-/// role) until the second arrives.
+/// Rendezvous hub: holds the first party of each relay pair (tagged with its role)
+/// until the second arrives.
 pub struct RelayHub {
     waiting: Mutex<HashMap<Uuid, (RelayRole, PendingPeer)>>,
     active: AtomicUsize,
@@ -194,11 +178,9 @@ impl RelayHub {
         }
     }
 
-    /// Park the first party's socket at the rendezvous keyed by relay session.
-    /// Returns `None` once parked. If a peer is already parked for this id (a
-    /// same-role collision or double-connect), the slot is left untouched and
-    /// the new `peer` is handed back as `Some(peer)` so the caller can refuse it
-    /// without disturbing the original waiter.
+    /// Park the first party, returning `None`. If a peer is already parked for this
+    /// id (same-role collision or double-connect), the slot is untouched and `peer`
+    /// is handed back so the caller can refuse it without disturbing the waiter.
     pub fn park(
         &self,
         relay_session_id: Uuid,
@@ -216,9 +198,8 @@ impl RelayHub {
         }
     }
 
-    /// Take the parked party for this rendezvous only when its role is the
-    /// opposite of `incoming_role`. A same-role waiter is left parked (returns
-    /// `None`) so the arriving same-role connection cannot steal it.
+    /// Take the parked party only when its role is opposite `incoming_role`; a
+    /// same-role waiter is left parked so the arriving connection cannot steal it.
     pub fn take(&self, relay_session_id: Uuid, incoming_role: RelayRole) -> Option<PendingPeer> {
         let mut map = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(&relay_session_id) {
@@ -229,9 +210,9 @@ impl RelayHub {
         }
     }
 
-    /// Unconditionally drop whatever is parked for this rendezvous. Used by the
-    /// first party to reclaim its own socket after a rendezvous timeout (where
-    /// no opposite-role peer arrived, so role-matching `take` would not find it).
+    /// Unconditionally drop whatever is parked. Lets the first party reclaim its
+    /// socket after a rendezvous timeout, where role-matching `take` would not
+    /// find it because no opposite-role peer ever arrived.
     pub fn remove_waiting(&self, relay_session_id: Uuid) -> Option<PendingPeer> {
         self.waiting
             .lock()
@@ -259,7 +240,6 @@ impl Default for RelayHub {
     }
 }
 
-/// Aggregate of the in-memory realtime structures held by `AppState`.
 pub struct Realtime {
     pub signaling: SignalingHub,
     pub relay: RelayHub,

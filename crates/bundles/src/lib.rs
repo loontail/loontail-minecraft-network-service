@@ -1,11 +1,7 @@
 //! Bundle-registry domain: builds/artifacts, ZIP ingest, manifest generation, and
 //! the on-disk layout under `{config.bundles.storage_root}/builds/{slug}`.
-//!
-//! Public surface (mounted by the server at `/api/bundle-registry`):
-//! `GET /builds/{slug}/manifest` serves `artifacts.json` verbatim. Static file
-//! bytes are served from `static_routes()` (also merged into `routes()`) at
-//! `/bundle-registry/builds/{slug}/files/{*path}`. Admin operations live in
-//! `admin_routes()`, mounted at `/admin/bundles` and `AdminUser`-guarded.
+//! `routes()` mount at `/api/bundle-registry` (manifest + static files);
+//! `admin_routes()` at `/admin/bundles` (`AdminUser`-guarded).
 
 mod admin;
 mod archive;
@@ -21,43 +17,37 @@ use axum::Router;
 
 use loontail_core::AppState;
 
-/// Provisioning + teardown of a build's owned bundle, reusable across crates (the
-/// catalog owns a 1:1 bundle per build). [`provision_bundle`] inserts the draft row
-/// and its on-disk directory; [`provision_bundle_row`] + [`ensure_bundle_dir`] are
-/// the tx-capable split (DB row inside the caller's transaction, dir after commit).
-/// [`find_bundle_id_by_slug`] is the find half. The tx-capable teardown parts
-/// [`delete_bundle_row`] / [`bundle_slug_by_id`] / [`remove_bundle_dir`] let the
-/// catalog tear a bundle down (row + CASCADE artifacts + on-disk files) inside its
-/// own delete transaction so deleting a build never orphans its bundle.
+/// Provisioning + teardown of a build's owned bundle, reusable by the catalog (1:1
+/// bundle per build). [`provision_bundle`] does the whole thing; the tx-capable parts
+/// ([`provision_bundle_row`]/[`ensure_bundle_dir`], [`find_bundle_id_by_slug`],
+/// [`delete_bundle_row`]/[`bundle_slug_by_id`]/[`remove_bundle_dir`]) let the catalog
+/// provision and tear down a bundle inside its own transaction so deleting a build
+/// never orphans its bundle.
 pub use repo::{
     bundle_slug_by_id, delete_bundle_row, ensure_bundle_dir, find_bundle_id_by_slug,
     provision_bundle, provision_bundle_row, remove_bundle_dir,
 };
 
-/// Hard cap on a single bundle upload (ZIP archive or individual file): 10 GiB,
-/// matching the archive's uncompressed ceiling. Enforced both as axum's
-/// `DefaultBodyLimit` on the route and as a running byte cap while streaming each
-/// multipart field to disk, so a malicious client cannot exhaust memory or disk.
+/// Hard cap on a single bundle upload (10 GiB). Enforced both as axum's
+/// `DefaultBodyLimit` and as a running byte cap while streaming each multipart field
+/// to disk, so a malicious client cannot exhaust memory or disk.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-/// Public bundle-registry router. Mounted by the server at `/api/bundle-registry`.
-/// Includes the manifest endpoint and the static file routes so a single mount
-/// covers the whole public surface.
+/// Public router: the manifest endpoint plus the static file routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/builds/{slug}/manifest", get(public::get_manifest))
         .merge(static_routes())
 }
 
-/// Static byte-serving of build files at `/builds/{slug}/files/{*path}`. Exposed
-/// separately so the server can also mount it at the configured public prefix
-/// (`/bundle-registry`) where the manifest's `url` fields point.
+/// Static byte-serving of build files. Exposed separately so the server can also
+/// mount it at the configured public prefix (`/bundle-registry`) where the manifest's
+/// `url` fields point.
 pub fn static_routes() -> Router<AppState> {
     Router::new().route("/builds/{slug}/files/{*path}", get(public::serve_file))
 }
 
-/// Admin (AdminUser-guarded) bundle management. Mounted by the server at
-/// `/admin/bundles`. The upload route disables axum's body limit so a large ZIP
+/// Admin bundle management. The upload route raises axum's body limit so a large ZIP
 /// streams to disk instead of being rejected or buffered whole.
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
@@ -102,13 +92,13 @@ pub fn admin_routes() -> Router<AppState> {
 }
 
 /// [`MAX_UPLOAD_BYTES`] as a `usize`, saturating on 32-bit targets where 10 GiB
-/// exceeds `usize::MAX` (axum's `DefaultBodyLimit::max` takes a `usize`).
+/// exceeds `usize::MAX`.
 fn usize_cap() -> usize {
     usize::try_from(MAX_UPLOAD_BYTES).unwrap_or(usize::MAX)
 }
 
-/// Create the bundle storage root (`{storage_root}/builds`) at startup so the
-/// first upload/create doesn't race a missing directory.
+/// Create the bundle storage root at startup so the first upload/create doesn't race
+/// a missing directory.
 pub fn init(storage_root: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(storage::builds_root(storage_root))
 }

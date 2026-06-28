@@ -1,6 +1,5 @@
-//! Shared kernel for the Loontail launcher API: state, config, db, error,
-//! metrics, models, auth, and the in-memory realtime structures. Domain crates
-//! depend only on this crate and return `axum::Router<AppState>`.
+//! Shared kernel for the Loontail launcher API. Domain crates depend only on this
+//! crate and return `axum::Router<AppState>`.
 
 pub mod analytics;
 pub mod auth;

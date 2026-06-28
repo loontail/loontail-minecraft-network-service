@@ -14,9 +14,7 @@ interface StatCardProps {
   icon: LucideIcon;
   hint?: string;
   isLoading?: boolean;
-  // Either a raw numeric value (rendered via toLocaleString, with a muted style at
-  // zero) or a pre-formatted display string (rate/latency). Exactly one is used:
-  // `display`, when provided, overrides the numeric path.
+  // Pass `value` (numeric, toLocaleString'd) or `display` (pre-formatted); `display` wins.
   value?: number;
   display?: string;
 }

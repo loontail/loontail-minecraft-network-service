@@ -1,20 +1,11 @@
-//! Single source of truth for resolving a request's client IP.
-//!
-//! IP precedence is security-sensitive (the rate limiter and request log both key
-//! on it), so it lives in exactly one place rather than being re-derived per
-//! middleware (SRV-DUP-2).
-//!
-//! Precedence:
-//! - `trusted_proxy == false` (default): use the transport peer from
-//!   `ConnectInfo`. Forwarding headers are NEVER trusted — they are
-//!   client-controllable, so honouring them without a trusted proxy lets an
-//!   attacker rotate the header for a fresh rate-limit bucket per request
-//!   (SEC-3).
-//! - `trusted_proxy == true`: the immediate peer is a proxy we control that
-//!   overwrites `X-Forwarded-For`. Take the right-most hop of `X-Forwarded-For`
-//!   (the address the trusted proxy actually saw — earlier hops are
-//!   client-supplied and forgeable), falling back to `X-Real-IP`, then to the
-//!   peer. (SEC-1)
+//! Single source of truth for resolving a request's client IP (the rate limiter
+//! and request log both key on it). Precedence:
+//! - `trusted_proxy == false` (default): the transport peer from `ConnectInfo`.
+//!   Forwarding headers are client-controllable, so trusting them without a proxy
+//!   lets an attacker rotate the header for a fresh rate-limit bucket (SEC-3).
+//! - `trusted_proxy == true`: the right-most `X-Forwarded-For` hop (the address the
+//!   trusted proxy actually saw; earlier hops are forgeable), then `X-Real-IP`,
+//!   then the peer (SEC-1).
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -31,13 +22,9 @@ pub fn client_ip(
     trusted_proxy: bool,
 ) -> Option<IpAddr> {
     if !trusted_proxy {
-        // Default: only the transport peer is trustworthy. XFF is ignored.
         return peer_addr;
     }
 
-    // Behind a trusted proxy: the right-most XFF hop is the address the proxy
-    // itself observed. Anything to the left of it is appended by upstream hops
-    // (ultimately the client) and is forgeable, so we never read the left-most.
     if let Some(ip) = forwarded_for_rightmost(headers) {
         return Some(ip);
     }

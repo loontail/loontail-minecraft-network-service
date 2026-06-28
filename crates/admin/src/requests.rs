@@ -1,10 +1,8 @@
 //! Admin request observability: a live in-memory tail, paginated persisted rows,
-//! a rollup summary, and a bucketed timeseries — all read off the `request_logs`
-//! table (and the live ring for the tail). Every handler is `AdminUser`-gated.
+//! a rollup summary, and a bucketed timeseries off `request_logs`.
 //!
 //! The window/bucket allowlist is shared with [`crate::analytics::resolve_window`]
-//! so user text is never formatted into SQL; only the fixed interval/bucket-unit
-//! literals are, exactly as the existing analytics timeseries does.
+//! so user text is never formatted into SQL; only the fixed literals are.
 
 use axum::extract::{Query, State};
 use axum::Json;
@@ -22,9 +20,7 @@ use crate::dto::{
     RequestTimeseriesResponse, RequestWindowQuery, StatusClassCount, TopPath,
 };
 
-/// Fixed page size for `/admin/analytics/requests`.
 const PAGE_SIZE: i64 = 50;
-/// Cap on the live-tail `limit` query param.
 const TAIL_MAX: i64 = 500;
 const TAIL_DEFAULT: i64 = 100;
 
@@ -72,9 +68,8 @@ type RequestRow = (
     Option<i64>,
 );
 
-/// `GET /admin/analytics/requests` — paginated, newest-first persisted rows with
-/// optional `since`/`until`/`method`/`path`/`status` filters. All filters are
-/// bound parameters; `path` is a prefix `LIKE`.
+/// `GET /admin/analytics/requests` — paginated rows with optional bound filters;
+/// `path` is a prefix `LIKE`.
 pub async fn list(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -83,9 +78,8 @@ pub async fn list(
     let page = query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * PAGE_SIZE;
 
-    // why: a single parameterized WHERE shared by the count and the page query,
-    // with each optional filter applied as `($n IS NULL OR <col> ...)` so absent
-    // filters are no-ops and nothing is ever string-interpolated.
+    // why: each optional filter is applied as `($n IS NULL OR <col> ...)`, so
+    // absent filters are no-ops and nothing is ever string-interpolated.
     let path_like = query.path.as_ref().map(|p| format!("{p}%"));
 
     let total: i64 = sqlx::query_scalar(
@@ -175,9 +169,8 @@ pub async fn list(
     }))
 }
 
-/// `GET /admin/analytics/requests/summary?window=` — rollup over the window:
-/// total, server-error rate (status >= 500), average latency, a status-class
-/// histogram, and the top paths by volume.
+/// `GET /admin/analytics/requests/summary?window=` — error rate is the share of
+/// status >= 500.
 pub async fn summary(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -263,8 +256,7 @@ pub async fn summary(
     }))
 }
 
-/// Map the timeseries `metric` to its aggregate label. `requests` counts rows,
-/// `errors` counts status >= 500, `latency` averages `latency_ms`.
+/// `requests` counts rows, `errors` counts status >= 500, `latency` averages it.
 fn resolve_metric(metric: &str) -> &'static str {
     match metric {
         "errors" => "errors",
@@ -273,9 +265,8 @@ fn resolve_metric(metric: &str) -> &'static str {
     }
 }
 
-/// `GET /admin/analytics/requests/timeseries?window=&metric=` — a bucketed value
-/// series. Buckets reuse the analytics window/interval allowlist; the metric is
-/// resolved to a fixed aggregate expression (never interpolated from user text).
+/// `GET /admin/analytics/requests/timeseries?window=&metric=` — bucketed series;
+/// the metric resolves to a fixed aggregate expression, never user text.
 pub async fn timeseries(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -292,7 +283,7 @@ pub async fn timeseries(
         _ => "count(*)::float8",
     };
 
-    // `bucket_unit`, `interval_literal`, and `value_expr` are all from fixed
+    // `bucket_unit`, `interval_literal`, and `value_expr` all come from fixed
     // allowlists above — no user input reaches the SQL string.
     let sql = format!(
         r#"

@@ -23,13 +23,11 @@ use loontail_yggdrasil_protocol::uuid::undash_uuid;
 use crate::store::{self, Kind};
 use crate::{absolutize_url, relative_texture_url, MAX_UPLOAD_BYTES};
 
-/// `GET /textures/{uuid}` — the texture lookup. `users.profile_uuid` is the
-/// authoritative key (BUG-2 fix a): resolve the user by the requested
-/// `profile_uuid`, then read its `skins`/`capes` rows by `users.id`, so a row's
+/// `GET /textures/{uuid}` — the texture lookup. Resolves the user by the requested
+/// `profile_uuid`, then reads its `skins`/`capes` rows by `users.id`, so a row's
 /// denormalized `profile_uuid` going stale after identity reconciliation can never
-/// orphan the texture. The served URL is re-derived from the requested
-/// `profile_uuid` rather than the (possibly stale) stored `file_url`. Returns
-/// `{skin?:{url,variant},cape?:{url}}`; absent entries are `null`, and an unknown
+/// orphan the texture; the served URL is re-derived from the requested
+/// `profile_uuid` rather than the (possibly stale) stored `file_url`. An unknown
 /// profile resolves to `{skin:null,cape:null}` rather than a 404.
 pub async fn lookup(
     State(state): State<AppState>,
@@ -72,9 +70,9 @@ pub async fn lookup(
     Ok(Json(TexturesLookupResponse { skin, cape }))
 }
 
-/// Resolve the authoritative `users.id` for a `profile_uuid`. `None` when no user
-/// carries that profile UUID. Textures are joined off this id (BUG-2 fix a) so a
-/// stale denormalized `skins/capes.profile_uuid` cannot hide a live texture.
+/// Resolve the authoritative `users.id` for a `profile_uuid`. Textures are joined
+/// off this id so a stale denormalized `skins/capes.profile_uuid` cannot hide a
+/// live texture.
 async fn resolve_user_id(state: &AppState, profile_uuid: &str) -> AppResult<Option<uuid::Uuid>> {
     Ok(
         sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE profile_uuid = $1")
@@ -85,9 +83,9 @@ async fn resolve_user_id(state: &AppState, profile_uuid: &str) -> AppResult<Opti
 }
 
 /// `GET /textures/{uuid}/{skin|cape}` — the raw PNG bytes for the profile. Resolves
-/// the user by `profile_uuid` (authoritative) then reads the row's on-disk
-/// `file_path` by `users.id` and streams it back as `image/png` (BUG-2 fix a). 404
-/// when the profile has no texture of that kind (or the file went missing).
+/// the user by `profile_uuid`, reads the row's on-disk `file_path` by `users.id`,
+/// and streams it back as `image/png`. 404 when the profile has no texture of that
+/// kind (or the file went missing).
 pub async fn read_png(
     State(state): State<AppState>,
     Path((uuid, kind)): Path<(String, String)>,

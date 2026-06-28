@@ -7,22 +7,17 @@ use std::path::{Component, Path, PathBuf};
 
 use loontail_core::error::{AppError, AppResult};
 
-/// `{storage_root}/builds`.
 pub fn builds_root(storage_root: &str) -> PathBuf {
     Path::new(storage_root).join("builds")
 }
 
-/// `{storage_root}/builds/{slug}`.
 pub fn build_path(storage_root: &str, slug: &str) -> PathBuf {
     builds_root(storage_root).join(slug)
 }
 
-/// Reject a slug that is anything other than a single, inert path segment.
-///
-/// axum percent-decodes `Path` params *after* routing, so a request for
-/// `/builds/..%2F..%2Fx/manifest` yields `slug = "../../x"`. Feeding that into
-/// `build_path` (`builds_root().join(slug)`) would escape `{storage_root}/builds`.
-/// Public handlers must call this before any filesystem join.
+/// Reject a slug that is anything other than a single, inert path segment. axum
+/// percent-decodes `Path` params after routing, so `slug` may be `../../x` and
+/// escape `{storage_root}/builds`; call this before any filesystem join.
 pub fn validate_slug(slug: &str) -> AppResult<()> {
     if slug.is_empty()
         || slug == "."
@@ -36,19 +31,17 @@ pub fn validate_slug(slug: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// `{storage_root}/builds/{slug}/files`.
 pub fn files_path(storage_root: &str, slug: &str) -> PathBuf {
     build_path(storage_root, slug).join("files")
 }
 
-/// `{storage_root}/builds/{slug}/artifacts.json`.
 pub fn manifest_path(storage_root: &str, slug: &str) -> PathBuf {
     build_path(storage_root, slug).join("artifacts.json")
 }
 
-/// The public URL the launcher fetches a file at. Matches the contract template
-/// `{public_url}/builds/{slug}/files/{relativePath}` where `public_url` is the
-/// bundles public prefix (`/bundle-registry` by default).
+/// The URL the launcher fetches a file at:
+/// `{prefix}/builds/{slug}/files/{relativePath}`, where `prefix` is the bundles
+/// public prefix (`/bundle-registry` by default).
 pub fn public_url(public_prefix: &str, slug: &str, relative_path: &str) -> String {
     let normalized = relative_path.replace('\\', "/");
     let prefix = public_prefix.trim_end_matches('/');
@@ -60,7 +53,7 @@ pub fn ensure_build_dir(storage_root: &str, slug: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(files_path(storage_root, slug))
 }
 
-/// Recursively delete a build's entire on-disk directory (files + manifest).
+/// Recursively delete a build's on-disk directory (files + manifest).
 pub fn delete_build_files(storage_root: &str, slug: &str) -> std::io::Result<()> {
     let path = build_path(storage_root, slug);
     if path.exists() {
@@ -69,8 +62,8 @@ pub fn delete_build_files(storage_root: &str, slug: &str) -> std::io::Result<()>
     Ok(())
 }
 
-/// Write the manifest atomically: serialize to `artifacts.json.tmp`, then rename
-/// over `artifacts.json` so a concurrent reader never sees a partial file.
+/// Write the manifest via tmp file + rename so a concurrent reader never sees a
+/// partial `artifacts.json`.
 pub fn write_manifest_atomic(storage_root: &str, slug: &str, json: &str) -> std::io::Result<()> {
     let dir = build_path(storage_root, slug);
     std::fs::create_dir_all(&dir)?;
@@ -81,12 +74,9 @@ pub fn write_manifest_atomic(storage_root: &str, slug: &str, json: &str) -> std:
     Ok(())
 }
 
-/// Normalize a user- or archive-supplied relative path and reject anything that
-/// is absolute or escapes the build's `files/` directory (zip-slip). Returns the
-/// normalized forward-slash path, or a `BadRequest`.
-///
-/// `field` names the offending input in the error so callers can reuse this for
-/// `targetPath`/`relativePath`/`newRelativePath`.
+/// Normalize a user- or archive-supplied relative path, rejecting anything absolute
+/// or escaping the build's `files/` directory (zip-slip). Returns the normalized
+/// forward-slash path. `field` names the offending input in the error.
 pub fn normalize_relative_path(raw: &str, field: &str) -> AppResult<String> {
     let unified = raw.replace('\\', "/");
     let candidate = Path::new(&unified);

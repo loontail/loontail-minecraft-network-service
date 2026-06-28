@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-/// A row from the `bundles` table. A bundle is a named, versioned set of overlay
-/// files the launcher syncs onto a Minecraft install.
+/// A row from the `bundles` table: a named, versioned set of overlay files the
+/// launcher syncs onto a Minecraft install.
 #[derive(Debug, Clone, FromRow, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bundle {
@@ -22,8 +22,8 @@ pub struct Bundle {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A row from the `bundle_artifacts` table — one per file or directory tracked in
-/// a bundle. The manifest is generated from these.
+/// A `bundle_artifacts` row — one per tracked file or directory. The manifest is
+/// generated from these.
 #[derive(Debug, Clone, FromRow, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleArtifact {
@@ -134,7 +134,6 @@ pub struct OrphanEntry {
     pub relative_path: String,
 }
 
-/// Free/total bytes on the volume backing the bundle storage root.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskSpace {

@@ -22,7 +22,6 @@ export const requestLogsKeys = {
     [...requestLogsKeys.all, "timeseries", window, metric] as const,
 };
 
-/// Live snapshot of the in-memory ring buffer (newest first). Auto-refreshes.
 export function useLogsTail(limit = 100) {
   return useQuery({
     queryKey: requestLogsKeys.tail(limit),
@@ -32,7 +31,6 @@ export function useLogsTail(limit = 100) {
   });
 }
 
-/// Paginated rows from the request_logs table (newest first); all filters optional.
 export function useRequestLogs(query: RequestLogsQuery) {
   return useQuery({
     queryKey: requestLogsKeys.requests(query),

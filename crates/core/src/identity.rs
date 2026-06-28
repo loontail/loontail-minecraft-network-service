@@ -1,13 +1,12 @@
-//! The identity keystone: password hashing (Argon2id) and the user
-//! lookup/create/reconcile service over the pool. Three creation paths converge
-//! here — the mod bootstrap (origin `mod`, keyed on `minecraft_uuid`), the
-//! Yggdrasil/launcher credential login (username/email + password), and the
-//! admin-created Yggdrasil user (origin `admin`).
+//! Password hashing (Argon2id) and the user lookup/create/reconcile service.
+//! Three creation paths converge here: the mod bootstrap (origin `mod`, keyed on
+//! `minecraft_uuid`), the Yggdrasil/launcher credential login, and the
+//! admin-created user (origin `admin`).
 //!
-//! Reconciliation invariant (from the design contract): when a user's
-//! `minecraft_uuid` M is known, `profile_uuid := undash(M)` — deterministic, one
-//! account per Minecraft identity. A random undashed UUID is assigned only when
-//! `minecraft_uuid IS NULL`. `normalized_username` is UNIQUE.
+//! Reconciliation invariant: when a user's `minecraft_uuid` M is known,
+//! `profile_uuid := undash(M)` (deterministic, one account per Minecraft
+//! identity); a random undashed UUID is assigned only when `minecraft_uuid IS
+//! NULL`. `normalized_username` is UNIQUE.
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -19,8 +18,8 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{escape_like_pattern, is_valid_email, normalize_username, User};
 
-/// Hash a plaintext password with Argon2id (default params). The returned PHC
-/// string embeds the algorithm, params, and a per-password random salt.
+/// Hash a password with Argon2id (default params); the returned PHC string embeds
+/// the algorithm, params, and a per-password random salt.
 pub fn hash_password(plain: &str) -> AppResult<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
@@ -29,9 +28,9 @@ pub fn hash_password(plain: &str) -> AppResult<String> {
     Ok(hash.to_string())
 }
 
-/// Verify a plaintext password against a stored Argon2id PHC hash. A malformed
-/// stored hash (or any mismatch) yields `false` rather than an error so callers
-/// uniformly surface bad credentials.
+/// Verify a password against a stored Argon2id PHC hash. A malformed hash (or any
+/// mismatch) yields `false` rather than an error so callers uniformly surface bad
+/// credentials.
 pub fn verify_password(plain: &str, hash: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
@@ -41,25 +40,23 @@ pub fn verify_password(plain: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-/// A random 32-char undashed lowercase UUID, used as `profile_uuid` for accounts
-/// that have no `minecraft_uuid`.
+/// A random 32-char undashed lowercase UUID.
 pub fn random_profile_uuid() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
-/// A fixed Argon2id hash used only to equalize verification cost on the
+/// A fixed Argon2id hash that equalizes verification cost on the
 /// account-not-found / no-stored-password branches of [`authenticate_password`],
 /// so login latency cannot distinguish "no such account" from "wrong password"
-/// (a user-enumeration timing oracle). Computed once.
+/// (a user-enumeration timing oracle).
 fn dummy_password_hash() -> &'static str {
     use std::sync::OnceLock;
     static DUMMY: OnceLock<String> = OnceLock::new();
     DUMMY.get_or_init(|| hash_password("timing-equalizer-not-a-real-password").unwrap_or_default())
 }
 
-/// Validate a candidate password at set/registration time: non-empty and bounded
-/// so an absurdly large body can't be force-hashed. Login does NOT re-validate
-/// (it must accept whatever was stored).
+/// Bound a password at set/registration time so an absurdly large body can't be
+/// force-hashed. Login does NOT re-validate; it must accept whatever was stored.
 fn check_password_len(password: &str) -> AppResult<()> {
     if password.is_empty() {
         return Err(AppError::BadRequest("password is required".into()));
@@ -70,13 +67,9 @@ fn check_password_len(password: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// The reconciliation rule as a pure function: derive the `profile_uuid` a user
-/// must carry. When `minecraft_uuid` is known the profile UUID is its undashed
-/// form (deterministic); otherwise a fresh random undashed UUID is minted only if
-/// the user has none yet.
-///
-/// This is the documented runtime invariant from the contract: one account per
-/// Minecraft identity, with credential-only accounts getting a stable random id.
+/// The reconciliation rule as a pure function: when `minecraft_uuid` is known the
+/// profile UUID is its undashed form (deterministic); otherwise the user keeps its
+/// existing UUID or is minted a fresh random one.
 pub fn reconcile_profile_uuid(
     minecraft_uuid: Option<&str>,
     current_profile_uuid: Option<&str>,
@@ -97,15 +90,11 @@ fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.constraint() == Some(constraint))
 }
 
-/// The MOD bootstrap path (origin `mod`). Resolves the account for a live
-/// Minecraft session and guarantees the reconciliation invariant:
+/// The mod bootstrap path (origin `mod`), guaranteeing the reconciliation invariant:
 /// 1. look up by `minecraft_uuid`; if found, refresh username + `profile_uuid`;
-/// 2. else look up by `profile_uuid = undash(minecraft_uuid)` and BIND this
+/// 2. else look up by `profile_uuid = undash(minecraft_uuid)` and bind this
 ///    `minecraft_uuid` onto that row (the credential-first account now plays);
-/// 3. else INSERT a fresh `mod` user.
-///
-/// In every branch `profile_uuid = undash(minecraft_uuid)` and
-/// `normalized_username` is kept lowercase and consistent.
+/// 3. else insert a fresh `mod` user.
 pub async fn find_or_create_from_bootstrap(
     pool: &PgPool,
     minecraft_uuid: &str,
@@ -253,12 +242,10 @@ async fn bind_minecraft_uuid(
     .map_err(|e| map_username_conflict(e, normalized))
 }
 
-/// The YGGDRASIL/launcher credential path. Looks up by `normalized_username` OR
-/// `email` (case-insensitive), verifies the Argon2id hash, and rejects blocked or
-/// unconfirmed accounts. On success it ensures the `profile_uuid` invariant holds
-/// (deriving it from `minecraft_uuid`, or minting a random one) and returns the
-/// up-to-date row. Any failure yields a 403-class error so callers do not leak
-/// which step failed.
+/// The Yggdrasil/launcher credential path. Looks up by `normalized_username` OR
+/// `email`, verifies the Argon2id hash, and rejects blocked/unconfirmed accounts.
+/// On success it reconciles the `profile_uuid` invariant. Any failure yields a
+/// 403-class error so callers do not leak which step failed.
 pub async fn authenticate_password(
     pool: &PgPool,
     identifier: &str,
@@ -311,10 +298,9 @@ pub async fn assign_or_reconcile_profile_uuid(pool: &PgPool, user: &User) -> App
     if user.profile_uuid.as_deref() == Some(desired.as_str()) {
         return Ok(user.clone());
     }
-    // why (BUG-2): rewriting profile_uuid here does NOT strand the user's skin/cape.
-    // `users.profile_uuid` is authoritative and the textures handlers resolve the
-    // user by it before joining skins/capes via `users.id`, so the rows' denormalized
-    // profile_uuid is free to go stale without orphaning the texture.
+    // why (BUG-2): rewriting profile_uuid does NOT strand the user's skin/cape —
+    // textures handlers resolve the user via authoritative `users.profile_uuid`
+    // then join skins/capes by `users.id`, so the denormalized copy may go stale.
     let updated = sqlx::query_as::<_, User>(
         "UPDATE users SET profile_uuid = $2, updated_at = now() WHERE id = $1 RETURNING *",
     )
@@ -325,7 +311,6 @@ pub async fn assign_or_reconcile_profile_uuid(pool: &PgPool, user: &User) -> App
     Ok(updated)
 }
 
-/// Parameters for [`admin_create_user`].
 #[derive(Debug, Clone)]
 pub struct AdminCreateUser {
     pub username: String,
@@ -335,10 +320,9 @@ pub struct AdminCreateUser {
     pub is_admin: bool,
 }
 
-/// The admin-created Yggdrasil user (origin `admin`): Argon2id-hashed password,
+/// The admin-created user (origin `admin`): Argon2id-hashed password,
 /// `confirmed = true`, and a `profile_uuid` assigned at creation — undashed from
-/// `minecraft_uuid` if supplied, else a fresh random undashed UUID. Backs the
-/// admin "create user bound to Yggdrasil" feature.
+/// `minecraft_uuid` if supplied, else a fresh random undashed UUID.
 pub async fn admin_create_user(pool: &PgPool, input: AdminCreateUser) -> AppResult<User> {
     let username = input.username.trim();
     let email = input.email.trim();
@@ -379,8 +363,8 @@ pub async fn admin_create_user(pool: &PgPool, input: AdminCreateUser) -> AppResu
 }
 
 /// Public self-registration (origin `yggdrasil`): username/email + Argon2id
-/// password, `confirmed = true` (no email verification in the MVP), non-admin,
-/// with a freshly minted random `profile_uuid`. Backs `POST /api/auth/register`.
+/// password, `confirmed = true` (no email verification yet), non-admin, with a
+/// freshly minted random `profile_uuid`.
 pub async fn register_user(
     pool: &PgPool,
     username: &str,
@@ -396,10 +380,8 @@ pub async fn register_user(
         return Err(AppError::BadRequest("a valid email is required".into()));
     }
     check_password_len(password)?;
-    // SEC-4: registration is rate-limited per client IP at the router (SEC-1) and the
-    // email is now format-validated above. Still TODO — email-confirmation
-    // (confirmed=false until a verification link is followed): deferred because there
-    // is no email-sending infrastructure in this MVP to deliver the link.
+    // SEC-4 TODO: email-confirmation (confirmed=false until a link is followed) is
+    // deferred — no email-sending infrastructure exists yet to deliver the link.
     let normalized = normalize_username(username);
     let password_hash = hash_password(password)?;
     let profile_uuid = random_profile_uuid();
@@ -422,7 +404,6 @@ pub async fn register_user(
     .map_err(|e| map_create_conflict(e, &normalized, email))
 }
 
-/// Look up a single user by primary key.
 pub async fn get_user(pool: &PgPool, id: Uuid) -> AppResult<User> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
@@ -449,7 +430,6 @@ async fn find_by_profile_uuid(pool: &PgPool, profile_uuid: &str) -> AppResult<Op
     )
 }
 
-/// A page of users plus the total row count, for the admin user table.
 #[derive(Debug, Clone)]
 pub struct UserPage {
     pub users: Vec<User>,
@@ -458,9 +438,8 @@ pub struct UserPage {
     pub page_size: i64,
 }
 
-/// Case-insensitive paginated search over username + email for the admin panel.
-/// An empty query lists all users. `page` is 1-based; the page size is fixed at
-/// 25.
+/// Case-insensitive paginated search over username + email; an empty query lists
+/// all users. `page` is 1-based and the page size is fixed at 25.
 pub async fn search_users(pool: &PgPool, q: &str, page: i64) -> AppResult<UserPage> {
     const PAGE_SIZE: i64 = 25;
     let page = page.max(1);
@@ -471,8 +450,7 @@ pub async fn search_users(pool: &PgPool, q: &str, page: i64) -> AppResult<UserPa
         return search_users_all(pool, page, offset, PAGE_SIZE).await;
     }
 
-    // why: escape LIKE metacharacters so a literal % or _ in the query matches
-    // literally instead of acting as a wildcard (and can't force a full scan).
+    // why: escape LIKE metacharacters so a literal % or _ matches literally.
     let pattern = format!("%{}%", escape_like_pattern(&trimmed.to_lowercase()));
 
     let total = sqlx::query_scalar::<_, i64>(
@@ -507,7 +485,6 @@ pub async fn search_users(pool: &PgPool, q: &str, page: i64) -> AppResult<UserPa
     })
 }
 
-/// The empty-query branch of [`search_users`]: list every user, paginated.
 async fn search_users_all(
     pool: &PgPool,
     page: i64,
@@ -534,7 +511,7 @@ async fn search_users_all(
     })
 }
 
-/// Fields an admin may patch on a user. `None` leaves the column untouched.
+/// `None` leaves the corresponding column untouched.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateUser {
     pub username: Option<String>,
@@ -543,8 +520,7 @@ pub struct UpdateUser {
     pub confirmed: Option<bool>,
 }
 
-/// Apply an admin patch to a user, keeping `normalized_username` consistent when
-/// the username changes. Returns the updated row.
+/// Keeps `normalized_username` consistent when the username changes.
 pub async fn update_user(pool: &PgPool, id: Uuid, patch: UpdateUser) -> AppResult<User> {
     let normalized = patch.username.as_deref().map(normalize_username);
 
@@ -578,7 +554,6 @@ pub async fn update_user(pool: &PgPool, id: Uuid, patch: UpdateUser) -> AppResul
     updated.ok_or_else(|| AppError::NotFound("user not found".into()))
 }
 
-/// Reset a user's password to a fresh Argon2id hash of `new`.
 pub async fn set_password(pool: &PgPool, id: Uuid, new: &str) -> AppResult<()> {
     check_password_len(new)?;
     let hash = hash_password(new)?;
@@ -595,12 +570,11 @@ pub async fn set_password(pool: &PgPool, id: Uuid, new: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Block a user (denies credential login). Returns the updated row.
+/// Block a user, denying credential login.
 pub async fn block(pool: &PgPool, id: Uuid) -> AppResult<User> {
     set_blocked(pool, id, true).await
 }
 
-/// Unblock a user. Returns the updated row.
 pub async fn unblock(pool: &PgPool, id: Uuid) -> AppResult<User> {
     set_blocked(pool, id, false).await
 }

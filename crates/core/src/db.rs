@@ -3,9 +3,7 @@ use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-/// Create the Postgres connection pool and run pending migrations. The
-/// migration directory lives at the workspace root and is embedded into the
-/// binary at compile time.
+/// Migrations are embedded from the workspace root at compile time.
 pub async fn connect_and_migrate(database_url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -18,13 +16,9 @@ pub async fn connect_and_migrate(database_url: &str) -> anyhow::Result<PgPool> {
     Ok(pool)
 }
 
-/// Close relay sessions and zero player counts left over from a previous run,
-/// since none of those connections survive a process restart.
-///
-/// A restart drops every live relay/WebSocket connection, but their DB rows
-/// linger as 'active'/'pending'. Reconcile so stale sessions don't keep guests
-/// falsely "in world" (presence + friend-of-friend membership) or inflate
-/// current_players.
+/// A restart drops every live relay/WebSocket connection, but their DB rows linger
+/// as active. Close them so stale sessions don't keep guests falsely "in world"
+/// (presence + friend-of-friend membership) or inflate current_players.
 pub async fn reconcile_after_restart(pool: &PgPool) -> anyhow::Result<()> {
     let closed = sqlx::query(
         "UPDATE relay_sessions SET status = 'closed', closed_at = now() WHERE status <> 'closed'",

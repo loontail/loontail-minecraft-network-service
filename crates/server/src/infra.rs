@@ -32,11 +32,8 @@ pub async fn health(State(state): State<AppState>) -> Response {
 
 /// `GET /metrics` — Prometheus-style text exposition.
 ///
-/// Gated (SEC-2): operational telemetry is not anonymous. Accepts either an
-/// authenticated admin session OR, for header-only ops scrapers, the configured
-/// `METRICS_TOKEN` as a Bearer. Returns 401/403 otherwise. Nothing scrapes this
-/// anonymously (the request log even excludes `/metrics`), so the default is
-/// admin-only.
+/// Gated (SEC-2): accepts an authenticated admin session OR the configured
+/// `METRICS_TOKEN` as a Bearer (for header-only scrapers); 401/403 otherwise.
 pub async fn metrics_handler(state: State<AppState>, headers: HeaderMap) -> Response {
     if let Err(rejection) = authorize_metrics(&state, &headers).await {
         return rejection;
@@ -99,8 +96,7 @@ async fn authorize_metrics(state: &AppState, headers: &HeaderMap) -> Result<(), 
         }
     }
 
-    // Fall back to an admin session (cookie or Bearer). Build minimal request parts
-    // carrying the headers so the standard extractor logic applies.
+    // Fall back to an admin session (cookie or Bearer) via the standard extractor.
     let mut req = axum::http::Request::new(axum::body::Body::empty());
     *req.headers_mut() = headers.clone();
     let (mut parts, _) = req.into_parts();

@@ -1,4 +1,4 @@
-// Back-compat barrel: the canonical DTO types now live in @/shared/types.
+// Back-compat re-export; the canonical DTO types live in @/shared/types.
 export type {
   AdminMe,
   AnalyticsOverview,

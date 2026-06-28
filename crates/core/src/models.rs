@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-/// The four user statuses. Serialized to JSON / stored in Postgres as
-/// camelCase strings: `offline`, `online`, `inWorld`, `joinable`.
+/// Serialized to JSON / stored in Postgres as camelCase strings: `offline`,
+/// `online`, `inWorld`, `joinable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UserStatus {
@@ -33,8 +33,8 @@ impl UserStatus {
         }
     }
 
-    /// Statuses a client is allowed to set explicitly via the status endpoint.
-    /// `offline` is derived from heartbeat timeout, never set directly.
+    /// Statuses a client may set explicitly; `offline` is derived from heartbeat
+    /// timeout, never set directly.
     pub fn from_client(value: &str) -> Option<UserStatus> {
         match value {
             "online" => Some(UserStatus::Online),
@@ -44,15 +44,14 @@ impl UserStatus {
         }
     }
 
-    /// True when the user is in their local world (host may accept guests).
+    /// True when the user is in their local world and may accept guests.
     pub fn is_in_world(self) -> bool {
         matches!(self, UserStatus::InWorld | UserStatus::Joinable)
     }
 }
 
-/// A row from the `users` table. Mirrors every column even where a field is
-/// not yet read in Rust, so `SELECT *` mappings stay complete. The identity
-/// columns (`email`..`is_admin`) are added in migration `0003`.
+/// A row from the `users` table. Mirrors every column even where a field is not yet
+/// read in Rust, so `SELECT *` mappings stay complete.
 #[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
 pub struct User {
@@ -78,7 +77,7 @@ pub struct User {
     pub is_admin: bool,
 }
 
-/// Public representation of a user, returned by the API.
+/// The API-exposed subset of [`User`].
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserDto {
@@ -113,13 +112,12 @@ impl From<&User> for UserDto {
     }
 }
 
-/// A freshly issued join ticket delivered once to a guest. Shared between the
-/// network domain (join/invite flows) and `core::realtime` (it travels inside a
-/// `ServerEvent`), so it lives here.
+/// A join ticket delivered once to a guest. Lives here because it travels inside a
+/// `ServerEvent` (`core::realtime`) as well as the network domain's join flows.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinTicketDto {
-    /// The raw ticket token — delivered once to the guest, used to open relay.
+    /// The raw ticket token, delivered once and used to open relay.
     pub ticket: String,
     pub relay_session_id: Uuid,
     pub world_session_id: Uuid,
@@ -134,16 +132,13 @@ pub struct JoinTicketDto {
     pub host_loader: Option<String>,
 }
 
-/// Normalize a username for case-insensitive lookup/search.
 pub fn normalize_username(username: &str) -> String {
     username.trim().to_lowercase()
 }
 
-/// Escape a user-supplied needle for safe interpolation into a SQL `LIKE`
-/// pattern. The backslash, `%`, and `_` metacharacters are escaped with a
-/// leading `\`, so the caller must pair the pattern with `ESCAPE '\'`. Without
-/// this a literal `%`/`_` in a query would act as a wildcard (matching far more
-/// than intended and able to force a full scan).
+/// Escape a needle for safe use in a SQL `LIKE` pattern: `\`, `%`, and `_` get a
+/// leading `\`, so the caller must pair the pattern with `ESCAPE '\'`. Without this
+/// a literal `%`/`_` would act as a wildcard.
 pub fn escape_like_pattern(needle: &str) -> String {
     let mut escaped = String::with_capacity(needle.len());
     for ch in needle.chars() {
@@ -155,11 +150,9 @@ pub fn escape_like_pattern(needle: &str) -> String {
     escaped
 }
 
-/// A pragmatic email-shape check (not RFC 5322): exactly one `@`, a non-empty
-/// local part, and a domain with at least one dot and no whitespace. Catches the
-/// obviously-malformed addresses public self-registration would otherwise accept;
-/// real deliverability is only proven by an email-confirmation flow (not present
-/// in this MVP — see SEC-4 note in `identity::register_user`).
+/// A pragmatic email-shape check (not RFC 5322): exactly one `@`, a non-empty local
+/// part, and a domain with at least one dot and no whitespace. Deliverability is
+/// only proven by an email-confirmation flow (see SEC-4 in `identity::register_user`).
 pub fn is_valid_email(email: &str) -> bool {
     let email = email.trim();
     if email.is_empty() || email.len() > 254 || email.chars().any(char::is_whitespace) {

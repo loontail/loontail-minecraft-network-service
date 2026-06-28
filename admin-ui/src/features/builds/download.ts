@@ -1,22 +1,16 @@
-// Build a file-download anchor at the ROOT bundle-registry file route (NOT the
-// `/api/` prefix): the byte stream lives at
-// `/bundle-registry/builds/{slug}/files/{*path}` and is guarded by the AuthUser
-// session cookie, so a plain same-origin anchor click downloads it. Each path
-// segment is `encodeURIComponent`'d and rejoined so spaces / unicode names in the
-// relative path are escaped without escaping the separating slashes.
+// The byte stream lives at the root file route (NOT the `/api/` prefix), guarded
+// by the AuthUser session cookie, so a plain same-origin anchor click downloads it.
 
-/// The last path segment (display name) used as the suggested download filename.
 function basename(relativePath: string): string {
   const parts = relativePath.split("/");
   return parts[parts.length - 1] ?? relativePath;
 }
 
-/// Encode each segment of a forward-slash relative path, preserving the slashes.
+// Per-segment encoding so spaces / unicode names escape without escaping the slashes.
 function encodeRelativePath(relativePath: string): string {
   return relativePath.split("/").map(encodeURIComponent).join("/");
 }
 
-/// Trigger a browser download of a single build file by `relativePath`.
 export function downloadFile(slug: string, relativePath: string): void {
   const href = `/bundle-registry/builds/${encodeURIComponent(
     slug,

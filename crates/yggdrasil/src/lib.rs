@@ -74,10 +74,6 @@ pub fn routes() -> Router<AppState> {
         .route("/", get(meta))
 }
 
-// ---------------------------------------------------------------------------
-// authserver
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticateRequest {
@@ -246,10 +242,6 @@ async fn invalidate(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---------------------------------------------------------------------------
-// sessionserver
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JoinRequest {
@@ -395,10 +387,6 @@ async fn profiles_by_name(
     Ok(Json(out))
 }
 
-// ---------------------------------------------------------------------------
-// meta
-// ---------------------------------------------------------------------------
-
 /// `GET /` — the Yggdrasil meta document: server identity, skin domains, and the
 /// SPKI public key used to verify signed textures.
 async fn meta(State(state): State<AppState>) -> YggResult<Json<Value>> {
@@ -413,10 +401,6 @@ async fn meta(State(state): State<AppState>) -> YggResult<Json<Value>> {
         "signaturePublickey": key.public_spki_pem(),
     })))
 }
-
-// ---------------------------------------------------------------------------
-// user lookups (runtime sqlx)
-// ---------------------------------------------------------------------------
 
 async fn find_user_by_profile_uuid(
     pool: &sqlx::PgPool,
@@ -446,8 +430,6 @@ async fn find_user_by_normalized_username(
     Ok(user)
 }
 
-/// The launcher/agent account surface (`/api/auth/*`), mounted by the server crate.
 pub use account::account_routes;
 
-/// Re-exports for the integration tests: the profile types the handlers emit.
 pub use profile::{GameProfile, ProfileProperty};

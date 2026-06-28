@@ -1,12 +1,8 @@
-//! Request observability sink.
-//!
-//! Every served HTTP request (minus a small noise allowlist applied by the
-//! capture middleware) is recorded here. The request thread does almost no work:
-//! it pushes one [`RequestLog`] onto a bounded in-memory ring (the live tail) and
-//! `try_send`s a clone to a background writer task that batch-INSERTs into
-//! `request_logs`. Both operations are non-blocking — a full channel drops the
-//! record rather than stalling or panicking the request path, so logging can
-//! never become a latency or availability hazard for real traffic.
+//! Request observability sink. The request thread pushes one [`RequestLog`] onto a
+//! bounded in-memory ring (the live tail) and `try_send`s a clone to a background
+//! writer that batch-INSERTs into `request_logs`. Both legs are non-blocking — a
+//! full channel drops the record rather than stalling the request path, so logging
+//! can never become a latency or availability hazard.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -19,20 +15,18 @@ use uuid::Uuid;
 
 use crate::auth::{hash_token, session_token_from_headers};
 
-/// Live tail ring capacity. Holds the most recent records in memory for the
-/// `/admin/logs/tail` snapshot without touching Postgres.
+/// Live tail ring capacity, serving the `/admin/logs/tail` snapshot without
+/// touching Postgres.
 const RING_CAPACITY: usize = 500;
 
-/// Bounded channel depth between the request path and the writer. Sized to absorb
-/// short bursts; once full, [`RequestLogSink::record`] drops rather than blocks.
+/// Channel depth between the request path and the writer; once full,
+/// [`RequestLogSink::record`] drops rather than blocks.
 const CHANNEL_CAPACITY: usize = 4096;
 
-/// How many rows the writer drains and INSERTs per batch, and how long it waits
-/// to fill a batch before flushing what it has.
+/// Max rows per INSERT batch, and how long the writer lingers to fill one.
 const BATCH_MAX: usize = 256;
 const BATCH_LINGER: Duration = Duration::from_millis(500);
 
-/// One recorded request. Cloned cheaply onto the ring and the writer channel.
 #[derive(Debug, Clone)]
 pub struct RequestLog {
     pub ts: DateTime<Utc>,
@@ -47,8 +41,7 @@ pub struct RequestLog {
     pub bytes_out: Option<i64>,
 }
 
-/// The principal a request authenticated as, for log attribution. `auth_kind` is
-/// one of `"session" | "admin" | "anon"` per the admin API contract.
+/// `auth_kind` is one of `"session" | "admin" | "anon"` per the admin API contract.
 #[derive(Debug, Clone)]
 pub struct ResolvedPrincipal {
     pub user_id: Option<Uuid>,
@@ -56,7 +49,6 @@ pub struct ResolvedPrincipal {
 }
 
 impl ResolvedPrincipal {
-    /// The unauthenticated principal: no token presented, or an invalid one.
     pub fn anon() -> Self {
         Self {
             user_id: None,
@@ -65,15 +57,13 @@ impl ResolvedPrincipal {
     }
 }
 
-/// The observability sink: a live ring for the tail snapshot plus a background
-/// writer that persists batches into `request_logs`.
 pub struct RequestLogSink {
     ring: Arc<Mutex<VecDeque<RequestLog>>>,
     tx: mpsc::Sender<RequestLog>,
 }
 
 impl RequestLogSink {
-    /// Construct the sink and spawn its background writer task against `pool`.
+    /// Spawns the background writer task against `pool`.
     pub fn new(pool: PgPool) -> Self {
         let ring = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -81,9 +71,6 @@ impl RequestLogSink {
         Self { ring, tx }
     }
 
-    /// Record one request. Non-blocking on both legs: it pushes onto the ring
-    /// (evicting the oldest past capacity) and `try_send`s to the writer, dropping
-    /// the persisted copy if the channel is full so the request path never stalls.
     pub fn record(&self, log: RequestLog) {
         {
             let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
@@ -92,9 +79,8 @@ impl RequestLogSink {
             }
             ring.push_back(log.clone());
         }
-        // why: a full channel means the writer is behind; we deliberately drop the
-        // DB copy rather than apply backpressure to live traffic. The ring still
-        // has it for the live tail.
+        // why: a full channel means the writer is behind; drop the DB copy rather
+        // than apply backpressure to live traffic (the ring still has it).
         if let Err(err) = self.tx.try_send(log) {
             if matches!(err, mpsc::error::TrySendError::Closed(_)) {
                 tracing::warn!("request-log writer channel closed; dropping record");
@@ -102,17 +88,16 @@ impl RequestLogSink {
         }
     }
 
-    /// The most recent `limit` records, newest first, from the live ring.
+    /// The most recent `limit` records, newest first.
     pub fn recent(&self, limit: usize) -> Vec<RequestLog> {
         let ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         ring.iter().rev().take(limit).cloned().collect()
     }
 }
 
-/// Drain the channel into Postgres in batches. Flushes when a batch fills
-/// ([`BATCH_MAX`]) or after [`BATCH_LINGER`] with at least one row pending, and
-/// exits when every sender is dropped. INSERT failures are logged and the batch
-/// discarded — observability must never crash or back up the service.
+/// Drain the channel into Postgres in batches, flushing on [`BATCH_MAX`] or after
+/// [`BATCH_LINGER`], and exiting when every sender is dropped. INSERT failures are
+/// logged and discarded — observability must never crash or back up the service.
 async fn writer_loop(pool: PgPool, mut rx: mpsc::Receiver<RequestLog>) {
     let mut batch: Vec<RequestLog> = Vec::with_capacity(BATCH_MAX);
     loop {
@@ -122,7 +107,6 @@ async fn writer_loop(pool: PgPool, mut rx: mpsc::Receiver<RequestLog>) {
         };
         batch.push(first);
 
-        // Greedily fill the batch, bounded by size and a short linger window.
         let deadline = tokio::time::sleep(BATCH_LINGER);
         tokio::pin!(deadline);
         while batch.len() < BATCH_MAX {
@@ -142,9 +126,8 @@ async fn writer_loop(pool: PgPool, mut rx: mpsc::Receiver<RequestLog>) {
     }
 }
 
-/// Bulk-INSERT a batch with a single multi-row statement built from a fixed
-/// column list and positional placeholders (no user text is ever formatted into
-/// SQL — only `$N` indices computed from the row count).
+/// Bulk-INSERT a batch via positional placeholders only — no user text is ever
+/// formatted into the SQL, only `$N` indices computed from the row count.
 async fn insert_batch(pool: &PgPool, batch: &[RequestLog]) -> Result<(), sqlx::Error> {
     if batch.is_empty() {
         return Ok(());
@@ -189,8 +172,7 @@ async fn insert_batch(pool: &PgPool, batch: &[RequestLog]) -> Result<(), sqlx::E
     Ok(())
 }
 
-/// Delete `request_logs` rows older than `days`. Runs off the request path on the
-/// hourly cleanup tick; returns the number of rows removed.
+/// Delete `request_logs` rows older than `days`, on the hourly cleanup tick.
 pub async fn delete_request_logs_older_than(pool: &PgPool, days: i64) -> Result<u64, sqlx::Error> {
     let affected =
         sqlx::query("DELETE FROM request_logs WHERE ts < now() - make_interval(days => $1::int)")
@@ -201,13 +183,9 @@ pub async fn delete_request_logs_older_than(pool: &PgPool, days: i64) -> Result<
     Ok(affected)
 }
 
-/// Best-effort principal attribution for a request, using exactly one DB query
-/// and only when a Bearer/cookie token is actually present.
-///
-/// Resolves the presented session token (Bearer header preferred, else the admin
-/// session cookie) to its owning user via the live-session predicate. Returns
-/// `auth_kind = "admin"` when that user `is_admin`, `"session"` otherwise, and
-/// `"anon"` when no token is present or it does not resolve to a live session.
+/// Best-effort principal attribution, using at most one DB query and only when a
+/// token is present. `auth_kind` is `"admin"` when the resolved user `is_admin`,
+/// `"session"` otherwise, and `"anon"` when no live session resolves.
 pub async fn resolve_principal(
     pool: &PgPool,
     headers: &axum::http::HeaderMap,

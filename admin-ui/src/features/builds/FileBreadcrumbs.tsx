@@ -14,9 +14,8 @@ interface DragPayload {
   paths: string[];
 }
 
-/// Google-Drive-style breadcrumb trail (Root / mods / config). Every crumb except
-/// the last navigates on click. The Root crumb is also a drop target: dropping cards
-/// on it moves them to the build root; dropping OS files uploads them to the root.
+// The Root crumb is also a drop target: dropped cards move to the build root,
+// dropped OS files upload to the root.
 export function FileBreadcrumbs({
   currentPath,
   onNavigate,
@@ -62,9 +61,8 @@ export function FileBreadcrumbs({
                   types.has(DRAG_TYPE) || types.has("file") ? "move" : "cancel"
                 }
                 onDrop={async (e) => {
-                  // A foreign/malformed payload (or a getFile rejection) would
-                  // otherwise surface as an unhandled rejection — react-aria's
-                  // DropZone doesn't catch async onDrop errors.
+                  // react-aria's DropZone doesn't catch async onDrop errors, so a
+                  // malformed payload / getFile rejection would surface unhandled.
                   try {
                     const fileItems = e.items.filter(isFileDropItem);
                     if (fileItems.length > 0) {
@@ -88,7 +86,6 @@ export function FileBreadcrumbs({
                       onMoveToRoot(payload.ids);
                     }
                   } catch {
-                    // Ignore malformed drops.
                   }
                 }}
                 className={cn(

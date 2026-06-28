@@ -103,12 +103,10 @@ pub struct CreateInvite {
     pub invitee_user_id: Uuid,
 }
 
-/// `POST /world-sessions/:id/invites` — invite a user into a world.
-///
-/// The host may invite their own friends directly. Under the
-/// `friends_of_friends` policy, a friend already trusted by the host may invite
-/// their own friends; if the invitee is not already the host's friend the
-/// invite is held as `pending_approval` until the host approves it.
+/// `POST /world-sessions/:id/invites` — the host invites their own friends
+/// directly. Under `friends_of_friends`, a friend the host trusts may invite
+/// their own friends; an invitee not already the host's friend is held as
+/// `pending_approval` until the host approves.
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -134,7 +132,6 @@ pub async fn create(
     }
 
     let status = if caller == host {
-        // Host invites one of their own friends.
         if !are_friends(&state.pool, host, invitee).await? {
             return Err(AppError::Forbidden);
         }
@@ -163,10 +160,9 @@ pub async fn create(
         Duration::from_std(state.config.invite_ttl).unwrap_or_else(|_| Duration::seconds(600));
     let expires_at = Utc::now() + ttl;
 
-    // Free the unique active slot from any earlier invite for this
-    // (world, invitee) that lapsed without being acted on, so the player can be
-    // re-invited. (Expired invites are otherwise hidden from every list and the
-    // partial unique index would block a new one forever.)
+    // Free the unique active slot from an earlier lapsed invite for this
+    // (world, invitee); the partial unique index would otherwise block a new
+    // one forever while the expired one stays hidden from every list.
     sqlx::query(
         r#"
         UPDATE world_invites SET status = 'expired', updated_at = now()
@@ -290,11 +286,9 @@ pub async fn accept(
 
     let world = worlds::open_world_session(&state.pool, row.world_session_id).await?;
 
-    // Re-validate the friend-of-friend chain at admission. Invites live ~10min,
-    // so the policy or a friendship could have changed since the host approved;
-    // a host_only flip (or a severed friendship) must revoke an outstanding FoF
-    // invite rather than still let the guest in. Host-issued invites (inviter ==
-    // host) are not friend-of-friend and need no re-check beyond capacity.
+    // Re-validate the friend-of-friend chain at admission: a host_only flip or a
+    // severed friendship since the invite was issued must block the guest now.
+    // Host-issued invites (inviter == host) are not FoF and skip this.
     if row.inviter_user_id != row.host_user_id
         && (world.invite_policy != "friends_of_friends"
             || !are_friends(&state.pool, row.host_user_id, row.inviter_user_id).await?

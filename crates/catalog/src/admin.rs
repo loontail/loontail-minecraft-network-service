@@ -1,7 +1,5 @@
-//! Admin catalog CRUD (mounted at `/admin/catalog`, `AdminUser`-guarded). These
-//! are deliberately minimal but functional: create/update/delete clients,
-//! keywords, and servers; publish/unpublish; and media management (real byte
-//! upload + list + delete, plus a JSON attach escape hatch for external URLs).
+//! Admin catalog CRUD (`AdminUser`-guarded): create/update/delete clients,
+//! keywords, and servers; publish/unpublish; and media management.
 
 use axum::body::Bytes;
 use axum::extract::{Multipart, OriginalUri, Path, State};
@@ -22,8 +20,6 @@ use crate::query::CatalogQuery;
 use crate::store;
 use crate::{repo, MAX_MEDIA_UPLOAD_BYTES};
 
-// --- Clients ---------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertClient {
@@ -37,12 +33,10 @@ pub struct UpsertClient {
     pub bundle_slug: Option<String>,
     #[serde(default)]
     pub sort_order: i32,
-    /// When `Some(true)`, publish the client on create (`published_at = now()`);
-    /// absent/`false` leaves it a draft (the default). Only consulted by
-    /// [`create_client`].
+    /// When `Some(true)`, publish on create; absent/`false` leaves a draft. Only
+    /// consulted by [`create_client`].
     #[serde(default)]
     pub publish: Option<bool>,
-    /// Localized text rows to (re)write for this client.
     #[serde(default)]
     pub locales: Vec<ClientLocaleInput>,
 }
@@ -56,9 +50,8 @@ pub struct ClientLocaleInput {
     pub short_description: Option<String>,
 }
 
-/// `GET /clients` (admin) — list every client including drafts, each with its
-/// real `published` state. The public `/api/clients` hides drafts, so the admin
-/// SPA must read this to manage freshly created (unpublished) builds.
+/// List every client including drafts, each with its `published` state (the public
+/// `/api/clients` hides drafts).
 pub async fn list_clients(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -69,11 +62,9 @@ pub async fn list_clients(
     Ok(Json(ClientAdminList { clients }))
 }
 
-/// `POST /clients` — create a build. The client row is inserted (published when
-/// `publish: true`, draft otherwise) with its locales, then its owned bundle is
-/// find-or-created (1:1 model) and linked via `bundle_id`/`bundle_slug` so the
-/// build immediately has a resolvable manifest URL — no separate "create a bundle"
-/// step. Returns `{ id, bundleSlug }`.
+/// Create a build: insert the client row (+ locales), then find-or-create its owned
+/// bundle (1:1) and link it via `bundle_id`/`bundle_slug` so the build immediately
+/// has a resolvable manifest URL. Returns `{ id, bundleSlug }`.
 pub async fn create_client(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -120,9 +111,8 @@ pub async fn create_client(
 
     tx.commit().await?;
 
-    // Create the on-disk bundle dir only after the tx commits (idempotent), so a
-    // rolled-back create leaves no stray directory. Reusing a pre-existing bundle
-    // already has its dir.
+    // why: create the on-disk dir only after commit, so a rolled-back create leaves
+    // no stray directory.
     if provisioned {
         loontail_bundles::ensure_bundle_dir(&state.config.bundles.storage_root, &effective_slug)?;
     }
@@ -133,9 +123,9 @@ pub async fn create_client(
     ))
 }
 
-/// Result of [`link_owned_bundle`]: the bundle id and slug that were linked and whether
-/// a new bundle row was provisioned (so the caller knows to create the on-disk dir after
-/// commit). `bundle_id` lets [`update_client`] detect when the link moved to a different
+/// Result of [`link_owned_bundle`]: the linked bundle id/slug and whether a new
+/// bundle row was provisioned (so the caller creates the on-disk dir after commit).
+/// `bundle_id` lets [`update_client`] detect when the link moved to a different
 /// bundle and tear down the now-unreferenced old one.
 struct LinkedBundle {
     bundle_id: Uuid,
@@ -143,14 +133,11 @@ struct LinkedBundle {
     provisioned: bool,
 }
 
-/// Auto-provision (find-or-create) the owned bundle (1:1) and link it onto the client
-/// — all inside the caller's tx, so a provision failure rolls the whole upsert back
-/// (no bundle-less client persists). Shared by [`create_client`] and [`update_client`]
-/// so both link the bundle the same way: the effective slug defaults to the client
-/// slug, an explicit non-empty `bundle_slug` overrides it (and can point at a
-/// pre-existing bundle, which is reused rather than duplicated), and `bundle_id` is
-/// re-resolved from that effective slug on every call (fixing slug/bundle_id
-/// divergence on update). The on-disk dir must be created by the caller after commit
+/// Find-or-create the client's owned bundle (1:1) and link it, inside the caller's
+/// tx so a provision failure rolls the whole upsert back. The effective slug
+/// defaults to the client slug; an explicit non-empty `bundle_slug` overrides it
+/// (and may reuse a pre-existing bundle). `bundle_id` is re-resolved from the
+/// effective slug on every call. The caller creates the on-disk dir after commit
 /// when `provisioned` is true.
 async fn link_owned_bundle(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -201,10 +188,9 @@ pub async fn update_client(
 ) -> AppResult<Json<Value>> {
     let mut tx = state.pool.begin().await?;
 
-    // Capture the currently-linked bundle before re-pointing, so a slug change that moves
-    // the link to a different bundle can tear the old one down (see below) instead of
-    // orphaning its row, artifacts, and on-disk tree. Outer Option = 404 guard, inner =
-    // the nullable `bundle_id`.
+    // Capture the currently-linked bundle before re-pointing, so a slug change that
+    // moves the link can tear the old bundle down (below) rather than orphaning it.
+    // Outer Option = 404 guard, inner = the nullable `bundle_id`.
     let old_bundle_id: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
         "SELECT bundle_id FROM catalog_clients WHERE id = $1",
     )
@@ -244,21 +230,18 @@ pub async fn update_client(
         write_client_locales(&mut tx, id, &body.locales).await?;
     }
 
-    // Re-resolve and link the owned bundle the same way create does. This both gives a
-    // legacy/null-bundle build a bundle (no more dead-end) and re-points `bundle_id`
-    // from the effective slug whenever `bundleSlug`/`slug` changed (no slug/bundle_id
-    // divergence).
+    // Re-resolve and link the owned bundle as create does: gives a null-bundle build a
+    // bundle and re-points `bundle_id` from the effective slug whenever the slug changed.
     let LinkedBundle {
         bundle_id: new_bundle_id,
         effective_slug,
         provisioned,
     } = link_owned_bundle(&mut tx, id, &body).await?;
 
-    // When the slug change re-pointed the client to a different bundle, the previously
-    // owned bundle is now stranded by the `ON DELETE SET NULL` FK. Tear it down in the
-    // same tx (row + CASCADE artifacts), but only when nothing else still links to it —
-    // an explicit `bundleSlug` can be shared across builds. The on-disk dir is removed
-    // best-effort after commit, mirroring `delete_client`.
+    // When the slug change re-pointed to a different bundle, the old bundle is stranded
+    // by the `ON DELETE SET NULL` FK. Tear it down in the same tx (row + CASCADE
+    // artifacts), but only when nothing else still links to it (an explicit `bundleSlug`
+    // can be shared across builds). The on-disk dir is removed best-effort after commit.
     let orphaned_slug = match old_bundle_id {
         Some(old) if old != new_bundle_id => {
             let still_referenced: i64 =
@@ -279,14 +262,10 @@ pub async fn update_client(
 
     tx.commit().await?;
 
-    // Create the on-disk bundle dir after commit (idempotent) only when newly
-    // provisioned, mirroring create.
     if provisioned {
         loontail_bundles::ensure_bundle_dir(&state.config.bundles.storage_root, &effective_slug)?;
     }
 
-    // Best-effort removal of the orphaned bundle's on-disk tree after the DB deletes are
-    // durable.
     if let Some(slug) = orphaned_slug {
         loontail_bundles::remove_bundle_dir(&state.config.bundles.storage_root, &slug);
     }
@@ -319,14 +298,12 @@ async fn write_client_locales(
     Ok(())
 }
 
-/// `DELETE /clients/{id}` — delete a build and its owned bundle. The FK
+/// Delete a build and its owned bundle. The FK
 /// `catalog_clients.bundle_id REFERENCES bundles(id) ON DELETE SET NULL` would
-/// otherwise orphan the owned `bundles` row, its `bundle_artifacts`, and the on-disk
-/// `builds/{slug}/` tree forever (there is no Bundles admin page to clean them up).
-/// So in ONE transaction we read the owned `bundle_id`/slug, delete the client row
-/// (dropping the FK ref), then delete the bundle row (CASCADE drops artifacts); the
-/// on-disk files are removed best-effort *after* commit. Legacy builds with a NULL
-/// `bundle_id` just delete the client.
+/// otherwise orphan the bundle row, its artifacts, and the on-disk tree. So in ONE
+/// transaction we read the owned `bundle_id`/slug, delete the client (dropping the FK
+/// ref), then delete the bundle (CASCADE drops artifacts); on-disk files are removed
+/// best-effort after commit.
 pub async fn delete_client(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -343,7 +320,7 @@ pub async fn delete_client(
     .await?
     .ok_or_else(|| AppError::NotFound("client not found".into()))?;
 
-    // Delete the client first to drop the FK reference, then the owned bundle row in
+    // why: delete the client first to drop the FK reference, then the owned bundle in
     // the same tx so both rows go or neither does.
     sqlx::query("DELETE FROM catalog_clients WHERE id = $1")
         .bind(id)
@@ -361,17 +338,13 @@ pub async fn delete_client(
 
     tx.commit().await?;
 
-    // Best-effort on-disk cleanup after the DB deletes are durable.
     if let Some(slug) = bundle_slug {
         loontail_bundles::remove_bundle_dir(&state.config.bundles.storage_root, &slug);
     }
 
-    // Also remove the client's catalog-media dir `{storage_root}/{client_hex}/`,
-    // which holds uploaded poster/background/titleImage/screenshot files. The
-    // cascade dropped the `catalog_media` rows but never the bytes on disk, so
-    // without this the images leak forever (no admin page to clean them up).
-    // Post-commit and best-effort, mirroring the bundle dir removal; uses the same
-    // undashed hex form (`id.simple()`) the upload path writes to.
+    // why: the cascade dropped the `catalog_media` rows but not the bytes on disk, so
+    // also remove the client's catalog-media dir (undashed hex, matching the upload
+    // path) or the images leak forever.
     let media_dir =
         std::path::Path::new(&state.config.catalog.storage_root).join(id.simple().to_string());
     tokio::fs::remove_dir_all(media_dir).await.ok();
@@ -395,9 +368,8 @@ pub async fn unpublish_client(
     set_published(&state, PublishableTable::Clients, id, false).await
 }
 
-/// The tables whose `published_at` flag the admin can toggle. An enum (not a
-/// `&str`) so `set_published` can only ever interpolate a fixed, in-code table
-/// name — a future caller cannot pass arbitrary text into the formatted SQL.
+/// Tables whose `published_at` flag the admin can toggle. An enum (not a `&str`) so
+/// `set_published` only ever interpolates a fixed, in-code table name into the SQL.
 #[derive(Clone, Copy)]
 enum PublishableTable {
     Clients,
@@ -440,8 +412,6 @@ async fn set_published(
     Ok(Json(json!({ "id": id, "published": published })))
 }
 
-// --- Media attach ----------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachMedia {
@@ -470,8 +440,7 @@ const MEDIA_ROLES: [&str; 4] = ["poster", "background", "titleImage", "screensho
 /// row (and unlinks its file). `screenshot` is the only multi-row role.
 const SINGULAR_ROLES: [&str; 3] = ["poster", "background", "titleImage"];
 
-/// JSON media-attach escape hatch: register a typed URL string without uploading
-/// bytes. Kept for callers that host media elsewhere.
+/// Register an externally-hosted media URL without uploading bytes.
 pub async fn attach_media(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -520,16 +489,13 @@ async fn require_client(state: &AppState, client_id: Uuid) -> AppResult<()> {
     }
 }
 
-/// A sniffed image format: its file extension and MIME type.
 struct ImageKind {
     ext: &'static str,
     mime: &'static str,
 }
 
-/// Sniff the image format from magic bytes. PNG (`89 50 4E 47`), JPEG
-/// (`FF D8 FF`), WebP (`RIFF....WEBP`), and GIF (`GIF8`, covering GIF87a/GIF89a)
-/// are accepted; anything else is rejected with `None` (the caller maps it to a
-/// 400). HEIC/AVIF would need transcoding and are out of scope.
+/// Sniff the image format from magic bytes; accepts PNG, JPEG, WebP, and GIF,
+/// rejecting anything else with `None`.
 fn sniff_image(bytes: &[u8]) -> Option<ImageKind> {
     if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
         Some(ImageKind {
@@ -556,8 +522,8 @@ fn sniff_image(bytes: &[u8]) -> Option<ImageKind> {
     }
 }
 
-/// Best-effort pixel dimensions. Only PNG is decoded (IHDR width/height at a fixed
-/// offset); JPEG/WebP return `None` rather than parsing their variable headers.
+/// Best-effort pixel dimensions: only PNG is decoded (IHDR), other formats return
+/// `None`.
 fn image_dimensions(bytes: &[u8], ext: &str) -> (Option<i32>, Option<i32>) {
     if ext == "png" && bytes.len() >= 24 && &bytes[12..16] == b"IHDR" {
         let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
@@ -568,13 +534,9 @@ fn image_dimensions(bytes: &[u8], ext: &str) -> (Option<i32>, Option<i32>) {
     }
 }
 
-/// `POST /clients/{id}/media/upload` (multipart) — upload real image bytes. Reads
-/// the `file` field chunked under [`MAX_MEDIA_UPLOAD_BYTES`], sniffs the format,
-/// writes a fresh revision to disk, and inserts a `catalog_media` row with a
-/// server-relative `url`. For singular roles the prior row of that role is deleted
-/// (and its file unlinked) first so a slot is replaced; screenshots append. The
-/// `role` comes from a `role` form field (path query not used here). Returns
-/// `201 {id, url}`.
+/// Upload real image bytes (multipart): sniff the format, write a fresh revision to
+/// disk, and insert a `catalog_media` row with a server-relative `url`. For singular
+/// roles the prior row is deleted (and its file unlinked) first; screenshots append.
 pub async fn upload_media(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -613,7 +575,6 @@ pub async fn upload_media(
 
     let mut tx = state.pool.begin().await?;
     if SINGULAR_ROLES.contains(&role.as_str()) {
-        // Replace the slot: capture old files, delete the rows, unlink after commit.
         let old_urls: Vec<String> = sqlx::query_scalar(
             "DELETE FROM catalog_media WHERE client_id = $1 AND role = $2 RETURNING url",
         )
@@ -648,8 +609,6 @@ pub async fn upload_media(
     Ok((StatusCode::CREATED, Json(json!({ "id": id, "url": url }))))
 }
 
-/// `GET /clients/{id}/media` — list the client's media rows (role/url/id/sortOrder)
-/// for the admin SPA's per-slot previews.
 pub async fn list_media(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -679,8 +638,6 @@ pub async fn list_media(
     Ok(Json(json!({ "media": media })))
 }
 
-/// `DELETE /clients/{id}/media/{media_id}` — delete a media row and unlink its
-/// on-disk file (best effort).
 pub async fn delete_media(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -700,9 +657,8 @@ pub async fn delete_media(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Map a server-relative `/catalog-media/{client}/{file}` url back to its on-disk
-/// path under the storage root. Returns `None` for externally-hosted urls (the
-/// JSON `attach_media` escape hatch) so deleting them never touches the disk.
+/// Map a server-relative `/catalog-media/...` url back to its on-disk path. `None`
+/// for externally-hosted urls, so deleting those never touches the disk.
 fn url_to_disk_path(storage_root: &str, url: &str) -> Option<std::path::PathBuf> {
     let rel = url.strip_prefix("/catalog-media/")?;
     if rel.is_empty() || rel.contains("..") {
@@ -716,9 +672,8 @@ struct UploadMediaFields {
     role: Option<String>,
 }
 
-/// Drain the multipart body into the `file` bytes and the `role` text, enforcing
-/// the per-upload size cap as bytes are read. The `file` field is read chunk by
-/// chunk and aborted the instant the accumulated size crosses
+/// Drain the multipart body into the `file` bytes and the `role` text. The `file`
+/// field is read chunk by chunk and aborted once it crosses
 /// [`MAX_MEDIA_UPLOAD_BYTES`], so an oversized upload is never fully buffered.
 async fn read_media_upload(mut multipart: Multipart) -> AppResult<UploadMediaFields> {
     let mut file: Option<Bytes> = None;
@@ -765,8 +720,6 @@ async fn read_media_upload(mut multipart: Multipart) -> AppResult<UploadMediaFie
     Ok(UploadMediaFields { file, role })
 }
 
-// --- Keywords --------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertKeyword {
@@ -788,9 +741,8 @@ pub async fn create_keyword(
     Json(body): Json<UpsertKeyword>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let mut tx = state.pool.begin().await?;
-    // Published on insert: keywords are now only created to be attached to a build, and
-    // the catalog read inlines a client's keyword only when `published_at IS NOT NULL`,
-    // so an unpublished keyword would never reach the launcher/UI.
+    // why: published on insert — the catalog read inlines a keyword only when
+    // `published_at IS NOT NULL`, so an unpublished one would never reach the UI.
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO catalog_keywords (slug, published_at) VALUES ($1, now()) RETURNING id",
     )
@@ -852,8 +804,6 @@ pub async fn unpublish_keyword(
     set_published(&state, PublishableTable::Keywords, id, false).await
 }
 
-// --- Servers ---------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertServer {
@@ -867,8 +817,7 @@ pub async fn create_server(
     _admin: AdminUser,
     Json(body): Json<UpsertServer>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
-    // Published on insert (see `create_keyword`): the catalog read inlines a client's
-    // server only when `published_at IS NOT NULL`.
+    // why: published on insert (see `create_keyword`).
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO catalog_servers (slug, name, address, published_at) \
          VALUES ($1,$2,$3, now()) RETURNING id",
@@ -949,8 +898,6 @@ pub async fn unpublish_server(
     set_published(&state, PublishableTable::Servers, id, false).await
 }
 
-// --- Relations -------------------------------------------------------------
-
 pub async fn attach_keyword(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -985,8 +932,7 @@ pub async fn attach_server(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /clients/{client_id}/keywords/{keyword_id}` — detach a keyword from a
-/// build by deleting the join row. Idempotent: a `204` even when no row was present.
+/// Detach a keyword from a build. Idempotent: `204` even when no row was present.
 pub async fn detach_keyword(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -1000,8 +946,7 @@ pub async fn detach_keyword(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /clients/{client_id}/servers/{server_id}` — detach a server from a build
-/// by deleting the join row. Idempotent (see [`detach_keyword`]).
+/// Detach a server from a build. Idempotent (see [`detach_keyword`]).
 pub async fn detach_server(
     State(state): State<AppState>,
     _admin: AdminUser,

@@ -1,11 +1,5 @@
-//! Request-capture middleware.
-//!
-//! Wraps the root router as a `from_fn_with_state` layer. For every served
-//! request that is not on the noise allowlist it records the method, matched-route
-//! template, status, latency, best-effort principal, client IP, user agent, and
-//! response size into `state.request_log`. WebSocket upgrades (`/signaling`,
-//! `/relay/*`) and the `/health`/`/metrics` probes are skipped so the log reflects
-//! real API traffic, not long-lived sockets or monitoring polls.
+//! Request-capture middleware: records served requests into `state.request_log`,
+//! skipping probes and WebSocket upgrades (see [`is_excluded`]).
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -22,9 +16,6 @@ use loontail_core::AppState;
 
 use crate::ip;
 
-/// Records each served request into the observability sink. Skips the noise
-/// allowlist; resolves the principal best-effort before running the handler so a
-/// single cheap query (only when a token is present) attributes the row.
 pub async fn capture(State(state): State<AppState>, request: Request, next: Next) -> Response {
     // Matched-route TEMPLATE (e.g. `/admin/users/{id}`) so the log groups by route,
     // not by every distinct id. Falls back to the raw path when no route matched.
@@ -70,8 +61,8 @@ pub async fn capture(State(state): State<AppState>, request: Request, next: Next
 }
 
 /// Paths excluded from request logging: liveness/metrics probes and the WebSocket
-/// upgrade endpoints (matched on the route TEMPLATE, so `/relay/{id}` style routes
-/// are covered by their prefix).
+/// upgrade endpoints. Matched on the route TEMPLATE, so `/relay/{id}` is covered by
+/// its prefix.
 fn is_excluded(path: &str) -> bool {
     path == "/health" || path == "/metrics" || path == "/signaling" || path.starts_with("/relay")
 }

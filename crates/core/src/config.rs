@@ -8,16 +8,14 @@ pub struct Config {
     pub http_port: u16,
     pub database_url: String,
     pub cors_allowed_origins: Vec<String>,
-    /// When `true`, the service runs behind a trusted reverse proxy and the client
-    /// IP is taken from the proxy-set `X-Forwarded-For` / `X-Real-IP` headers
-    /// rather than the transport peer (which is the proxy itself). When `false`
-    /// (the default) the transport peer is used and forwarding headers are never
-    /// trusted. Set `TRUSTED_PROXY=true` only when the immediate peer is a proxy
-    /// you control that overwrites these headers. See `crates/server/src/ip.rs`.
+    /// When `true`, the client IP is taken from the proxy-set `X-Forwarded-For` /
+    /// `X-Real-IP` headers; when `false` (default) the transport peer is used and
+    /// forwarding headers are never trusted. Set `true` only when the immediate peer
+    /// is a proxy you control that overwrites these headers.
     pub trusted_proxy: bool,
-    /// Optional shared bearer token that authorizes `GET /metrics` for an ops
-    /// scraper (e.g. Prometheus) that can't carry an admin session. When unset,
-    /// `/metrics` is reachable only by an authenticated admin. Env: `METRICS_TOKEN`.
+    /// Optional shared bearer token authorizing `GET /metrics` for an ops scraper
+    /// that can't carry an admin session. When unset, `/metrics` is reachable only
+    /// by an authenticated admin. Env: `METRICS_TOKEN`.
     pub metrics_token: Option<String>,
     pub session_ttl: Duration,
     pub heartbeat_timeout: Duration,
@@ -136,9 +134,8 @@ impl Config {
         let database_url =
             env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL must be set"))?;
 
-        // why: default CLOSED (empty), not `*`. An unset CORS_ALLOWED_ORIGINS
-        // blocks all browser cross-origin callers rather than failing open; an
-        // explicit `*` must be opted into and never combines with credentials.
+        // why: default CLOSED (empty), not `*` — an unset value blocks cross-origin
+        // callers rather than failing open; `*` must be opted into explicitly.
         let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
             .unwrap_or_default()
             .split(',')
@@ -151,9 +148,8 @@ impl Config {
             http_port: parse_env("HTTP_PORT", 8080),
             database_url,
             cors_allowed_origins,
-            // why: default CLOSED. Forwarding headers are client-controllable, so we
-            // only honour them when explicitly told the immediate peer is a trusted
-            // proxy that overwrites them.
+            // why: default CLOSED — forwarding headers are client-controllable, so
+            // honour them only when told the immediate peer is a trusted proxy.
             trusted_proxy: parse_bool_env("TRUSTED_PROXY", false),
             metrics_token: env::var("METRICS_TOKEN").ok().filter(|t| !t.is_empty()),
             session_ttl: Duration::from_secs(parse_env("SESSION_TTL_SECONDS", 86_400)),
@@ -262,10 +258,9 @@ fn parse_bool_env(key: &str, default: bool) -> bool {
 }
 
 /// Split a configured public URL into its `scheme://authority` origin (when it
-/// carries one) and its path portion. A path-only value (e.g. the default
-/// `/api/yggdrasil`) yields `(None, "/api/yggdrasil")`. The textures crate uses the
-/// origin to absolutize asset URLs; the server uses the path to mount the yggdrasil
-/// router. Single source of truth so both halves stay consistent.
+/// carries one) and its path portion; a path-only value yields `(None, path)`. The
+/// textures crate uses the origin to absolutize asset URLs and the server uses the
+/// path to mount the yggdrasil router, so this is the single source of truth.
 pub fn parse_public_url(public_url: &str) -> (Option<String>, &str) {
     let Some(scheme_end) = public_url.find("://") else {
         return (None, public_url);

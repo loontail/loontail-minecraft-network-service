@@ -11,10 +11,8 @@ import type { TreeEntry } from "@/features/builds/fileTree";
 import { cn } from "@/shared/lib/cn";
 import { formatBytes } from "@/shared/lib/format";
 
-// Grid cards are compact, so download-once has no inline affordance here (unlike
-// the list view's Switch column); it is reached via the per-card context menu's
-// Enable/Disable download-once item. `onToggleDownloadOnce` is therefore not
-// destructured from the shared FileViewProps.
+// Compact cards have no inline download-once toggle (unlike the list's Switch
+// column); it is reached via the context menu, so `onToggleDownloadOnce` is unused.
 export function FileGrid({
   entries,
   selectedKeys,

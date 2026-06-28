@@ -1,14 +1,12 @@
-//! The analytics write primitive. It lives in `core` (not `admin`) so the domain
-//! crates that own the hot paths — network `bootstrap`, yggdrasil `register` — can
-//! emit `user_events` rows without depending on the `admin` crate. The READ side
-//! (the dashboard timeseries aggregation) stays in `admin`.
+//! The analytics write primitive. It lives in `core`, not `admin`, so domain crates
+//! on the hot paths can emit `user_events` rows without depending on `admin` (which
+//! owns the read-side aggregation).
 
 use uuid::Uuid;
 
 use crate::state::AppState;
 
-/// Insert one append-only analytics event. Returns the sqlx error to the caller so
-/// the fire-and-forget wrapper can log it; callers on a hot path must use
+/// Insert one append-only analytics event. Callers on a hot path must use
 /// [`spawn_event`] rather than awaiting this inline.
 pub async fn record_event(
     state: &AppState,
@@ -25,9 +23,8 @@ pub async fn record_event(
     Ok(())
 }
 
-/// Emit an analytics event off the request hot path: clones the (cheap, `Arc`-backed)
-/// state and writes in a detached task so a slow or failing insert never blocks or
-/// fails the originating request. Insert failures are logged, not propagated.
+/// Emit an event off the request hot path in a detached task, so a slow or failing
+/// insert never blocks or fails the originating request. Failures are logged.
 pub fn spawn_event(
     state: &AppState,
     event_type: &'static str,

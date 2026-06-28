@@ -1,7 +1,7 @@
-//! Manifest generation — the byte-exact `Record<category, ManifestEntry[]>` the
-//! launcher fetches and hashes. Field order, conditional omission of
-//! `sha256`/`url`/`downloadOnce`, and 2-space pretty-printing all matter because
-//! the launcher hashes the raw JSON.
+//! Manifest generation — the `Record<category, ManifestEntry[]>` the launcher
+//! fetches and hashes. The launcher hashes the raw JSON bytes, so field order,
+//! conditional omission of `sha256`/`url`/`downloadOnce`, and 2-space
+//! pretty-printing are all load-bearing.
 
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::models::BundleArtifact;
 use crate::storage::public_url;
 
-/// One entry in the manifest. Field order is fixed by struct declaration order:
+/// One manifest entry. Field order is fixed by declaration order:
 /// `path, name, size, isDir[, sha256, url][, downloadOnce]`. `sha256`/`url` are
 /// omitted for directories; `downloadOnce` is omitted when false.
 #[derive(Debug, Serialize)]
@@ -30,19 +30,17 @@ pub struct ManifestEntry {
 /// `Record<category, ManifestEntry[]>` with insertion-ordered categories.
 pub type Manifest = IndexMap<String, Vec<ManifestEntry>>;
 
-/// Outcome of building a manifest from artifact rows: the manifest itself plus
-/// the file count and total byte size (directories excluded) the bundle row is
-/// then updated with.
+/// A built manifest plus the file count and total byte size (directories excluded)
+/// the bundle row is updated with.
 pub struct BuiltManifest {
     pub manifest: Manifest,
     pub files_count: i32,
     pub total_size: i64,
 }
 
-/// Build the manifest from artifact rows, grouping by category and computing
-/// per-file `url`. `existing` decides which artifacts to include — the caller
-/// passes a predicate that is `true` when the backing file is present on disk
-/// (mirrors the reference, which filters entries whose file is gone).
+/// Build the manifest from artifact rows, grouping by category and computing the
+/// per-file `url`. The `exists` predicate gates which artifacts are included (the
+/// caller passes one that is `true` when the backing file is present on disk).
 pub fn build_manifest<F>(
     artifacts: &[BundleArtifact],
     slug: &str,
@@ -107,11 +105,9 @@ where
     }
 }
 
-/// Serialize the manifest to the byte-exact JSON the launcher hashes: 2-space
-/// pretty-printed, matching `JSON.stringify(content, null, 2)`.
+/// Serialize the manifest to the JSON the launcher hashes: 2-space pretty-printed
+/// (serde_json's default), which the launcher must reproduce byte-for-byte.
 pub fn to_json(manifest: &Manifest) -> String {
-    // why: serde_json pretty-printer uses 2-space indentation, identical to the
-    // Node reference's `JSON.stringify(x, null, 2)`.
     serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".to_string())
 }
 

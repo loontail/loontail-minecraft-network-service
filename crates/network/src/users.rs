@@ -35,11 +35,9 @@ pub struct BootstrapResponse {
     pub user: UserDto,
 }
 
-/// `POST /users/bootstrap` — the in-game agent starts its network session.
-/// Authenticated by the session token the launcher injected (`AuthUser`); it
-/// issues NO token. It binds the live Minecraft identity onto the account
-/// (`minecraft_uuid` is filled only when unset, so an account keeps one stable
-/// identity) and marks presence online with the reported client version + loader.
+/// `POST /users/bootstrap` — the in-game agent starts its network session
+/// (authenticated by `AuthUser`; issues NO token). `minecraft_uuid` is filled
+/// only when unset, so an account keeps one stable identity.
 pub async fn bootstrap(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -69,7 +67,6 @@ pub async fn bootstrap(
     .await
     .map_err(map_bootstrap_conflict)?;
 
-    // Initialise / refresh presence as online (the player just launched).
     sqlx::query(
         r#"
         INSERT INTO presence
@@ -99,8 +96,7 @@ pub async fn bootstrap(
     }))
 }
 
-/// A reported Minecraft UUID already bound to a different account surfaces as a
-/// 409 rather than a generic 500.
+/// Surface a Minecraft UUID already bound to another account as a 409, not a 500.
 fn map_bootstrap_conflict(err: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db) = &err {
         if db.constraint() == Some("users_minecraft_uuid_key") {
@@ -169,8 +165,8 @@ pub async fn search(
         )));
     }
 
-    // why: escape LIKE metacharacters so a literal % or _ in the query matches
-    // literally instead of acting as a wildcard (and can't force a full scan).
+    // why: escape LIKE metacharacters so a literal % or _ matches literally
+    // instead of acting as a wildcard (and can't force a full scan).
     let pattern = format!("%{}%", escape_like_pattern(&normalize_username(needle)));
     let me_id = auth.id();
 

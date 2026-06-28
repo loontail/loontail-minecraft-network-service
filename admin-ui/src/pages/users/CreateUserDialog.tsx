@@ -83,9 +83,7 @@ export function CreateUserDialog() {
   }
 
   async function onSubmit(values: FormValues) {
-    // handleSubmit re-throws from an async onValid callback, so an un-caught
-    // rejection here becomes an "Uncaught (in promise)". The mutation's onError
-    // already toasts; swallow it.
+    // handleSubmit re-throws from the async onValid callback; swallow the rejection (onError already toasts).
     try {
       const user = await createUser.mutateAsync({
         username: values.username.trim(),

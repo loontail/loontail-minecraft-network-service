@@ -26,7 +26,7 @@ use loontail_core::{AppState, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Local `.env` is optional; on Hetzner the env comes from compose.
+    // Local `.env` is optional; in deployment the env comes from compose.
     dotenvy::dotenv().ok();
     init_tracing();
 
@@ -36,11 +36,9 @@ async fn main() -> anyhow::Result<()> {
         "starting loontail-launcher-api"
     );
 
-    // Yggdrasil signing key: load the existing PEM or generate+persist a fresh
-    // RSA-4096 key before serving, so signed-texture handlers never 500.
+    // Load/generate the signing key before serving so signed-texture handlers never 500.
     loontail_yggdrasil::init_crypto(&config)?;
-    // On-disk storage roots for textures and bundles, created up front so the
-    // first upload/create never races a missing directory.
+    // Create storage roots up front so the first upload/create never races a missing dir.
     loontail_textures::init(&config).await?;
     loontail_catalog::init(&config).await?;
     loontail_bundles::init(&config.bundles.storage_root)?;
@@ -54,8 +52,6 @@ async fn main() -> anyhow::Result<()> {
     // current_players.
     db::reconcile_after_restart(&pool).await?;
 
-    // Seed the bootstrap admin (idempotent; no-op once any admin exists or when
-    // ADMIN_BOOTSTRAP_PASSWORD is unset) so a fresh deployment is manageable.
     loontail_admin::ensure_bootstrap_admin(&pool, &config.admin).await?;
 
     let addr = format!("{}:{}", config.http_host, config.http_port);
@@ -67,8 +63,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Trim a trailing slash before routing so client variants like
     // `/api/yggdrasil/` resolve to the nested router's root meta route the same as
-    // `/api/yggdrasil`. Applied outside the router (matchit runs after the trim);
-    // `ServiceExt::into_make_service` adapts the layered service for `axum::serve`.
+    // `/api/yggdrasil`. Must be applied outside the router (matchit runs after the trim).
     let app = NormalizePathLayer::trim_trailing_slash().layer(app);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -86,29 +81,24 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Compose the full application router: infrastructure endpoints plus every
-/// domain, with CORS and HTTP tracing.
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config.cors_allowed_origins);
     let limiter =
         ratelimit::RateLimiter::from_config(&state.config.rate_limit, state.config.trusted_proxy);
 
-    // Group the `/api` subtree: catalog at its root (/clients, /keywords,
-    // /servers), yggdrasil nested at its configured prefix, and the bundle
-    // manifest nested at /bundle-registry. Grouping avoids overlapping top-level
-    // `/api` nests, which axum rejects. The yggdrasil public_url default is
-    // `/api/yggdrasil`; we nest under the suffix after `/api` so the meta and
+    // Grouping the `/api` subtree avoids overlapping top-level `/api` nests, which
+    // axum rejects. Yggdrasil nests under the suffix after `/api` so its meta and
     // sub-paths resolve under that prefix.
     let ygg_suffix = yggdrasil_api_suffix(&state.config.yggdrasil.public_url);
     let api = Router::new()
         .merge(loontail_catalog::routes())
         .nest("/auth", loontail_yggdrasil::account_routes())
-        // Textures are canonically mounted top-level at `/textures` (below), but
-        // the launcher's `@loontail/yggdrasil-client` derives its texture base from
-        // the Yggdrasil `apiRoot` and calls `<ygg_suffix>/textures/*` (the legacy
-        // CMS plugin's path). Nest a second mount inside the yggdrasil subtree so
-        // already-shipped launchers keep working; lookup responses stay
-        // server-relative `/textures/...` so the PNG bytes still resolve top-level.
+        // Textures are canonically mounted top-level at `/textures` (below), but the
+        // launcher's `@loontail/yggdrasil-client` derives its texture base from the
+        // Yggdrasil `apiRoot` and calls `<ygg_suffix>/textures/*`. A second mount
+        // inside the yggdrasil subtree keeps already-shipped launchers working;
+        // lookup responses stay server-relative `/textures/...` so the PNG bytes
+        // still resolve top-level.
         .nest(
             &ygg_suffix,
             loontail_yggdrasil::routes().nest("/textures", loontail_textures::routes()),
@@ -133,12 +123,9 @@ fn build_router(state: AppState) -> Router {
         .merge(loontail_network::routes())
         .nest("/api", api)
         .nest("/textures", loontail_textures::routes())
-        // Uploaded catalog-media bytes (client poster/background/titleImage/
-        // screenshots). The stored `url` fields point at `/catalog-media/...`;
-        // AuthUser-guarded, matching textures/bundles.
+        // Uploaded catalog-media bytes; stored `url` fields point here. AuthUser-guarded.
         .nest("/catalog-media", loontail_catalog::media_routes())
-        // The manifest's `url` fields point at `/bundle-registry/builds/...`;
-        // serve those file bytes from the configured public prefix.
+        // The manifest's `url` fields point at `/bundle-registry/builds/...`.
         .nest("/bundle-registry", loontail_bundles::static_routes())
         .nest_service("/admin", admin.with_state(state.clone()))
         // Capture every served request (minus probes + WS upgrades) into the

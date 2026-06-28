@@ -1,5 +1,5 @@
-//! Database access for bundles and their artifacts (runtime sqlx only) and the
-//! manifest regeneration routine that ties on-disk scanning to the artifacts.json.
+//! Database access for bundles and their artifacts, plus the manifest regeneration
+//! routine that ties on-disk scanning to `artifacts.json`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,10 +31,8 @@ pub async fn find_by_slug(pool: &PgPool, slug: &str) -> AppResult<Option<Bundle>
     )
 }
 
-/// Look up an existing bundle's id by slug, or `None`. The slug is the cross-crate
-/// link key (a catalog client owns a bundle whose slug matches it), so this is the
-/// find half of catalog's find-or-create provisioning. Runs on any sqlx executor so
-/// callers can use it inside a transaction.
+/// An existing bundle's id by slug, or `None`. The slug is the cross-crate link key
+/// (a catalog client owns the bundle whose slug matches it). Runs on any executor.
 pub async fn find_bundle_id_by_slug<'e, E>(executor: E, slug: &str) -> AppResult<Option<Uuid>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -47,10 +45,10 @@ where
     )
 }
 
-/// Insert a new draft `bundles` row (description/version NULL) and return its id —
-/// the DB half of provisioning, with no filesystem side effect, so it runs inside a
-/// caller's transaction. Validates the slug and rejects a pre-existing slug as
-/// [`AppError::Conflict`]. Pair with [`ensure_bundle_dir`] after the tx commits.
+/// Insert a draft `bundles` row and return its id — the DB half of provisioning,
+/// with no filesystem side effect, so it runs inside the caller's transaction. A
+/// pre-existing slug is [`AppError::Conflict`]. Pair with [`ensure_bundle_dir`]
+/// after commit.
 pub async fn provision_bundle_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     slug: &str,
@@ -72,19 +70,16 @@ pub async fn provision_bundle_row(
     Ok(id)
 }
 
-/// Create a bundle's on-disk `{storage_root}/builds/{slug}/files` directory
-/// (idempotent). Run after the bundle row is committed so a rolled-back provision
-/// leaves no stray directory.
+/// Create a bundle's on-disk `files` directory (idempotent). Run after the row is
+/// committed so a rolled-back provision leaves no stray directory.
 pub fn ensure_bundle_dir(storage_root: &str, slug: &str) -> AppResult<()> {
     crate::storage::ensure_build_dir(storage_root, slug)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir build dir: {e}")))
 }
 
-/// Provision a new draft bundle: validate the slug, insert the `bundles` row
-/// (description/version NULL), create its on-disk `{storage_root}/builds/{slug}/files`
-/// directory, and return the new bundle id. The slug must be free — callers should
-/// find-first, but a pre-existing slug is reported as [`AppError::Conflict`] so this
-/// never silently collides.
+/// Provision a draft bundle: insert the row and create its on-disk directory,
+/// returning the new id. A pre-existing slug is [`AppError::Conflict`] (never a
+/// silent collision).
 pub async fn provision_bundle(
     pool: &PgPool,
     storage_root: &str,
@@ -111,8 +106,8 @@ pub async fn update_bundle_meta(
     description: Option<&str>,
     version: Option<&str>,
 ) -> AppResult<Bundle> {
-    // COALESCE keeps the existing column when the field is omitted, except for
-    // description/version which are nullable and may be intentionally cleared.
+    // why: COALESCE keeps the existing `name` when omitted, but description/version
+    // are nullable and bound directly so they can be intentionally cleared.
     Ok(sqlx::query_as::<_, Bundle>(
         r#"
         UPDATE bundles
@@ -140,8 +135,7 @@ pub async fn delete_bundle(pool: &PgPool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// Read a bundle's slug by id (any executor, so callers can run it in a tx). `None`
-/// when no such bundle exists.
+/// A bundle's slug by id (any executor). `None` when no such bundle exists.
 pub async fn bundle_slug_by_id<'e, E>(executor: E, id: Uuid) -> AppResult<Option<String>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -166,9 +160,8 @@ where
     Ok(())
 }
 
-/// Remove a build's on-disk `{storage_root}/builds/{slug}` tree (best-effort: a
-/// failed unlink is logged, never propagated, so an orphaned directory can't block
-/// the authoritative row deletion).
+/// Remove a build's on-disk tree (best-effort: a failed unlink is logged, never
+/// propagated, so an orphaned directory can't block the authoritative row deletion).
 pub fn remove_bundle_dir(storage_root: &str, slug: &str) {
     if let Err(e) = crate::storage::delete_build_files(storage_root, slug) {
         tracing::warn!(slug, error = %e, "failed to delete on-disk build files");
@@ -211,9 +204,8 @@ pub async fn find_artifact(pool: &PgPool, id: Uuid) -> AppResult<Option<BundleAr
 }
 
 /// Upsert one file/dir artifact by `(bundle_id, relative_path)`. A new row inserts
-/// `download_once = false`; an existing row's `download_once` is left untouched (the
-/// `DO UPDATE` deliberately omits it, preserving an operator's toggle across rescans).
-/// Backed by the `(bundle_id, relative_path)` unique index (migration 0013).
+/// `download_once = false`; an existing row's `download_once` is deliberately left
+/// untouched by the `DO UPDATE`, preserving an operator's toggle across rescans.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_artifact(
     pool: &PgPool,
@@ -253,11 +245,9 @@ pub async fn upsert_artifact(
     Ok(())
 }
 
-/// Replace a bundle's artifact rows with a freshly scanned set, in one transaction:
+/// Replace a bundle's artifact rows with a freshly scanned set in one transaction:
 /// upsert every scanned entry (preserving each existing row's `download_once`), then
-/// delete any row whose `relative_path` is absent from the new scan. An empty scan
-/// clears all of the bundle's rows. This is the full-replace half of a build re-upload
-/// (the disk files are replaced separately by the caller).
+/// delete any row absent from the new scan (an empty scan clears all rows).
 pub async fn upsert_scan(pool: &PgPool, bundle_id: Uuid, scan: &[ScanEntry]) -> AppResult<()> {
     let mut tx = pool.begin().await?;
 
@@ -291,8 +281,7 @@ pub async fn upsert_scan(pool: &PgPool, bundle_id: Uuid, scan: &[ScanEntry]) -> 
 }
 
 /// Transaction-executor variant of [`upsert_artifact`] (same `ON CONFLICT` semantics,
-/// including the deliberate `download_once` preservation) so a whole scan upserts and
-/// prunes atomically inside one transaction.
+/// including the `download_once` preservation).
 #[allow(clippy::too_many_arguments)]
 async fn upsert_artifact_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -373,10 +362,9 @@ pub async fn delete_artifacts_with_prefix(
     Ok(())
 }
 
-/// `true` when an artifact row already occupies `relative_path` in this bundle.
-/// Used to return a clean 409 before a move/rename instead of letting the
-/// `(bundle_id, relative_path)` unique index raise a raw 500. Runs on any executor
-/// so callers can check inside a transaction.
+/// `true` when an artifact row already occupies `relative_path` in this bundle, so a
+/// move/rename can return a clean 409 instead of hitting the unique index. Runs on
+/// any executor.
 pub async fn artifact_exists_at<'e, E>(
     executor: E,
     bundle_id: Uuid,
@@ -396,8 +384,7 @@ where
 }
 
 /// `true` when any artifact row in this bundle lives under `prefix` (pass it with a
-/// trailing `/`). Detects a destination folder that already has contents so a folder
-/// move can be refused with a clean 409.
+/// trailing `/`), so a folder move into an already-populated destination is a 409.
 pub async fn any_artifact_with_prefix<'e, E>(
     executor: E,
     bundle_id: Uuid,
@@ -416,8 +403,7 @@ where
     Ok(count > 0)
 }
 
-/// Update one artifact row's path on a transaction executor, so a whole subtree can
-/// move atomically inside the caller's transaction.
+/// Update one artifact row's path on a transaction executor.
 async fn update_artifact_path_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
@@ -438,19 +424,14 @@ async fn update_artifact_path_tx(
 }
 
 /// Move (rename) a file or folder subtree within one bundle: rewrite the moved row's
-/// `relative_path`/`name`/`category` plus every descendant row's path (prefix
-/// `old_rel` -> `new_rel`, re-deriving `category`), then perform the single on-disk
-/// rename of the subtree. All DB writes run inside the passed transaction.
+/// path plus every descendant's (prefix `old_rel` -> `new_rel`), then perform the
+/// single on-disk rename. All DB writes run inside the passed transaction.
 ///
-/// Ordering (recoverability): the DB rewrites happen FIRST, the OS rename LAST. The
-/// tx is NOT yet committed when the OS rename runs, so if `std::fs::rename` fails we
-/// return early and the caller's tx rolls back every row change — disk and DB stay
-/// consistent. The OS rename is the only non-transactional step and is deferred to
-/// the very end where its failure is still recoverable by dropping the tx.
+/// Ordering is load-bearing: DB rewrites happen FIRST, the OS rename LAST and while
+/// the tx is still uncommitted, so if the rename fails we return early and the
+/// caller's tx rolls back every row change — disk and DB stay consistent.
 ///
-/// `old_rel`/`new_rel` are normalized forward-slash relative paths. Caller is
-/// responsible for the conflict + self-into-subtree guards (this fn assumes the move
-/// is legal). A no-op (`old_rel == new_rel`) is rejected by the caller's guards.
+/// Caller owns the conflict + self-into-subtree guards (this fn assumes a legal move).
 pub(crate) async fn move_subtree(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     bundle_id: Uuid,
@@ -490,9 +471,8 @@ pub(crate) async fn move_subtree(
         }
     }
 
-    // why: DB rows are rewritten above (still inside the uncommitted tx); the OS
-    // rename is the last, only non-transactional step. If it fails we bail and the
-    // caller's tx rolls back, leaving disk + DB consistent.
+    // why: OS rename is the last, only non-transactional step — on failure we bail and
+    // the caller's uncommitted tx rolls back the row changes above.
     let old_physical = join_files(files_root, old_rel);
     let new_physical = join_files(files_root, new_rel);
     if old_physical.exists() {

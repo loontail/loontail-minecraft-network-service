@@ -1,7 +1,3 @@
-//! Admin authentication: password login that requires `is_admin`, session
-//! issuance into an httpOnly cookie (plus a CSRF cookie), logout, and the current
-//! identity endpoint.
-
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;

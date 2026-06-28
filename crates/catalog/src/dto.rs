@@ -1,13 +1,9 @@
-//! Wire DTOs for the launcher catalog. The native contract is flat camelCase JSON
-//! (no envelopes): `id` is the entity's UUID rendered as an undashed 32-char hex
-//! string, relations are always inlined, media `url`s stay server-relative (the
-//! launcher absolutizes; the admin SPA is same-origin), version fields are
-//! nullable strings, and `bundleSlug` is nullable (empty collapses to null).
+//! Wire DTOs for the launcher catalog. `id` is the entity's UUID rendered as an
+//! undashed 32-char hex string; media `url`s stay server-relative (the launcher
+//! absolutizes them; the admin SPA is same-origin).
 
 use serde::Serialize;
 
-/// A media slot in the launcher's native `Media` shape. `url` stays
-/// server-relative; dimensions are nullable (best-effort from the upload sniff).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaDto {
@@ -16,9 +12,9 @@ pub struct MediaDto {
     pub height: Option<i32>,
 }
 
-/// An additive summary of the client's owned bundle, inlined into [`ClientDto`].
-/// `manifestUrl` points at the frozen bundle-registry manifest route. Absent
-/// (the field is `null`) when the client has no linked bundle.
+/// Summary of the client's owned bundle, inlined into [`ClientDto`] (null when the
+/// client has no linked bundle). `manifestUrl` points at the bundle-registry
+/// manifest route.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleSummaryDto {
@@ -29,7 +25,6 @@ pub struct BundleSummaryDto {
     pub manifest_url: String,
 }
 
-/// A keyword: undashed UUID `id` + the locale-resolved `title`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeywordDto {
@@ -37,7 +32,6 @@ pub struct KeywordDto {
     pub title: String,
 }
 
-/// A server: undashed UUID `id`, optional `name`, and `address`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerDto {
@@ -46,9 +40,6 @@ pub struct ServerDto {
     pub address: String,
 }
 
-/// A client in the launcher's native flat shape. Relations are always inlined;
-/// singular media slots are `null` when absent; `screenshots`/`keywords`/`servers`
-/// are arrays (possibly empty).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientDto {
@@ -72,15 +63,13 @@ pub struct ClientDto {
     pub bundle: Option<BundleSummaryDto>,
 }
 
-/// `{ clients: [...] }` list wrapper for the clients endpoint.
 #[derive(Debug, Serialize)]
 pub struct ClientList {
     pub clients: Vec<ClientDto>,
 }
 
 /// A client plus its admin-only `published` state, for the admin clients list
-/// (which includes drafts the public contract hides). Flattens [`ClientDto`] so
-/// the admin SPA reuses the same fields and adds `published`.
+/// (which includes drafts the public contract hides).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientAdminDto {
@@ -89,19 +78,16 @@ pub struct ClientAdminDto {
     pub published: bool,
 }
 
-/// `{ clients: [...] }` list wrapper for the admin clients endpoint.
 #[derive(Debug, Serialize)]
 pub struct ClientAdminList {
     pub clients: Vec<ClientAdminDto>,
 }
 
-/// `{ keywords: [...] }` list wrapper for the keywords endpoint.
 #[derive(Debug, Serialize)]
 pub struct KeywordList {
     pub keywords: Vec<KeywordDto>,
 }
 
-/// `{ servers: [...] }` list wrapper for the servers endpoint.
 #[derive(Debug, Serialize)]
 pub struct ServerList {
     pub servers: Vec<ServerDto>,

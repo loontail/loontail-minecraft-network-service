@@ -81,8 +81,7 @@ export function useDeleteTexture(kind: TextureKind) {
   });
 }
 
-/// Orphan scan (registry rows whose file is gone from disk). Disabled until the
-/// admin opts in — it stats every row on disk, so it isn't run on page load.
+/// Opt-in only: stats every row's file on disk, so it never runs on page load.
 export function useOrphans(enabled: boolean) {
   return useQuery({
     queryKey: textureKeys.orphans(),

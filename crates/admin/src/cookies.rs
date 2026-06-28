@@ -1,6 +1,6 @@
-//! Cookie builders for the admin session and CSRF tokens. The session cookie is
-//! httpOnly (JS cannot read it); the CSRF cookie is deliberately readable so the
-//! SPA can echo it in the `x-csrf-token` header (double-submit pattern).
+//! Cookie builders for the admin session + CSRF tokens. The session cookie is
+//! httpOnly; the CSRF cookie is deliberately readable so the SPA can echo it in
+//! the `x-csrf-token` header (double-submit pattern).
 
 use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, HeaderValue};
@@ -8,8 +8,7 @@ use chrono::{DateTime, Utc};
 
 use loontail_core::auth::CSRF_COOKIE_NAME;
 
-/// Build a `Set-Cookie` value with the shared attributes. `http_only` gates JS
-/// readability; `max_age` of `None` clears the cookie (expires immediately).
+/// Build a `Set-Cookie` value; `max_age` of `None` clears the cookie.
 fn build_cookie(name: &str, value: &str, http_only: bool, max_age: Option<i64>) -> String {
     let mut cookie = format!("{name}={value}; Path=/; Secure; SameSite=Lax");
     if http_only {
@@ -29,8 +28,6 @@ fn append(headers: &mut HeaderMap, cookie: String) {
     }
 }
 
-/// Set the httpOnly session cookie and the readable CSRF cookie, both scoped to
-/// the session expiry.
 pub fn set_session_cookies(
     headers: &mut HeaderMap,
     cookie_name: &str,
@@ -49,14 +46,13 @@ pub fn set_session_cookies(
     );
 }
 
-/// Clear both the session and CSRF cookies on logout.
 pub fn clear_session_cookies(headers: &mut HeaderMap, cookie_name: &str) {
     append(headers, build_cookie(cookie_name, "", true, None));
     append(headers, build_cookie(CSRF_COOKIE_NAME, "", false, None));
 }
 
-/// Read a named cookie value from request headers (used to find the raw session
-/// token on logout, where there is no extractor to lean on).
+/// Read a named cookie value (used to find the raw session token on logout,
+/// where there is no extractor to lean on).
 pub fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     loontail_core::cookie_value(headers, name).map(str::to_string)
 }

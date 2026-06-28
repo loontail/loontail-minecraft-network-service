@@ -1,17 +1,8 @@
-//! Relay / tunnel MVP.
-//!
-//! Architecture: each guest joining a world gets its own `relay_session`
-//! (a rendezvous pair identified by `relay_session_id`). The host opens one
-//! relay WebSocket per arriving guest (cued by the `guestArriving` signaling
-//! event) and the guest opens one too; the hub pairs them by id and pipes raw
-//! bytes both ways. One pair per guest scales naturally to `max_players`.
-//!
-//! The mod side bridges each WebSocket to a local TCP socket (host: the LAN
-//! world; guest: a local listener Minecraft connects to), turning this into a
-//! TCP-over-WebSocket tunnel.
-//!
-//! The rendezvous data structure (`RelayHub`) lives in `core::realtime`; this
-//! module owns only the axum WS handler that drives it.
+//! Relay tunnel: each guest gets its own `relay_session` rendezvous pair. Host
+//! and guest each open one relay WebSocket (host cued by the `guestArriving`
+//! event); the hub (`RelayHub` in `core::realtime`) pairs them by id and pipes
+//! raw bytes both ways. The mod side bridges each socket to a local TCP socket,
+//! making this a TCP-over-WebSocket tunnel.
 
 use std::time::Duration;
 
@@ -159,18 +150,17 @@ async fn handle_relay(
     world_session_id: Uuid,
     guest_user_id: Option<Uuid>,
 ) {
-    // Are we the second party? If so, a peer of the OPPOSITE role is already
-    // waiting. A same-role waiter is left parked and we fall through to park.
+    // `take` returns a waiting peer only if it is the OPPOSITE role; a same-role
+    // waiter is left parked and we fall through to park ourselves.
     let pending = state.realtime.relay.take(relay_session_id, role);
 
     match pending {
         Some(peer) => {
             // Authoritative capacity gate at the real admission moment. The
-            // per-path pre-checks (join-ticket / join-request / invite accept)
-            // read `current_players`, which only advances HERE, so two guests can
-            // both pass a pre-check before either is counted. This atomic
-            // conditional increment is the only place that cannot be raced: it
-            // succeeds for a guest only while a slot is actually free.
+            // per-path pre-checks only read `current_players`, which advances
+            // HERE, so two guests can both pass a pre-check before either counts.
+            // This atomic conditional increment is the only unraceable point:
+            // it succeeds for a guest only while a slot is actually free.
             if !try_admit_player(&state, world_session_id).await {
                 mark_relay_closed(&state, relay_session_id).await;
                 let _ = peer.done.send(());
@@ -202,10 +192,9 @@ async fn handle_relay(
             }
         }
         None => {
-            // First party: park our socket and wait for the peer to pipe. If
-            // the slot is already occupied (a same-role waiter or a
-            // double-connect), park hands our socket back; refuse this
-            // connection cleanly so the original waiter keeps its slot.
+            // First party: park our socket and wait for the peer. If the slot is
+            // already taken (same-role waiter or double-connect), park hands our
+            // socket back and we refuse so the original waiter keeps its slot.
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             let refused = state.realtime.relay.park(
                 relay_session_id,
@@ -221,18 +210,16 @@ async fn handle_relay(
 
             let _ = tokio::time::timeout(RENDEZVOUS_TIMEOUT, done_rx).await;
 
-            // Clean up if we timed out before a peer arrived. This drops only
-            // our own parked socket: had a peer paired, `take` would already
-            // have removed it, so anything still here is ours.
+            // On timeout, drop only our own parked socket: had a peer paired,
+            // `take` would already have removed it, so anything still here is ours.
             let _ = state.realtime.relay.remove_waiting(relay_session_id);
         }
     }
 }
 
-/// Atomically reserve a player slot for a world. Returns `true` only if the
-/// world is still open and had a free slot (now taken). A single SQL statement,
-/// so concurrent callers cannot both pass the `current_players < max_players`
-/// guard — this is what makes the cap a hard limit.
+/// Atomically reserve a player slot, returning `true` only if the world was open
+/// with a free slot. A single conditional UPDATE, so concurrent callers cannot
+/// both pass the `current_players < max_players` guard — this makes the cap hard.
 async fn try_admit_player(state: &AppState, world_session_id: Uuid) -> bool {
     match sqlx::query(
         r#"
@@ -334,7 +321,6 @@ async fn pipe(host: WebSocket, guest: WebSocket, state: &AppState) {
 /// A peer frame's disposition after counting forwarded bytes.
 #[cfg_attr(test, derive(Debug))]
 enum Forward {
-    /// Forward this frame to the other side.
     Send(Message),
     /// Drop the frame (e.g. ping/pong) but keep the tunnel open.
     Skip,

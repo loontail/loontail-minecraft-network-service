@@ -1,11 +1,6 @@
-//! In-process per-IP sliding-window rate limiter for unauthenticated credential
-//! endpoints (login/register/Yggdrasil authenticate+refresh).
-//!
-//! No external crate: a `Mutex<HashMap<IpAddr, VecDeque<Instant>>>` records each
-//! IP's recent attempt timestamps and rejects once more than `max_attempts` fall
-//! inside the trailing `window`. State is purely ephemeral; a poisoned lock is
-//! recovered rather than propagated. The middleware self-filters to the exact
-//! credential paths so every other route is untouched.
+//! In-process per-IP sliding-window rate limiter for the unauthenticated
+//! credential endpoints (see [`THROTTLED_PATHS`]). State is ephemeral; a poisoned
+//! lock is recovered rather than propagated.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -33,7 +28,6 @@ const THROTTLED_PATHS: &[&str] = &[
     "/api/yggdrasil/authserver/refresh",
 ];
 
-/// Shared per-IP sliding-window limiter. Cheap to clone (an `Arc`).
 #[derive(Clone)]
 pub struct RateLimiter {
     inner: Arc<Inner>,
@@ -42,12 +36,10 @@ pub struct RateLimiter {
 struct Inner {
     max_attempts: u32,
     window: Duration,
-    /// Whether the immediate peer is a trusted proxy (governs how the client IP is
-    /// derived; see [`crate::ip`]).
     trusted_proxy: bool,
     hits: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
-    /// Shared bucket for credential requests whose IP can't be resolved. Keeps
-    /// such requests throttled (fail-closed) instead of bypassing the limiter.
+    /// Shared bucket for credential requests whose IP can't be resolved, so they
+    /// stay throttled (fail-closed) instead of bypassing the limiter.
     unresolved: Mutex<VecDeque<Instant>>,
 }
 
@@ -68,9 +60,8 @@ impl RateLimiter {
         }
     }
 
-    /// Record one attempt for `ip` at `now`; return `true` if it is allowed (i.e.
-    /// the count within the trailing window does not exceed `max_attempts`).
-    /// Expired timestamps are pruned in the same pass and empty buckets dropped.
+    /// Record one attempt for `ip` at `now`; `true` if the count within the trailing
+    /// window does not exceed `max_attempts`. Prunes expired timestamps in the same pass.
     fn check_at(&self, ip: IpAddr, now: Instant) -> bool {
         let window = self.inner.window;
         let max = self.inner.max_attempts as usize;

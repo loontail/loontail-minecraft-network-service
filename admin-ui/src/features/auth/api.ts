@@ -7,8 +7,7 @@ export const authKeys = {
   me: ["auth", "me"] as const,
 };
 
-/// Resolve the current admin identity. A 401/403 means "not signed in" and
-/// resolves to `null` rather than throwing, so route gating can branch on it.
+/// A 401/403 resolves to `null` instead of throwing, so route gating can branch on it.
 export function useSession() {
   return useQuery({
     queryKey: authKeys.me,
@@ -46,9 +45,8 @@ export function useLogout() {
   return useMutation({
     mutationFn: () => api.post<Ack>("/admin/auth/logout"),
     onSuccess: () => {
-      // Clear first, then seed me=null: clear() wipes every entry (including a
-      // pre-set me=null), so setting it afterwards lets RequireAuth redirect
-      // immediately without the session observer refetching /admin/auth/me.
+      // Seed me=null AFTER clear() (which wipes every entry) so RequireAuth
+      // redirects immediately without the session observer refetching.
       qc.clear();
       qc.setQueryData(authKeys.me, null);
     },

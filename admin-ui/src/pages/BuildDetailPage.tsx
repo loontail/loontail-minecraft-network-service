@@ -72,20 +72,13 @@ const TABS: SectionTab<Tab>[] = [
   { value: "servers-tags", label: "Servers & Tags", icon: Tags },
 ];
 
-// Radix Select forbids an empty-string item value (it reserves "" for the
-// placeholder/no-selection state). A clearable version select therefore needs a
-// sentinel item that maps to "" on the way out and matches "" on the way in.
+// Radix Select reserves "" for the placeholder, so a clearable select needs a sentinel value.
 const NONE = "__none__";
 
-// Java select sentinel: picking it swaps the select for a free-text input so an
-// admin can target a Java major the build-time generator has not catalogued yet.
+// Picking this swaps the Java select for a free-text input (target a Java major not yet catalogued).
 const CUSTOM = "__custom__";
 
-// A version option that renders the bare value in `ItemText` (so the trigger
-// shows a clean value and typeahead matches it) plus an out-of-`ItemText` Star
-// marker for the recommended pick. The Star is a sibling of `ItemText` so it is
-// NEVER cloned into the trigger's `SelectValue`. Mirrors the shadcn SelectItem
-// styling so it sits flush with the plain `—`/Custom… items.
+// The Star marker sits OUTSIDE `ItemText` so Radix never clones it into the trigger's `SelectValue`.
 function VersionSelectItem({
   value,
   recommended,
@@ -142,9 +135,7 @@ function buildToForm(build: ClientAdmin): BuildFormState {
   };
 }
 
-// A stable token over the persisted fields the form mirrors. When it changes the
-// server's copy diverged from what we hold (e.g. slug casing normalization on
-// save), so the form must re-seed.
+// A token over the persisted fields; a change means the stored copy diverged and the form must re-seed.
 function buildFormToken(build: ClientAdmin): string {
   return JSON.stringify(buildToForm(build));
 }
@@ -154,9 +145,7 @@ function nullable(value: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
-// Build the option list for a version <select>, tolerating a stored value that is
-// not in the catalog (legacy builds): if `current` is non-empty and missing from
-// `options`, it is prepended so editing the build never silently drops its version.
+// Prepend a stored value missing from the catalog (legacy builds) so editing never drops it.
 function withCurrent(options: string[], current: string): string[] {
   if (current === "" || options.includes(current)) {
     return options;
@@ -166,8 +155,7 @@ function withCurrent(options: string[], current: string): string[] {
 
 function ManifestPanel({ build }: { build: ClientAdmin }) {
   const bundleSlug = build.bundle?.slug ?? null;
-  // Read live bundle state so the status/file-count stay fresh after file edits
-  // (the catalog summary on `build.bundle` is not invalidated by file uploads).
+  // Read live bundle state: the summary on `build.bundle` is not invalidated by file uploads.
   const liveBundle = useBuild(bundleSlug ?? undefined);
 
   if (!bundleSlug) {
@@ -221,15 +209,11 @@ function ManifestPanel({ build }: { build: ClientAdmin }) {
 
 function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   const [form, setForm] = useState<BuildFormState>(() => buildToForm(build));
-  // Whether the Java select has been swapped for a free-text input (Custom…).
   const [javaCustom, setJavaCustom] = useState(false);
   const updateClient = useUpdateClient();
   const versions = useVersions();
 
-  // Re-seed the form when the persisted build changes (e.g. the backend
-  // normalized a field on save), so it never silently diverges from the server
-  // copy. Tracked by a server-value token rather than `build.id` so the panel's
-  // key={build.id} (which only remounts on identity change) doesn't mask updates.
+  // Re-seed on a value token, not `build.id`: the key={build.id} panel only remounts on identity change.
   const seededToken = useRef(buildFormToken(build));
   useEffect(() => {
     const token = buildFormToken(build);
@@ -258,22 +242,17 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   const forgeOptions = withCurrent(forgeForMc, form.forgeVersion);
   const fabricOptions = withCurrent(catalog?.fabric ?? [], form.fabricVersion);
 
-  // Java options come from the catalog majors as strings; a stored legacy value
-  // ("11", "1.8") survives via withCurrent so editing never silently drops it.
   const javaList = (catalog?.java ?? []).map(String);
   const javaOptions = withCurrent(javaList, form.runtimeVersion);
 
-  // Per-MC recommended picks (catalog v2). recForge/recFabric/recJava drive the
-  // Star markers in the dependent dropdowns and seed the cascade on MC change.
+  // Per-MC recommended picks: drive the Star markers and seed the cascade on MC change.
   const rec = catalog?.recommended?.[form.minecraftVersion] ?? {};
   const recForge = rec.forge ?? undefined;
   const recFabric = rec.fabric ?? undefined;
   const recJava = rec.java;
 
-  // Changing the Minecraft version cascades the dependent picks (ONE committed
-  // rule): Forge keeps a still-valid pick else falls back to recommended/newest;
-  // Fabric and Java keep any explicit/legacy pick and seed the recommended only
-  // when empty (both are meaningful independent of a specific MC).
+  // Changing MC cascades: Forge resets to recommended if its pick is now invalid; Fabric/Java keep an
+  // existing pick and only seed the recommended when empty.
   function setMinecraft(next: string) {
     setForm((prev) => {
       if (next === "") {
@@ -309,10 +288,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
       runtimeVersion: nullable(form.runtimeVersion),
       fabricVersion: nullable(form.fabricVersion),
       forgeVersion: nullable(form.forgeVersion),
-      // Preserve the owned-bundle link: the Details form has no bundleSlug field,
-      // and update_client does a full column replace. Use only the VERIFIED bundle
-      // slug — passing a dangling `build.bundleSlug` would re-persist a slug whose
-      // bundle no longer exists; null lets the backend re-derive + re-link it.
+      // Send only the verified bundle slug (update is a full column replace); null lets it re-derive + re-link.
       bundleSlug: build.bundle?.slug ?? null,
       locales: [
         {
@@ -472,14 +448,8 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="build-forge">Forge version</Label>
-            {/*
-              Remount the Forge select when the Minecraft version changes. Forge's
-              option set is MC-scoped, so a value the cascade seeds (e.g. the new
-              MC's recommended build) would otherwise be clobbered: Radix fires a
-              spurious onValueChange("") when the controlled value points at an
-              item that has not finished mounting during the item-set swap. A fresh
-              mount initializes the value against the already-rendered new items.
-            */}
+            {/* Remount on MC change: Radix fires a spurious onValueChange("") when the controlled value
+                points at an item not yet mounted during the MC-scoped item-set swap. */}
             <Select
               key={`forge-${form.minecraftVersion}`}
               value={form.forgeVersion === "" ? NONE : form.forgeVersion}
@@ -546,12 +516,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   );
 }
 
-// --- Servers & Tags --------------------------------------------------------
-
-// Shared "attach an existing entity, or create a new one" control used verbatim by
-// both the Keywords and Servers sections: a Select of available items + Add button
-// + a "Create new" toggle. The create form itself differs per entity, so it stays
-// in each section and is toggled via `creating`/`onToggleCreate`.
+// Shared attach-existing control for the Keywords and Servers sections; each owns its own create form.
 function AddExistingPicker<T extends { id: string }>({
   available,
   pickId,
@@ -1009,15 +974,8 @@ export function BuildDetailPage() {
 
       <SectionTabs tabs={TABS} value={tab} onChange={setTab} idBase="build" />
 
-      {/*
-        All four tab panels stay mounted; visibility is toggled with `hidden` so
-        in-progress edits (the Details form, the inline keyword/server create
-        forms, the file-tree navigation state) survive a tab switch instead of
-        being destroyed by an unmount. The `key={build.id}` wrapper remounts the
-        whole panel set only when the build identity changes — so navigating from
-        build A to build B yields a fresh form seeded from B (not stale A), while
-        switching tabs within one build preserves state.
-      */}
+      {/* All panels stay mounted (toggled via `hidden`) so in-progress edits survive a tab switch;
+          key={build.id} remounts the set only when the build identity changes. */}
       <div key={build.id} className="contents">
         <div
           role="tabpanel"

@@ -84,9 +84,7 @@ function CreateBuildDialog({
       {
         onSuccess: () => {
           handleOpenChange(false);
-          // BuildDetailPage resolves the build by the CLIENT slug (useBuildBySlug
-          // matches client.slug), so navigate with that — not the owned-bundle
-          // slug, which the backend may derive differently and would 404.
+          // Navigate by the client slug, not the owned-bundle slug (which can differ and would 404).
           navigate(`/builds/${trimmedSlug}`);
         },
       },

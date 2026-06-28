@@ -1,7 +1,6 @@
-// Builds reuse the catalog domain wholesale — a "build" is a catalog client plus
-// its owned bundle. We re-export the catalog hooks the Builds pages need and add a
-// thin `useBuildBySlug` that derives a single build from the admin list (there is
-// no single-admin-client endpoint).
+// A "build" is a catalog client plus its owned bundle, so the Builds pages reuse
+// the catalog hooks. `useBuildBySlug` derives one build from the admin list
+// because there is no single-admin-client endpoint.
 
 import {
   useAdminClients,

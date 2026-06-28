@@ -24,11 +24,7 @@ export const catalogKeys = {
   media: (clientId: string) => [...catalogKeys.all, "media", clientId] as const,
 };
 
-// Reads come from the public catalog surface (flat native shape). Relations are
-// always inlined by the API; admin writes target /admin/catalog by the entity's
-// `id` (the UUID).
-
-// The admin clients list includes drafts (and the real publish state); the public
+// The admin list includes drafts and the real publish state; the public
 // `/api/clients` hides unpublished builds, so the admin table must use this.
 export function useAdminClients() {
   return useQuery({
@@ -59,8 +55,6 @@ export function useServers() {
     },
   });
 }
-
-// --- Clients ---------------------------------------------------------------
 
 export function useCreateClient() {
   const qc = useQueryClient();
@@ -234,8 +228,6 @@ export function useDetachServer() {
   });
 }
 
-// --- Keywords --------------------------------------------------------------
-
 export function useCreateKeyword() {
   const qc = useQueryClient();
   return useMutation({
@@ -249,8 +241,6 @@ export function useCreateKeyword() {
       toast.error(errorMessage(error, "Failed to create keyword")),
   });
 }
-
-// --- Servers ---------------------------------------------------------------
 
 export function useCreateServer() {
   const qc = useQueryClient();

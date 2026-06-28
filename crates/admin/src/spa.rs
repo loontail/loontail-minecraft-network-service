@@ -1,7 +1,7 @@
 //! Serve the embedded admin SPA. The Vite build output (`admin-ui/dist`) is
-//! embedded at compile time via rust-embed; a `build.rs` guarantees the folder
-//! exists (placeholder index.html) so the crate always builds even without a UI
-//! build. Unknown paths fall back to `index.html` for client-side routing.
+//! embedded at compile time via rust-embed; `build.rs` guarantees the folder
+//! exists (placeholder index.html) so the crate builds even without a UI build.
+//! Unknown paths fall back to `index.html` for client-side routing.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -49,14 +49,11 @@ pub async fn index() -> Response {
     serve_index()
 }
 
-/// Serve the SPA shell for browser page navigations so client-side routes deep
-/// link and survive a refresh — even when a REST route shadows the same path
-/// (e.g. `GET /admin/users`, which is both a JSON list endpoint and an SPA
-/// route). A request is a page navigation when it is a `GET` whose `Accept`
-/// prefers `text/html`; the SPA's own `fetch` calls send `Accept:
-/// application/json` and so fall through to the JSON handlers untouched. Embedded
-/// asset requests (scripts/styles) never send `text/html`, so they are likewise
-/// unaffected.
+/// Serve the SPA shell for browser page navigations (a `GET` whose `Accept`
+/// prefers `text/html`) even where a REST route shadows the path (e.g.
+/// `GET /admin/users`), so client routes deep link and survive a refresh. The
+/// SPA's `fetch` calls and asset requests don't send `text/html`, so they fall
+/// through untouched.
 pub async fn navigation_guard(request: Request, next: Next) -> Response {
     if request.method() == Method::GET && wants_html(&request) {
         return serve_index();
@@ -72,10 +69,9 @@ fn wants_html(request: &Request) -> bool {
         .is_some_and(|accept| accept.contains("text/html"))
 }
 
-/// Router fallback: serve an embedded asset for the request path, or the SPA
-/// shell for any unknown client route. The URI here is relative to the `/admin`
-/// mount (axum strips the nest prefix), so e.g. `/admin/assets/x.js` arrives as
-/// `/assets/x.js`.
+/// Router fallback: an embedded asset for the path, else the SPA shell. The URI
+/// is relative to the `/admin` mount (axum strips the nest prefix), so e.g.
+/// `/admin/assets/x.js` arrives as `/assets/x.js`.
 pub async fn fallback(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     if path.is_empty() {

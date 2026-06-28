@@ -30,9 +30,8 @@ export function NewFolderDialog({
   const [name, setName] = useState("");
   const createFolder = useCreateFolder();
 
-  // The dialog stays mounted and the parent opens it by setting state directly
-  // (bypassing Radix onOpenChange), so reset the name on every open here rather
-  // than relying on handleOpenChange — otherwise a previously typed name lingers.
+  // The dialog stays mounted and the parent opens it bypassing Radix onOpenChange,
+  // so reset the name here on open or a previously typed name lingers.
   useEffect(() => {
     if (open) {
       setName("");

@@ -31,9 +31,8 @@ export interface FileMenuTarget {
   entry: TreeEntry;
 }
 
-// why: Radix has no virtual-anchor prop, so a zero-size fixed-positioned trigger is
-// rendered at `target.position` and the menu opens under it — the same behaviour
-// whether the open came from a right-click or the ⋮ button.
+// why: Radix has no virtual-anchor prop, so a zero-size fixed trigger is rendered
+// at `target.position` and the menu opens under it.
 export function FileContextMenu({
   open,
   onOpenChange,

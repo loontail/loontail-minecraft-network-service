@@ -23,11 +23,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginMutation = useLogin();
   const logoutMutation = useLogout();
 
-  // react-query returns fresh mutation result objects every render, so depending
-  // on the whole `loginMutation`/`logoutMutation` would recompute this memo (and
-  // re-render every useAuth consumer) on any render. Depend on the stable
-  // primitives we actually read, and call the stable `mutateAsync` refs inside the
-  // callbacks.
+  // Depend on the stable primitives, not the whole mutation objects (react-query
+  // returns fresh ones every render), to avoid re-rendering every useAuth consumer.
   const { mutateAsync: loginAsync } = loginMutation;
   const { mutateAsync: logoutAsync } = logoutMutation;
   const value = useMemo<AuthContextValue>(

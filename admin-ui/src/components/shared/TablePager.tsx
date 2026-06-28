@@ -8,7 +8,6 @@ interface TablePagerProps {
   total: number;
   isLoading: boolean;
   isFetching: boolean;
-  // Singular/plural noun for the count line, e.g. ["user", "users"].
   noun: [singular: string, plural: string];
   onPrev: () => void;
   onNext: () => void;

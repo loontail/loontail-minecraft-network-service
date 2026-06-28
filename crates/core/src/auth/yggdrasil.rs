@@ -1,14 +1,9 @@
 //! Yggdrasil token namespace: access+client token pairs. The Mojang protocol
-//! requires the client to echo both verbatim, so they are minted and returned to
-//! the client in plaintext. At rest, the access token — the credential that
-//! authenticates a session — is stored only as a SHA-256 hash (SEC-5); the column
-//! is named `access_token` for legacy reasons but holds the hash. The client token
-//! stays plaintext at rest because refresh must hand the same value back to the
-//! client across an access-token rotation (and it is not a standalone credential).
-//!
-//! Lifecycle: issue (capped per user, evicting the oldest), validate, refresh
-//! (revoke old + reissue preserving the client token), invalidate, and an hourly
-//! cleanup of expired rows. Each pair carries a 15-day TTL (config-driven).
+//! requires the client to echo both verbatim, so they are minted and returned in
+//! plaintext. At rest the access token is stored only as its SHA-256 hash (SEC-5),
+//! though the column holding that hash is named `access_token`. The client token
+//! stays plaintext at rest because refresh must hand the same value back across an
+//! access-token rotation (and it is not a standalone credential).
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -22,7 +17,6 @@ use crate::error::{AppError, AppResult};
 use crate::models::User;
 use crate::state::AppState;
 
-/// A freshly issued access/client token pair, returned plaintext to the client.
 #[derive(Debug, Clone)]
 pub struct YggdrasilTokens {
     pub access_token: String,
@@ -38,8 +32,8 @@ fn random_64_hex() -> String {
 
 /// Issue a new token pair for `user_id`. A caller-supplied `client_token` is
 /// preserved (the Mojang refresh contract keeps a stable client token across an
-/// access-token rotation); otherwise a fresh one is minted. Enforces the
-/// per-user active cap from config by deleting the oldest rows beyond it.
+/// access-token rotation); otherwise a fresh one is minted. Enforces the per-user
+/// active cap by deleting the oldest rows beyond it.
 pub async fn issue_yggdrasil_tokens(
     pool: &PgPool,
     user_id: Uuid,
@@ -53,8 +47,7 @@ pub async fn issue_yggdrasil_tokens(
         Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(15));
 
     // why (SEC-5): persist only the SHA-256 of the access token so a read-only DB
-    // leak does not yield usable in-game credentials; the plaintext is returned to
-    // the client below and never stored.
+    // leak does not yield usable in-game credentials.
     sqlx::query(
         r#"
         INSERT INTO yggdrasil_tokens (user_id, access_token, client_token, expires_at)
@@ -68,8 +61,7 @@ pub async fn issue_yggdrasil_tokens(
     .execute(pool)
     .await?;
 
-    // Evict the oldest pairs beyond the active cap so a single user cannot grow
-    // the table unbounded across many logins.
+    // Evict pairs beyond the active cap so one user cannot grow the table unbounded.
     if max_per_user > 0 {
         sqlx::query(
             r#"

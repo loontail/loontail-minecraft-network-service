@@ -1,4 +1,4 @@
-// Mirrors crates/admin/src/dto.rs (serde camelCase). Do not rename fields.
+// Admin DTOs; field names are the camelCase wire contract, do not rename.
 
 export interface MeResponse {
   id: string;
@@ -7,7 +7,6 @@ export interface MeResponse {
   isAdmin: boolean;
 }
 
-/// Alias used across the SPA for the authenticated admin identity.
 export type AdminMe = MeResponse;
 
 export interface LoginRequest {
@@ -89,7 +88,6 @@ export interface TimeseriesResponse {
   series: TimeseriesPoint[];
 }
 
-/// Bare mutation acknowledgement.
 export interface Ack {
   ok: boolean;
 }

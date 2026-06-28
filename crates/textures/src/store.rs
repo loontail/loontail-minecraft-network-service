@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 pub use loontail_core::storage::{revision_hex, unlink_quiet, write_file};
 
-/// The two texture kinds, used to pick the storage subdirectory and the URL slug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Skin,
@@ -15,7 +14,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Storage subdirectory (`skins` / `capes`).
+    /// Storage subdirectory, which also doubles as the table name.
     pub fn dir(self) -> &'static str {
         match self {
             Kind::Skin => "skins",
@@ -31,7 +30,6 @@ impl Kind {
         }
     }
 
-    /// Parse the trailing path segment (`skin` / `cape`) into a kind.
     pub fn parse(segment: &str) -> Option<Kind> {
         match segment {
             "skin" => Some(Kind::Skin),
@@ -41,8 +39,7 @@ impl Kind {
     }
 }
 
-/// Build the absolute on-disk path for a texture file under the storage root.
-/// File name is `{profile_uuid}-{revision}.png` (profile_uuid is undashed lc).
+/// The absolute on-disk path for a texture file: `{root}/{dir}/{profile_uuid}-{revision}.png`.
 pub fn disk_path(storage_root: &str, kind: Kind, profile_uuid: &str, revision: &str) -> PathBuf {
     Path::new(storage_root)
         .join(kind.dir())
@@ -85,8 +82,7 @@ fn admin_select_columns(kind: Kind) -> &'static str {
 }
 
 /// Paginated, case-insensitive listing of a kind's registry rows, newest first.
-/// An empty `search` returns everything; otherwise it matches username or profile
-/// uuid. `kind.dir()` doubles as the table name (`skins`/`capes`).
+/// An empty `search` returns everything; otherwise it matches username or profile uuid.
 pub async fn admin_list(
     pool: &sqlx::PgPool,
     kind: Kind,

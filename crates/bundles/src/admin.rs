@@ -39,7 +39,7 @@ async fn regenerate(state: &AppState, bundle: &Bundle) -> AppResult<()> {
     .await
 }
 
-/// `GET /builds` — all builds, newest first.
+/// All builds, newest first.
 pub async fn list(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -47,10 +47,9 @@ pub async fn list(
     Ok(Json(repo::list_bundles(&state.pool).await?))
 }
 
-/// `POST /builds` — create a draft build and its on-disk directory. Delegates the
-/// slug check, row insert, and directory creation to [`repo::provision_bundle`] (the
-/// same path the catalog uses to auto-provision a build's owned bundle), then applies
-/// any supplied description/version.
+/// Create a draft build and its on-disk directory via [`repo::provision_bundle`]
+/// (the same path the catalog uses to auto-provision a build's owned bundle), then
+/// apply any supplied description/version.
 pub async fn create(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -84,7 +83,7 @@ pub async fn create(
     Ok((axum::http::StatusCode::CREATED, Json(bundle)))
 }
 
-/// `GET /builds/{slug}` — build metadata plus its ordered artifact rows.
+/// Build metadata plus its ordered artifact rows.
 pub async fn get(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -96,7 +95,6 @@ pub async fn get(
     Ok(Json(BundleWithArtifacts { bundle, artifacts }))
 }
 
-/// `PUT /builds/{slug}` — update name/description/version.
 pub async fn update(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -116,14 +114,13 @@ pub async fn update(
     Ok(Json(updated))
 }
 
-/// `DELETE /builds/{slug}` — drop artifact rows, on-disk files, and the bundle.
+/// Drop artifact rows, on-disk files, and the bundle.
 pub async fn delete(
     State(state): State<AppState>,
     _admin: AdminUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // why (SEC-6): reject a traversal slug before any FS join, not relying on the
-    // DB-existence invariant.
+    // why (SEC-6): reject a traversal slug before any FS join.
     validate_slug(&slug)?;
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     delete_build_files(storage_root(&state), &slug)
@@ -132,10 +129,9 @@ pub async fn delete(
     Ok(Json(serde_json::json!({ "message": "build deleted" })))
 }
 
-/// `POST /builds/{slug}/upload` — multipart ZIP under form field `archive`. The
-/// stream is written to a temp file then extracted (so we never buffer 10 GB),
-/// the tree is scanned with streamed SHA-256, artifacts upserted, manifest
-/// regenerated. Status walks draft→processing→ready (or →failed).
+/// Ingest a multipart ZIP (form field `archive`): stream it to a temp file, extract,
+/// scan with streamed SHA-256, upsert artifacts, regenerate the manifest. Status
+/// walks draft→processing→ready (or →failed).
 pub async fn upload_archive(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -149,8 +145,8 @@ pub async fn upload_archive(
     ensure_build_dir(root, &bundle.slug)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ensure dir: {e}")))?;
 
-    // why: stream the archive field straight to a temp file with a running byte
-    // cap so we never buffer the whole (up to 10 GiB) upload in RAM.
+    // why: stream to a temp file with a running byte cap so we never buffer the whole
+    // (up to 10 GiB) upload in RAM.
     let tmp = tempfile_for(root, &bundle.slug)?;
     let mut have_archive = false;
     while let Some(field) = multipart
@@ -199,10 +195,9 @@ async fn ingest_archive(state: &AppState, bundle: &Bundle, tmp: &std::path::Path
     let files_for_task = files_root.clone();
     // Extraction + hashing are blocking; run off the async runtime.
     let scan = tokio::task::spawn_blocking(move || -> AppResult<_> {
-        // why: an archive re-upload fully replaces the build, so wipe the prior
-        // files/ subtree first — otherwise a file dropped from the new ZIP lingers
-        // on disk. Only files/ is cleared (the temp .zip.tmp lives in the build root,
-        // a sibling of files/, so it survives) and is recreated for extraction.
+        // why: a re-upload fully replaces the build, so wipe files/ first (else a file
+        // dropped from the new ZIP lingers). Only files/ is cleared — the temp .zip.tmp
+        // is a sibling in the build root, so it survives.
         if files_for_task.exists() {
             std::fs::remove_dir_all(&files_for_task)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("clear files dir: {e}")))?;
@@ -228,9 +223,8 @@ fn tempfile_for(storage_root: &str, slug: &str) -> AppResult<std::path::PathBuf>
     Ok(dir.join(format!("upload-{}.zip.tmp", Uuid::new_v4())))
 }
 
-/// Stream a multipart `field` to `dest`, chunk by chunk, aborting with a 400 once
-/// the running byte total exceeds [`MAX_UPLOAD_BYTES`]. Keeps peak memory bounded
-/// to a single chunk rather than the whole upload.
+/// Stream a multipart `field` to `dest` chunk by chunk, aborting with a 400 once the
+/// running byte total exceeds [`MAX_UPLOAD_BYTES`]. Peak memory stays a single chunk.
 async fn stream_field_to_file(
     mut field: axum::extract::multipart::Field<'_>,
     dest: &std::path::Path,
@@ -262,8 +256,8 @@ async fn stream_field_to_file(
     Ok(written)
 }
 
-/// `POST /builds/{slug}/files` — upload a single file to `targetPath` (form field
-/// `file`, optional text field `targetPath`).
+/// Upload a single file to `targetPath` (form field `file`, optional text field
+/// `targetPath`).
 pub async fn upload_file(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -277,8 +271,8 @@ pub async fn upload_file(
     ensure_build_dir(root, &slug)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ensure dir: {e}")))?;
 
-    // why: stream the `file` field to a temp file with a running cap (never buffer
-    // the whole upload), then move it into place once `targetPath` is known.
+    // why: stream to a temp file with a running cap, then move it into place once
+    // `targetPath` is known.
     let tmp = tempfile_for(root, &slug)?;
     let mut size: Option<u64> = None;
     let mut target_path: Option<String> = None;
@@ -382,7 +376,7 @@ pub async fn upload_file(
     Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
 }
 
-/// `POST /builds/{slug}/folders` — create a folder (and ancestor folder rows).
+/// Create a folder (and ancestor folder rows).
 pub async fn create_folder(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -408,7 +402,6 @@ pub async fn create_folder(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
 
-    // Create a dir artifact row for the folder and each ancestor segment.
     let segments: Vec<&str> = normalized.split('/').collect();
     for depth in 1..=segments.len() {
         let ancestor = segments[..depth].join("/");
@@ -431,8 +424,7 @@ pub async fn create_folder(
     Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
 }
 
-/// `DELETE /builds/{slug}/files/{entryId}` — delete a file or folder (and its
-/// descendants) on disk and in the DB.
+/// Delete a file or folder (and its descendants) on disk and in the DB.
 pub async fn delete_file(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -472,7 +464,7 @@ pub async fn delete_file(
     ))
 }
 
-/// `PUT /builds/{slug}/files/{entryId}` — toggle the `downloadOnce` flag.
+/// Toggle the `downloadOnce` flag.
 pub async fn toggle_download_once(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -487,9 +479,9 @@ pub async fn toggle_download_once(
     Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
 }
 
-/// `POST /builds/{slug}/files/{entryId}/rename` — move/rename a file or folder
-/// (descendant rows follow). Shares the hardened [`repo::move_subtree`] path with the
-/// `move` endpoints: DB-aware conflict (409), self-into-subtree guard, atomic tx.
+/// Move/rename a file or folder (descendant rows follow), sharing the hardened
+/// [`repo::move_subtree`] path with `move`: DB-aware conflict (409), self-into-subtree
+/// guard, atomic tx.
 pub async fn rename_file(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -508,8 +500,8 @@ pub async fn rename_file(
     Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
 }
 
-/// `POST /builds/{slug}/files/{entryId}/move` — move a single entry into
-/// `targetDir` (`""` = build root). The new path is `join(targetDir, name)`.
+/// Move a single entry into `targetDir` (`""` = build root); new path is
+/// `join(targetDir, name)`.
 pub async fn move_file(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -528,10 +520,9 @@ pub async fn move_file(
     Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
 }
 
-/// `POST /builds/{slug}/files/move` — move many entries into `targetDir` (`""` =
-/// build root). Validates every id belongs to the bundle, moves them all in ONE
-/// transaction (all-or-nothing: a collision aborts the whole batch with a 409), then
-/// regenerates the manifest exactly once at the end.
+/// Move many entries into `targetDir` (`""` = build root) in ONE transaction
+/// (all-or-nothing: a collision aborts the whole batch with a 409), regenerating the
+/// manifest once at the end.
 pub async fn move_files(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -545,8 +536,7 @@ pub async fn move_files(
     let bundle = repo::require_by_slug(&state.pool, &slug).await?;
     let files_root = files_path(storage_root(&state), &slug);
 
-    // Resolve every id up front (mirror bulk_delete's ownership check) so a bad id is
-    // a clean 404 before any row is touched.
+    // why: resolve every id up front so a bad id is a clean 404 before any row moves.
     let mut moves: Vec<(BundleArtifact, String)> = Vec::with_capacity(body.ids.len());
     for id in &body.ids {
         let entry = artifact_in_bundle(&state, bundle.id, *id).await?;
@@ -575,7 +565,7 @@ pub async fn move_files(
 }
 
 /// Join a `targetDir` (`""` = root) with an entry's `name` into a normalized,
-/// validated relative path. Rejects traversal/absolute target dirs.
+/// validated relative path.
 fn join_target_dir(target_dir: &str, name: &str) -> AppResult<String> {
     let target = target_dir.trim();
     let raw = if target.is_empty() {
@@ -586,8 +576,8 @@ fn join_target_dir(target_dir: &str, name: &str) -> AppResult<String> {
     normalize_relative_path(&raw, "targetDir")
 }
 
-/// Reject an illegal move before touching disk/DB: a no-op (same path) or moving a
-/// folder into its own descendant.
+/// Reject an illegal move before touching disk/DB: a no-op or a folder into its own
+/// descendant.
 fn validate_move(entry: &BundleArtifact, new_rel: &str) -> AppResult<()> {
     if new_rel == entry.relative_path {
         return Err(AppError::Conflict(
@@ -602,11 +592,9 @@ fn validate_move(entry: &BundleArtifact, new_rel: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// DB-aware destination check on a tx executor: refuse with a clean 409 if a row
-/// already occupies `new_rel` (or, for a folder, anything under `new_rel/`) instead of
-/// letting the unique index raise a raw 500. Callers must have already passed
-/// [`validate_move`] (no-op and folder-into-self are rejected there), so any prefix
-/// hit here is a genuinely occupied destination.
+/// Refuse with a clean 409 if a row already occupies `new_rel` (or, for a folder,
+/// anything under `new_rel/`) instead of letting the unique index raise a raw 500.
+/// Callers must have already passed [`validate_move`].
 async fn check_destination_free(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     bundle_id: Uuid,
@@ -629,7 +617,7 @@ async fn check_destination_free(
     Ok(())
 }
 
-/// Run a validated single move inside its own transaction: guard, conflict check,
+/// Run a single move inside its own transaction: guard, conflict check,
 /// [`repo::move_subtree`], commit. Shared by `rename_file` and `move_file`.
 async fn apply_move(
     state: &AppState,
@@ -663,7 +651,7 @@ async fn apply_move(
     Ok(())
 }
 
-/// `POST /builds/{slug}/files/{entryId}/rehash` — recompute a file's SHA-256.
+/// Recompute a file's SHA-256.
 pub async fn rehash_file(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -693,7 +681,7 @@ pub async fn rehash_file(
     Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
 }
 
-/// `POST /builds/{slug}/files/bulk-delete` — delete many entries by id.
+/// Delete many entries by id.
 pub async fn bulk_delete(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -733,8 +721,8 @@ pub async fn bulk_delete(
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
-/// `POST /builds/{slug}/validate` — artifact rows whose file is gone (`missing`)
-/// and on-disk files no row tracks (`orphaned`).
+/// Artifact rows whose file is gone (`missing`) and on-disk files no row tracks
+/// (`orphaned`).
 pub async fn validate(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -777,8 +765,7 @@ pub async fn validate(
     Ok(Json(ValidateResult { missing, orphaned }))
 }
 
-/// `POST /builds/{slug}/regenerate` — rebuild `artifacts.json` from the rows and
-/// flip status to ready (or failed).
+/// Rebuild `artifacts.json` from the rows and flip status to ready (or failed).
 pub async fn regenerate_manifest(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -797,7 +784,7 @@ pub async fn regenerate_manifest(
     }
 }
 
-/// `GET /disk-space` — free/total bytes on the storage volume.
+/// Free/total bytes on the storage volume.
 pub async fn disk_space_handler(
     State(state): State<AppState>,
     _admin: AdminUser,

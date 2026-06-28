@@ -1,4 +1,4 @@
-// Mirrors crates/bundles/src/models.rs + manifest.rs (serde camelCase).
+// Bundle DTOs; field names are the camelCase wire contract, do not rename.
 
 export interface Bundle {
   id: string;
@@ -28,7 +28,7 @@ export interface BundleArtifact {
   fileModifiedAt: string | null;
 }
 
-/// `Bundle` flattened together with its ordered artifact rows (admin detail).
+/// A bundle with its artifact rows in display order.
 export interface BundleWithArtifacts extends Bundle {
   artifacts: BundleArtifact[];
 }

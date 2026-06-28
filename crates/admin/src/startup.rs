@@ -1,6 +1,5 @@
-//! Startup bootstrap: seed an initial admin from config so a fresh deployment is
-//! manageable out of the box. Idempotent — does nothing once any admin exists, or
-//! when no bootstrap password is configured.
+//! Seed an initial admin from config. Idempotent: a no-op once any admin exists
+//! or when no bootstrap password is configured.
 
 use sqlx::PgPool;
 
@@ -8,10 +7,8 @@ use loontail_core::config::AdminConfig;
 use loontail_core::error::AppResult;
 use loontail_core::identity::{admin_create_user, update_user, AdminCreateUser, UpdateUser};
 
-/// Ensure at least one admin user exists. When no admin is present and
-/// `bootstrap_password` is set, create `bootstrap_username` as an admin. If a
-/// non-admin user already holds the bootstrap username, promote it instead of
-/// failing on the unique-username constraint. Returns true when an admin was
+/// Ensure at least one admin exists, creating `bootstrap_username` (or promoting
+/// an existing non-admin holder of that name). Returns true when one was
 /// created or promoted.
 pub async fn ensure_bootstrap_admin(pool: &PgPool, config: &AdminConfig) -> AppResult<bool> {
     let admin_exists: bool =
@@ -32,8 +29,8 @@ pub async fn ensure_bootstrap_admin(pool: &PgPool, config: &AdminConfig) -> AppR
     let username = config.bootstrap_username.clone();
     let normalized = loontail_core::models::normalize_username(&username);
 
-    // If a user already holds the bootstrap username (e.g. a prior mod account),
-    // promote it to admin rather than colliding on the unique-username index.
+    // Promote an existing holder of the bootstrap username rather than colliding
+    // on the unique-username index.
     let existing: Option<uuid::Uuid> =
         sqlx::query_scalar("SELECT id FROM users WHERE normalized_username = $1")
             .bind(&normalized)

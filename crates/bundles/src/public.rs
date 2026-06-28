@@ -1,6 +1,5 @@
-//! Public, unauthenticated bundle-registry endpoints: the manifest (served
-//! verbatim from `artifacts.json` with `Cache-Control: no-cache`) and static
-//! serving of the build's files.
+//! Public bundle-registry read endpoints: the manifest (served verbatim from
+//! `artifacts.json`) and static serving of a build's files.
 
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderValue};
@@ -15,9 +14,8 @@ use loontail_core::AppState;
 use crate::repo;
 use crate::storage::{files_path, manifest_path, normalize_relative_path, validate_slug};
 
-/// `GET /builds/{slug}/manifest` — return `artifacts.json` byte-for-byte (the
-/// launcher hashes the raw bytes) with `Cache-Control: no-cache`. Requires a live
-/// session (the launcher/agent attach their Bearer token).
+/// Return `artifacts.json` byte-for-byte (the launcher hashes the raw bytes) with
+/// `Cache-Control: no-cache`.
 pub async fn get_manifest(
     State(state): State<AppState>,
     _auth: AuthUser,
@@ -49,9 +47,8 @@ pub async fn get_manifest(
     Ok((headers, bytes).into_response())
 }
 
-/// `GET /builds/{slug}/files/{*path}` — stream a single file from the build's
-/// `files/` directory, with a guarded relative path. Delegates byte streaming and
-/// range handling to `tower-http`'s `ServeFile`.
+/// Stream a single file from the build's `files/` directory with a guarded relative
+/// path. Byte streaming and range handling are delegated to `ServeFile`.
 pub async fn serve_file(
     State(state): State<AppState>,
     _auth: AuthUser,
@@ -67,10 +64,8 @@ pub async fn serve_file(
     let root = files_path(&state.config.bundles.storage_root, &slug);
     let target = repo::join_files(&root, &normalized);
 
-    // why: canonicalize both the files root and the resolved target and re-verify
-    // containment. `root` is now derived from a validated single-segment slug, and
-    // `normalize_relative_path` already rejected `..`, but canonicalizing defeats
-    // symlinks and any residual escape before we hand the path to ServeFile.
+    // why: canonicalize both paths and re-verify containment to defeat symlinks and
+    // any residual escape before handing the path to ServeFile.
     let canonical_root = tokio::fs::canonicalize(&root)
         .await
         .map_err(|_| AppError::NotFound("file not found".into()))?;
@@ -88,10 +83,9 @@ pub async fn serve_file(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("serve file: {e}")))?
         .into_response();
 
-    // why (SEC-8): never let `ServeFile`'s extension guess decide the type for
-    // uploaded build files — an uploaded `.html`/`.svg` served as text/html could
-    // render same-origin. Force a known type for the launcher's real files and
-    // `application/octet-stream` (a download, never rendered) for everything else.
+    // why (SEC-8): force the Content-Type rather than let ServeFile guess from the
+    // extension — an uploaded `.html`/`.svg` served as text/html could render
+    // same-origin. Unknown types fall back to octet-stream (a download, never rendered).
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(content_type_for(&normalized)),
@@ -99,8 +93,8 @@ pub async fn serve_file(
     Ok(response)
 }
 
-/// Map a build file's extension to a fixed Content-Type. Unknown types are served
-/// as `application/octet-stream` so they download rather than render in-origin.
+/// Map a build file's extension to a fixed Content-Type; unknown types fall back to
+/// `application/octet-stream` so they download rather than render in-origin.
 fn content_type_for(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {

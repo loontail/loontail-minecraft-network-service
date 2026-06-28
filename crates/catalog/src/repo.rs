@@ -1,7 +1,6 @@
-//! Catalog reads. All queries are runtime sqlx (no `query!` macros). The reads
-//! apply the public draft filter (`published_at IS NOT NULL`), i18n locale
-//! fallback (requested locale row, else the default-locale row, else any row),
-//! and always inline relations (the native contract has no populate gating).
+//! Catalog reads. The public reads apply the draft filter
+//! (`published_at IS NOT NULL`), i18n locale fallback (requested locale row, else
+//! the default-locale row, else any row), and always inline relations.
 
 use loontail_core::error::AppResult;
 use sqlx::PgPool;
@@ -10,8 +9,7 @@ use uuid::Uuid;
 use crate::dto::{BundleSummaryDto, ClientAdminDto, ClientDto, KeywordDto, MediaDto, ServerDto};
 use crate::query::CatalogQuery;
 
-/// The locale used when neither the requested locale nor an explicit fallback is
-/// present. Matches the launcher's default content locale.
+/// Locale used when the requested locale is absent or unmatched.
 pub const DEFAULT_LOCALE: &str = "en";
 
 #[derive(sqlx::FromRow)]
@@ -26,8 +24,7 @@ struct ClientRow {
     bundle_id: Option<Uuid>,
 }
 
-/// A client row plus the admin-only `published` flag (no draft filter). Used by
-/// [`list_clients_admin`]; splits into a plain [`ClientRow`] for DTO assembly.
+/// A client row plus the admin-only `published` flag (no draft filter).
 #[derive(sqlx::FromRow)]
 struct ClientAdminRow {
     id: Uuid,
@@ -96,7 +93,7 @@ struct ServerRow {
 const CLIENT_COLS: &str = "id, slug, available, minecraft_version, forge_version, \
     fabric_version, runtime_version, bundle_id";
 
-/// Render an entity UUID as the contract's undashed 32-char hex `id`.
+/// Render an entity UUID as the undashed 32-char hex `id`.
 fn id_hex(id: Uuid) -> String {
     id.simple().to_string()
 }
@@ -109,8 +106,8 @@ fn media_dto(row: MediaRow) -> MediaDto {
     }
 }
 
-/// Pick the best localized text for `requested` locale: exact match, else the
-/// default locale, else the first available row.
+/// Localized text for `requested`: exact match, else the default locale, else the
+/// first available row.
 fn pick_locale<'a, T>(rows: &'a [(String, T)], requested: &str) -> Option<&'a T> {
     rows.iter()
         .find(|(l, _)| l == requested)
@@ -248,12 +245,9 @@ struct BundleSummaryRow {
     files_count: i64,
 }
 
-/// Read the linked bundle's summary for inlining into [`ClientDto`]. Returns
-/// `None` when the client has no `bundle_id` (legacy/unlinked build) or, defensively,
-/// if the referenced bundle row is missing — a build owns its bundle 1:1 and the two
-/// are deleted together, so a live client never outlives its bundle, but the read
-/// stays tolerant. `manifestUrl` is the frozen bundle-registry manifest route,
-/// derived from the bundle slug.
+/// Read the linked bundle's summary for inlining into [`ClientDto`]. `None` when
+/// the client has no `bundle_id` or the referenced bundle row is missing (the read
+/// stays tolerant though a build owns its bundle 1:1).
 async fn bundle_summary(
     pool: &PgPool,
     bundle_id: Option<Uuid>,
@@ -299,9 +293,8 @@ async fn build_client_dto(
         forge_version: row.forge_version,
         fabric_version: row.fabric_version,
         runtime_version: row.runtime_version,
-        // Wire `bundleSlug` is derived from the VERIFIED bundle only: a dangling
-        // `bundle_slug` column (bundle row missing / never linked) reads null so no
-        // consumer chases a slug with no bundle behind it.
+        // why: derive `bundleSlug` from the verified bundle only, so a dangling
+        // `bundle_slug` column reads null rather than pointing at no bundle.
         bundle_slug: bundle.as_ref().map(|b| b.slug.clone()),
         background,
         poster,
@@ -313,7 +306,6 @@ async fn build_client_dto(
     })
 }
 
-/// List published clients in the native shape, applying the locale.
 pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<ClientDto>> {
     let rows = sqlx::query_as::<_, ClientRow>(&format!(
         "SELECT {CLIENT_COLS} FROM catalog_clients \
@@ -329,9 +321,8 @@ pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<
     Ok(out)
 }
 
-/// List ALL clients including drafts in the native shape, plus the admin-only
-/// `published` flag. Admin-only; the public [`list_clients`] keeps the draft
-/// filter so unpublished builds stay hidden from the launcher.
+/// List all clients including drafts, each with its `published` flag. The public
+/// [`list_clients`] keeps the draft filter so unpublished builds stay hidden.
 pub async fn list_clients_admin(
     pool: &PgPool,
     query: &CatalogQuery,
@@ -352,7 +343,6 @@ pub async fn list_clients_admin(
     Ok(out)
 }
 
-/// Fetch one published client by its UUID `id` (undashed or dashed) or slug.
 pub async fn get_client(
     pool: &PgPool,
     ident: &str,
@@ -388,13 +378,10 @@ async fn fetch_client_row(pool: &PgPool, ident: &str) -> AppResult<Option<Client
     Ok(row)
 }
 
-/// Parse an `id` ident in the contract's undashed 32-char hex form (also accepts a
-/// dashed UUID for tolerance).
 fn parse_id(ident: &str) -> Result<Uuid, uuid::Error> {
     Uuid::parse_str(ident)
 }
 
-/// List published keywords (locale-resolved titles).
 pub async fn list_keywords(pool: &PgPool, locale: &str) -> AppResult<Vec<KeywordDto>> {
     let rows = sqlx::query_as::<_, KeywordRow>(
         "SELECT id FROM catalog_keywords \
@@ -413,7 +400,6 @@ pub async fn list_keywords(pool: &PgPool, locale: &str) -> AppResult<Vec<Keyword
     Ok(out)
 }
 
-/// Fetch one published keyword by UUID `id` or slug.
 pub async fn get_keyword(
     pool: &PgPool,
     ident: &str,
@@ -454,7 +440,6 @@ async fn fetch_keyword_row(pool: &PgPool, ident: &str) -> AppResult<Option<Keywo
     Ok(row)
 }
 
-/// List published servers.
 pub async fn list_servers(pool: &PgPool) -> AppResult<Vec<ServerDto>> {
     let rows = sqlx::query_as::<_, ServerRow>(
         "SELECT id, name, address FROM catalog_servers \
@@ -465,7 +450,6 @@ pub async fn list_servers(pool: &PgPool) -> AppResult<Vec<ServerDto>> {
     Ok(rows.into_iter().map(server_dto).collect())
 }
 
-/// Fetch one published server by UUID `id` or slug.
 pub async fn get_server(pool: &PgPool, ident: &str) -> AppResult<Option<ServerDto>> {
     let row = fetch_server_row(pool, ident).await?;
     Ok(row.map(server_dto))

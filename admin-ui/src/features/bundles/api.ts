@@ -36,15 +36,11 @@ function invalidateBuild(
   qc.invalidateQueries({ queryKey: bundleKeys.list() });
   qc.invalidateQueries({ queryKey: bundleKeys.detail(slug) });
   qc.invalidateQueries({ queryKey: bundleKeys.diskSpace() });
-  // Cross-feature: a build's catalog summary (Builds list `filesCount`, the
-  // manifest panel) is derived from the admin clients query. Invalidate it by its
-  // literal key prefix rather than importing `catalogKeys` from features/catalog,
-  // which would create a cyclic feature dependency.
+  // Invalidate the catalog clients query (the build's summary derives from it) by
+  // its literal key prefix; importing catalogKeys would make a cyclic feature dep.
   qc.invalidateQueries({ queryKey: ["catalog", "clients"] });
 }
 
-// A single build-invalidation callback for callers (e.g. a sequential upload batch)
-// that drive `silent` mutations and want to invalidate once at the end.
 export function useInvalidateBuild() {
   const qc = useQueryClient();
   return (slug: string) => invalidateBuild(qc, slug);
@@ -67,8 +63,8 @@ export function useUploadArchive() {
   });
 }
 
-// `silent` skips the per-call toast + invalidation so a batch caller can emit one
-// summary toast and invalidate once at the end instead of per file.
+// `silent` skips the per-call toast + invalidation so a batch caller can do both
+// once at the end instead of per file.
 export function useUploadFile() {
   const qc = useQueryClient();
   return useMutation({
@@ -204,9 +200,8 @@ export function useBulkDelete() {
   });
 }
 
-// Move many entries into `targetDir` in a single all-or-nothing request (one
-// manifest regen at the end). A name collision returns 409 and an illegal move
-// (e.g. into the entry's own subtree) a 4xx — both surfaced via `errorMessage`.
+// Single all-or-nothing request. A name collision returns 409, an illegal move
+// (into the entry's own subtree) a 4xx — both surfaced via `errorMessage`.
 export function useMoveFiles() {
   const qc = useQueryClient();
   return useMutation({

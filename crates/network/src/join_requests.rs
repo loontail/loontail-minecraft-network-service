@@ -15,8 +15,6 @@ use loontail_core::ServerEvent;
 use crate::presence;
 use crate::worlds;
 
-// --- Shared helpers --------------------------------------------------------
-
 pub(crate) async fn fetch_user_dto(pool: &PgPool, id: Uuid) -> AppResult<UserDto> {
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
@@ -46,11 +44,10 @@ async fn host_effective_status(state: &AppState, host_id: Uuid) -> AppResult<Use
     presence::effective_status_for(state, host_id).await
 }
 
-/// Whether `requester` is a friend of someone currently AND LIVELY connected to
-/// `world_id` as a guest — the trust link a friend-of-friend join/invite rides
-/// on. The liveness predicate (heartbeat within the timeout) mirrors the
-/// presence query, so a stale `active` relay row left by an unclean disconnect
-/// cannot keep the friend-of-friend door open after the guest is gone.
+/// Whether `requester` is a friend of someone LIVELY connected to `world_id` as
+/// a guest — the trust link a friend-of-friend join/invite rides on. Liveness
+/// (heartbeat within the timeout) is required so a stale `active` relay row from
+/// an unclean disconnect cannot keep the FoF door open after the guest is gone.
 pub(crate) async fn is_friend_of_active_member(
     state: &AppState,
     requester: Uuid,
@@ -82,8 +79,8 @@ pub(crate) async fn is_friend_of_active_member(
     Ok(exists)
 }
 
-/// Create a join ticket and its pending relay session for `guest` joining
-/// `host`'s world. Returns the ticket (with raw token) for delivery.
+/// Create a join ticket + its pending relay session; returns the ticket with
+/// the raw token (delivered once, then hashed at rest).
 pub(crate) async fn issue_ticket_and_relay(
     state: &AppState,
     guest_id: Uuid,
@@ -98,8 +95,8 @@ pub(crate) async fn issue_ticket_and_relay(
 
     let mut tx = state.pool.begin().await?;
 
-    // The world's invite policy plus the host's reported version/loader (for the guest's
-    // authoritative compatibility gate), read together in one round-trip inside the tx.
+    // Invite policy + the host's reported version/loader (the guest's
+    // authoritative compatibility gate), read together in one round-trip.
     let (invite_policy, host_minecraft_version, host_loader): (
         String,
         Option<String>,
@@ -160,8 +157,6 @@ pub(crate) async fn issue_ticket_and_relay(
     })
 }
 
-// --- Direct join (joinable) ------------------------------------------------
-
 /// `POST /world-sessions/:id/join-ticket` — friend is `joinable`, so a guest
 /// gets a ticket immediately without host approval.
 pub async fn create_join_ticket(
@@ -204,8 +199,6 @@ pub async fn create_join_ticket(
 
     Ok(Json(ticket))
 }
-
-// --- Request join (inWorld) ------------------------------------------------
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -365,13 +358,11 @@ pub async fn accept(
         return Err(AppError::Conflict("join request has expired".into()));
     }
 
-    // World must still be open and have room.
     let world = worlds::open_world_session(&state.pool, row.world_session_id).await?;
 
-    // Re-validate friend-of-friend eligibility at the moment of admission: a
-    // request created while the policy/trust allowed it must not still admit the
-    // guest after the host flips back to host_only or the trust link is severed
-    // (the host approving does not re-establish a link that no longer exists).
+    // Re-validate friend-of-friend eligibility at admission: a host_only flip or
+    // a severed trust link since the request was made must block the guest now
+    // (approving does not re-establish a link that no longer exists).
     if !are_friends(&state.pool, row.requester_user_id, row.host_user_id).await?
         && (world.invite_policy != "friends_of_friends"
             || !is_friend_of_active_member(&state, row.requester_user_id, row.world_session_id)
@@ -399,7 +390,6 @@ pub async fn accept(
 
     let guest_dto = fetch_user_dto(&state.pool, row.requester_user_id).await?;
 
-    // Guest gets the ticket; host gets the cue to open its relay tunnel.
     state.realtime.signaling.send_to(
         row.requester_user_id,
         ServerEvent::JoinRequestAccepted {

@@ -1,8 +1,5 @@
-//! Admin analytics: a live overview (presence/world/relay/user counts) and a
-//! bootstrapped/new-user timeseries read off `user_events`. Writes to
-//! `user_events` happen asynchronously in the domain crates that own the hot
-//! paths; here we only read and aggregate, leaning on the covering indexes
-//! (`user_events_type_time`, `presence_status_hb`).
+//! Admin analytics: a live overview and a timeseries aggregated off `user_events`
+//! (written asynchronously by the domain crates that own the hot paths).
 
 use axum::extract::{Query, State};
 use axum::Json;
@@ -14,9 +11,8 @@ use loontail_core::AppState;
 
 use crate::dto::{AnalyticsOverview, TimeseriesPoint, TimeseriesQuery, TimeseriesResponse};
 
-/// `GET /admin/analytics/overview` — instantaneous network gauges. Presence is
-/// counted by *effective* status: a row only counts if its last heartbeat is
-/// within the heartbeat timeout, collapsing to offline otherwise.
+/// `GET /admin/analytics/overview` — presence is counted by *effective* status:
+/// a row counts only if its last heartbeat is within the timeout.
 pub async fn overview(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -68,10 +64,9 @@ pub async fn overview(
     }))
 }
 
-/// Resolve the `window` query param to a Postgres interval literal plus a bucket
-/// width, defaulting to a 7-day window bucketed by day. The interval and bucket
-/// unit are drawn from this fixed allowlist (never user text), so callers may
-/// safely format them into SQL.
+/// Resolve the `window` param to a Postgres interval literal + bucket width
+/// (default 7d/day). The result is drawn from this fixed allowlist, never user
+/// text, so callers may safely format it into SQL.
 pub(crate) fn resolve_window(window: &str) -> (&'static str, &'static str, String) {
     match window {
         "24h" | "1d" | "day" => ("24 hours", "hour", "24h".into()),
@@ -102,9 +97,8 @@ pub async fn timeseries(
     let (interval_literal, bucket_unit, window_label) =
         resolve_window(query.window.as_deref().unwrap_or_default());
 
-    // `date_trunc` over the indexed (event_type, created_at) range; the interval
-    // and bucket unit are drawn from a fixed allowlist above (never user text),
-    // so they are safe to format into the query.
+    // `bucket_unit` and `interval_literal` come from the allowlist above, never
+    // user text, so they are safe to format into the query.
     let sql = format!(
         r#"
         SELECT date_trunc('{bucket_unit}', created_at) AS bucket, count(*) AS count
