@@ -10,7 +10,7 @@ use uuid::Uuid;
 use loontail_core::auth::{
     invalidate_all_yggdrasil_for_user, revoke_all_sessions_for_user, AdminUser,
 };
-use loontail_core::error::AppResult;
+use loontail_core::error::{AppError, AppResult};
 use loontail_core::identity::{
     admin_create_user, block, get_user, search_users, set_password, unblock, update_user,
     AdminCreateUser, UpdateUser,
@@ -21,6 +21,31 @@ use crate::dto::{
     Ack, AdminUserDto, CreateUserRequest, PageMeta, ResetPasswordRequest, UpdateUserRequest,
     UserListResponse, UserSearchQuery,
 };
+
+/// Refuse an operation that would strip the LAST usable admin, locking everyone
+/// out. A usable admin is `is_admin = true AND blocked = false` (a blocked admin
+/// can't log in). When `target` is currently a usable admin and is the only one
+/// left, the delete/block/demote is rejected with a `409 Conflict`. Callers invoke
+/// this *before* mutating so the row count is the live pre-state.
+async fn guard_last_admin(state: &AppState, target: Uuid) -> AppResult<()> {
+    let target_is_usable_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_admin = true AND blocked = false)",
+    )
+    .bind(target)
+    .fetch_one(&state.pool)
+    .await?;
+    if !target_is_usable_admin {
+        return Ok(());
+    }
+    let usable_admins: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM users WHERE is_admin = true AND blocked = false")
+            .fetch_one(&state.pool)
+            .await?;
+    if usable_admins <= 1 {
+        return Err(AppError::Conflict("cannot remove the last admin".into()));
+    }
+    Ok(())
+}
 
 /// `GET /admin/users?q=&page=` — paginated, case-insensitive user search.
 pub async fn list(
@@ -89,6 +114,10 @@ pub async fn patch(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserDto>> {
+    // Demoting the last admin would lock everyone out — refuse it (409).
+    if body.is_admin == Some(false) {
+        guard_last_admin(&state, id).await?;
+    }
     let user = update_user(
         &state.pool,
         id,
@@ -114,6 +143,8 @@ pub async fn delete(
 ) -> AppResult<Json<Ack>> {
     // Ensure it exists so a missing id surfaces a 404 rather than a silent no-op.
     get_user(&state.pool, id).await?;
+    // Deleting the last admin would lock everyone out — refuse it (409).
+    guard_last_admin(&state, id).await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
         .execute(&state.pool)
@@ -128,6 +159,8 @@ pub async fn block_user(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<AdminUserDto>> {
+    // Blocking the last admin would lock everyone out — refuse it (409).
+    guard_last_admin(&state, id).await?;
     let user = block(&state.pool, id).await?;
     Ok(Json(AdminUserDto::from(user)))
 }

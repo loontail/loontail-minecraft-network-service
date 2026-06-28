@@ -25,7 +25,7 @@ import {
 } from "@/features/users/api";
 import type { AdminUser } from "@/shared/types";
 
-import { ConfirmDialog } from "./ConfirmDialog";
+import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 
 type PendingAction = "block" | "unblock" | "revoke" | "delete" | null;
 

@@ -10,8 +10,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use loontail_core::config::{
-    AdminConfig, BundlesConfig, Config, RateLimitConfig, RequestLogConfig, TexturesConfig,
-    YggdrasilConfig,
+    AdminConfig, BundlesConfig, CatalogConfig, Config, RateLimitConfig, RequestLogConfig,
+    TexturesConfig, YggdrasilConfig,
 };
 use loontail_core::identity::{admin_create_user, AdminCreateUser};
 use loontail_core::AppState;
@@ -54,6 +54,9 @@ fn test_config() -> Config {
         },
         textures: TexturesConfig {
             storage_root: "data/textures".into(),
+        },
+        catalog: CatalogConfig {
+            storage_root: "data/catalog-media".into(),
         },
         bundles: BundlesConfig {
             storage_root: "data/bundle-registry".into(),

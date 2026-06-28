@@ -10,7 +10,7 @@ use loontail_core::error::{AppError, AppResult};
 
 use crate::storage::{normalize_relative_path, split_relative_path};
 
-/// 10 GiB cap on total uncompressed size — the same limit the Strapi plugin used.
+/// 10 GiB cap on total uncompressed size — the same limit as the previous CMS.
 pub const MAX_UNCOMPRESSED: u64 = 10 * 1024 * 1024 * 1024;
 /// At most 100k entries per archive.
 pub const MAX_ENTRIES: usize = 100_000;

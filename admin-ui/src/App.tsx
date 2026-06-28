@@ -2,11 +2,12 @@ import { Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { RequireAuth } from "@/components/layout/RequireAuth";
-import { BundlesPage } from "@/pages/BundlesPage";
-import { CatalogPage } from "@/pages/CatalogPage";
+import { BuildDetailPage } from "@/pages/BuildDetailPage";
+import { BuildsPage } from "@/pages/BuildsPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LogsTrafficPage } from "@/pages/LogsTrafficPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { TexturesPage } from "@/pages/TexturesPage";
 import { UsersPage } from "@/pages/UsersPage";
 
 export function App() {
@@ -22,8 +23,9 @@ export function App() {
       >
         <Route index element={<DashboardPage />} />
         <Route path="users" element={<UsersPage />} />
-        <Route path="catalog" element={<CatalogPage />} />
-        <Route path="bundles" element={<BundlesPage />} />
+        <Route path="textures" element={<TexturesPage />} />
+        <Route path="builds" element={<BuildsPage />} />
+        <Route path="builds/:slug" element={<BuildDetailPage />} />
         <Route path="logs" element={<LogsTrafficPage />} />
       </Route>
     </Routes>

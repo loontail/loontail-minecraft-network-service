@@ -162,7 +162,7 @@ async fn upload_skin_64x64_creates_row_file_and_lookup(pool: PgPool) {
         format!("/textures/{profile_uuid}/skin")
     );
     assert_eq!(json["skin"]["variant"], "CLASSIC");
-    assert!(json.get("cape").is_none());
+    assert!(json["cape"].is_null());
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -361,19 +361,19 @@ async fn upload_cape_then_lookup_includes_cape(pool: PgPool) {
         json["cape"]["url"],
         format!("/textures/{profile_uuid}/cape")
     );
-    assert!(json.get("skin").is_none());
+    assert!(json["skin"].is_null());
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn lookup_absent_profile_returns_empty_object(pool: PgPool) {
+async fn lookup_absent_profile_returns_null_skin_and_cape(pool: PgPool) {
     let (router, _root, _s) = app(pool.clone());
     let (profile_uuid, _token) = seed_user_with_token(&pool, "naked").await;
 
     let (status, json) = get_json(&router, &format!("/textures/{profile_uuid}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(json.get("skin").is_none());
-    assert!(json.get("cape").is_none());
-    assert_eq!(json, serde_json::json!({}));
+    // Both keys present and null (the launcher's TexturesLookupResponseSchema
+    // requires the keys; an empty `{}` fails its parse).
+    assert_eq!(json, serde_json::json!({ "skin": null, "cape": null }));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -389,4 +389,174 @@ async fn upload_requires_auth(pool: PgPool) {
         .unwrap();
     let status = router.clone().oneshot(req).await.unwrap().status();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// --- Admin moderation surface (`/admin/textures/*`) --------------------------
+
+/// The admin router (gated by `AdminUser`), sharing the test's pool + storage.
+fn admin_app(state: &AppState) -> Router {
+    Router::new()
+        .nest("/admin/textures", loontail_textures::admin_routes())
+        .with_state(state.clone())
+}
+
+/// Seed an admin and return its Bearer token (the `AdminUser` extractor accepts a
+/// session bearer and is CSRF-exempt for it).
+async fn seed_admin_token(pool: &PgPool, name: &str) -> String {
+    let user = admin_create_user(
+        pool,
+        AdminCreateUser {
+            username: name.into(),
+            email: format!("{name}@example.com"),
+            password: "pw".into(),
+            minecraft_uuid: None,
+            is_admin: true,
+        },
+    )
+    .await
+    .unwrap();
+    issue_session(pool, user.id, Duration::from_secs(900))
+        .await
+        .unwrap()
+        .token
+}
+
+async fn admin_request(
+    router: &Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let resp = router
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json)
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_lists_and_deletes_a_skin(pool: PgPool) {
+    let (textures, _root, state) = app(pool.clone());
+    let admin = admin_app(&state);
+    let admin_token = seed_admin_token(&pool, "boss").await;
+    let (profile_uuid, user_token) = seed_user_with_token(&pool, "painter").await;
+
+    // The painter uploads a skin through the normal (player) route.
+    assert_eq!(
+        put_texture(&textures, "skin", &user_token, &png(64, 64), Some("SLIM")).await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Admin listing sees exactly that one row with the right fields.
+    let (status, json) = admin_request(&admin, "GET", "/admin/textures/skins", Some(&admin_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["meta"]["total"], 1);
+    assert_eq!(json["data"][0]["username"], "painter");
+    assert_eq!(json["data"][0]["profileUuid"], profile_uuid);
+    assert_eq!(json["data"][0]["variant"], "SLIM");
+
+    let user_id = json["data"][0]["userId"].as_str().unwrap().to_string();
+    let file_path: String =
+        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
+            .bind(&profile_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(std::path::Path::new(&file_path).exists());
+
+    // Admin delete removes the row and unlinks the file.
+    let (status, json) = admin_request(
+        &admin,
+        "DELETE",
+        &format!("/admin/textures/skins/{user_id}"),
+        Some(&admin_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["deleted"], true);
+    assert!(!std::path::Path::new(&file_path).exists());
+
+    let (_status, json) = admin_request(&admin, "GET", "/admin/textures/skins", Some(&admin_token)).await;
+    assert_eq!(json["meta"]["total"], 0);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_search_filters_by_username(pool: PgPool) {
+    let (textures, _root, state) = app(pool.clone());
+    let admin = admin_app(&state);
+    let admin_token = seed_admin_token(&pool, "boss").await;
+    let (_p1, t1) = seed_user_with_token(&pool, "alice").await;
+    let (_p2, t2) = seed_user_with_token(&pool, "bob").await;
+    put_texture(&textures, "skin", &t1, &png(64, 64), None).await;
+    put_texture(&textures, "skin", &t2, &png(64, 64), None).await;
+
+    let (status, json) =
+        admin_request(&admin, "GET", "/admin/textures/skins?q=alic", Some(&admin_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["meta"]["total"], 1);
+    assert_eq!(json["data"][0]["username"], "alice");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_orphans_scan_and_purge(pool: PgPool) {
+    let (textures, _root, state) = app(pool.clone());
+    let admin = admin_app(&state);
+    let admin_token = seed_admin_token(&pool, "boss").await;
+    let (profile_uuid, user_token) = seed_user_with_token(&pool, "ghost").await;
+    put_texture(&textures, "skin", &user_token, &png(64, 64), None).await;
+
+    // Simulate DB/disk drift: delete the file but keep the row.
+    let file_path: String =
+        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
+            .bind(&profile_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    std::fs::remove_file(&file_path).unwrap();
+
+    // The orphan scan reports the row whose file is gone.
+    let (status, json) = admin_request(&admin, "GET", "/admin/textures/orphans", Some(&admin_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["skins"].as_array().unwrap().len(), 1);
+    assert_eq!(json["skins"][0]["profileUuid"], profile_uuid);
+
+    // Purge removes it.
+    let (status, json) =
+        admin_request(&admin, "POST", "/admin/textures/purge-missing", Some(&admin_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["purgedSkins"], 1);
+
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM skins")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_routes_require_admin_auth(pool: PgPool) {
+    let (_textures, _root, state) = app(pool.clone());
+    let admin = admin_app(&state);
+
+    // No token at all.
+    let (status, _json) = admin_request(&admin, "GET", "/admin/textures/skins", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A valid NON-admin session is rejected (requires is_admin).
+    let (_profile, user_token) = seed_user_with_token(&pool, "peon").await;
+    let (status, _json) =
+        admin_request(&admin, "GET", "/admin/textures/skins", Some(&user_token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

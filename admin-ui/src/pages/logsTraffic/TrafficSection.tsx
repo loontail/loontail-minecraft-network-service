@@ -44,6 +44,7 @@ import {
   useRequestsSummary,
   useRequestsTimeseries,
 } from "@/features/requestLogs/api";
+import { cn } from "@/shared/lib/cn";
 import type {
   RequestMetric,
   StatusClass,
@@ -102,11 +103,13 @@ function MetricSelector({
             role="radio"
             aria-checked={active}
             onClick={() => onChange(option.value)}
-            className={
+            className={cn(
+              "rounded px-2.5 py-1 text-caption font-semibold transition-colors",
+              "outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
               active
-                ? "rounded bg-surface-3 px-2.5 py-1 text-caption font-semibold text-text-hi transition-colors"
-                : "rounded px-2.5 py-1 text-caption font-semibold text-text-mute transition-colors hover:text-text"
-            }
+                ? "bg-surface-3 text-text-hi"
+                : "text-text-mute hover:text-text",
+            )}
           >
             {option.label}
           </button>
@@ -373,11 +376,13 @@ export function TrafficSection({ window }: { window: TrafficWindow }) {
             Most-requested routes in the selected window.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-0">
           {summary.isLoading ? (
-            <Skeleton className="h-40 w-full" />
+            <div className="px-6">
+              <Skeleton className="h-40 w-full" />
+            </div>
           ) : topPaths.length === 0 ? (
-            <p className="py-6 text-center text-body text-text-mute">
+            <p className="px-6 py-6 text-center text-body text-text-mute">
               No path activity in this window yet.
             </p>
           ) : (

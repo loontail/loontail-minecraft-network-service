@@ -9,10 +9,14 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { PageHeader } from "@/components/shared/PageHeader";
+import {
+  TableSkeletonRows,
+  TableStateRow,
+} from "@/components/shared/TableStates";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -23,6 +27,8 @@ import {
 } from "@/components/ui/table";
 import { useUsers } from "@/features/users/api";
 import { errorMessage } from "@/shared/api/toast";
+import { formatDate, shortUuid } from "@/shared/lib/format";
+import { useDebounced } from "@/shared/lib/useDebounced";
 import type { AdminUser } from "@/shared/types";
 
 import { CreateUserDialog } from "./users/CreateUserDialog";
@@ -30,34 +36,6 @@ import { ResetPasswordDialog } from "./users/ResetPasswordDialog";
 import { UserRowActions } from "./users/UserRowActions";
 
 const COLUMN_COUNT = 7;
-
-function useDebounced<T>(value: T, delay = 300): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
-
-function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "—";
-  }
-  return date.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function shortUuid(value: string | null): string {
-  if (!value) {
-    return "—";
-  }
-  return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
-}
 
 function originVariant(origin: string): "default" | "secondary" | "outline" {
   if (origin === "admin") {
@@ -90,61 +68,6 @@ function UserFlags({ user }: { user: AdminUser }) {
   );
 }
 
-function SkeletonRows() {
-  return (
-    <>
-      {Array.from({ length: 8 }).map((_, index) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: static placeholder rows
-        <TableRow key={index}>
-          <TableCell>
-            <Skeleton className="h-4 w-28" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-40" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-16" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-24" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-5 w-32" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-20" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="ml-auto size-8" />
-          </TableCell>
-        </TableRow>
-      ))}
-    </>
-  );
-}
-
-function StateRow({
-  icon: Icon,
-  title,
-  description,
-}: {
-  icon: typeof Users;
-  title: string;
-  description: string;
-}) {
-  return (
-    <TableRow className="hover:bg-transparent">
-      <TableCell colSpan={COLUMN_COUNT} className="h-48 text-center">
-        <div className="flex flex-col items-center justify-center gap-2 text-text-mute">
-          <Icon className="size-8 text-text-faint" />
-          <p className="text-body-med text-text-hi">{title}</p>
-          <p className="text-caption">{description}</p>
-        </div>
-      </TableCell>
-    </TableRow>
-  );
-}
-
 export function UsersPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -170,15 +93,11 @@ export function UsersPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-h1 text-text-hi">Users</h1>
-          <p className="text-body text-text-mute">
-            Accounts bound to Yggdrasil. Search, manage, and create users.
-          </p>
-        </div>
-        <CreateUserDialog />
-      </header>
+      <PageHeader
+        title="Users"
+        description="Accounts bound to Yggdrasil. Search, manage, and create users."
+        actions={<CreateUserDialog />}
+      />
 
       <div className="relative max-w-sm">
         <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-text-faint" />
@@ -205,10 +124,11 @@ export function UsersPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {isLoading && <SkeletonRows />}
+            {isLoading && <TableSkeletonRows columns={COLUMN_COUNT} />}
 
             {isError && (
-              <StateRow
+              <TableStateRow
+                columns={COLUMN_COUNT}
                 icon={AlertCircle}
                 title="Could not load users"
                 description={errorMessage(error, "Please try again.")}
@@ -216,7 +136,8 @@ export function UsersPage() {
             )}
 
             {showEmpty && (
-              <StateRow
+              <TableStateRow
+                columns={COLUMN_COUNT}
                 icon={debouncedSearch ? UserX : Users}
                 title={debouncedSearch ? "No matches" : "No users yet"}
                 description={

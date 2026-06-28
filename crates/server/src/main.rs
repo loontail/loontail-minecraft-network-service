@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
     // On-disk storage roots for textures and bundles, created up front so the
     // first upload/create never races a missing directory.
     loontail_textures::init(&config).await?;
+    loontail_catalog::init(&config).await?;
     loontail_bundles::init(&config.bundles.storage_root)?;
 
     let pool = db::connect_and_migrate(&config.database_url).await?;
@@ -100,7 +101,16 @@ fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .merge(loontail_catalog::routes())
         .nest("/auth", loontail_yggdrasil::account_routes())
-        .nest(&ygg_suffix, loontail_yggdrasil::routes())
+        // Textures are canonically mounted top-level at `/textures` (below), but
+        // the launcher's `@loontail/yggdrasil-client` derives its texture base from
+        // the Yggdrasil `apiRoot` and calls `<ygg_suffix>/textures/*` (the legacy
+        // CMS plugin's path). Nest a second mount inside the yggdrasil subtree so
+        // already-shipped launchers keep working; lookup responses stay
+        // server-relative `/textures/...` so the PNG bytes still resolve top-level.
+        .nest(
+            &ygg_suffix,
+            loontail_yggdrasil::routes().nest("/textures", loontail_textures::routes()),
+        )
         .nest("/bundle-registry", loontail_bundles::routes());
 
     // One admin router: admin REST + SPA, with catalog-admin and bundle-admin
@@ -111,7 +121,8 @@ fn build_router(state: AppState) -> Router {
     let admin = with_security_headers(
         loontail_admin::routes()
             .nest("/catalog", loontail_catalog::admin_routes())
-            .nest("/bundles", loontail_bundles::admin_routes()),
+            .nest("/bundles", loontail_bundles::admin_routes())
+            .nest("/textures", loontail_textures::admin_routes()),
     );
 
     Router::new()
@@ -120,6 +131,10 @@ fn build_router(state: AppState) -> Router {
         .merge(loontail_network::routes())
         .nest("/api", api)
         .nest("/textures", loontail_textures::routes())
+        // Uploaded catalog-media bytes (client poster/background/titleImage/
+        // screenshots). The stored `url` fields point at `/catalog-media/...`;
+        // AuthUser-guarded, matching textures/bundles.
+        .nest("/catalog-media", loontail_catalog::media_routes())
         // The manifest's `url` fields point at `/bundle-registry/builds/...`;
         // serve those file bytes from the configured public prefix.
         .nest("/bundle-registry", loontail_bundles::static_routes())
@@ -164,7 +179,13 @@ fn with_security_headers(router: Router<AppState>) -> Router<AppState> {
         ))
         .layer(SetResponseHeaderLayer::overriding(
             csp,
-            HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'; base-uri 'self'"),
+            // `style-src 'unsafe-inline'`: the admin SPA's UI primitives (react-aria
+            // file-tree drag previews/drop indicators, theme/animation helpers) apply
+            // inline styles; scripts stay locked to 'self' (no script unsafe-inline).
+            HeaderValue::from_static(
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'",
+            ),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             REFERRER_POLICY,

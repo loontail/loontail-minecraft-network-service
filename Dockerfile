@@ -4,7 +4,7 @@
 # Build the React/Vite admin SPA first. Its output (admin-ui/dist) is embedded
 # into the Rust binary at compile time via rust-embed, so the real UI must exist
 # before the Rust build runs.
-FROM node:22-alpine AS admin-ui
+FROM node:24-alpine AS admin-ui
 
 WORKDIR /app/admin-ui
 

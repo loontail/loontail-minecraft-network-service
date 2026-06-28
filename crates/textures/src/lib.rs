@@ -4,11 +4,12 @@
 //! `config.textures.storage_root`, and serves them back from its own GET handlers.
 //! Mounted by the server crate at `/textures`.
 
+mod admin;
 mod handlers;
 mod store;
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::Router;
 
 use loontail_core::{AppState, Config};
@@ -69,6 +70,18 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/{segment}/{kind}", get(handlers::read_png))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+}
+
+/// Admin moderation router for the texture registry. The server crate nests this
+/// under `/admin/textures` (behind the admin cookie + CSRF double-submit).
+pub fn admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/skins", get(admin::list_skins))
+        .route("/capes", get(admin::list_capes))
+        .route("/skins/{user_id}", delete(admin::delete_skin))
+        .route("/capes/{user_id}", delete(admin::delete_cape))
+        .route("/orphans", get(admin::orphans))
+        .route("/purge-missing", post(admin::purge_missing))
 }
 
 /// Create the on-disk storage directories (`{storage_root}/{skins,capes}`) so

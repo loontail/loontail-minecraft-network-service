@@ -116,26 +116,32 @@ export function LiveLogsSection() {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="px-0">
         {tail.isLoading ? (
-          <TableSkeleton rows={8} columns={6} />
+          <div className="px-6">
+            <TableSkeleton rows={8} columns={6} />
+          </div>
         ) : tail.isError ? (
-          <EmptyState
-            icon={ScrollText}
-            title="Could not load logs"
-            description="The log tail request failed. It will retry automatically."
-            action={
-              <Button variant="outline" onClick={() => void tail.refetch()}>
-                Retry
-              </Button>
-            }
-          />
+          <div className="px-6">
+            <EmptyState
+              icon={ScrollText}
+              title="Could not load logs"
+              description="The log tail request failed. It will retry automatically."
+              action={
+                <Button variant="outline" onClick={() => void tail.refetch()}>
+                  Retry
+                </Button>
+              }
+            />
+          </div>
         ) : entries.length === 0 ? (
-          <EmptyState
-            icon={ScrollText}
-            title="No requests captured yet"
-            description="Incoming requests will stream into this table as they arrive."
-          />
+          <div className="px-6">
+            <EmptyState
+              icon={ScrollText}
+              title="No requests captured yet"
+              description="Incoming requests will stream into this table as they arrive."
+            />
+          </div>
         ) : (
           <Table>
             <TableHeader>

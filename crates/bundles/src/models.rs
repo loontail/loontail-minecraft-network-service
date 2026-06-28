@@ -94,6 +94,23 @@ pub struct BulkDelete {
     pub ids: Vec<Uuid>,
 }
 
+/// Move a single entry into `target_dir` (an empty string means the build root).
+/// The new path is `join(target_dir, name_of(entry))`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveFile {
+    pub target_dir: String,
+}
+
+/// Move many entries into `target_dir` (an empty string means the build root). Each
+/// entry keeps its own name; all move in one transaction (all-or-nothing).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveFiles {
+    pub ids: Vec<Uuid>,
+    pub target_dir: String,
+}
+
 /// Result of `validate`: artifacts whose backing file is gone (`missing`) and
 /// on-disk files no artifact row tracks (`orphaned`).
 #[derive(Debug, Serialize)]

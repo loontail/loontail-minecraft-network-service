@@ -11,6 +11,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
+import { PageHeader } from "@/components/shared/PageHeader";
 import {
   Card,
   CardContent,
@@ -120,12 +121,10 @@ export function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-h1 text-text-hi">Dashboard</h1>
-        <p className="text-body text-text-mute">
-          Live network activity and account growth.
-        </p>
-      </header>
+      <PageHeader
+        title="Dashboard"
+        description="Live network activity and account growth."
+      />
 
       {overview.isError ? (
         <Card>

@@ -6,11 +6,8 @@ import { errorMessage } from "@/shared/api/toast";
 import type {
   Bundle,
   BundleWithArtifacts,
-  CreateBundle,
   CreateFolder,
-  DiskSpace,
   RenameFile,
-  UpdateBundle,
   ValidateResult,
 } from "@/shared/types";
 
@@ -23,26 +20,12 @@ export const bundleKeys = {
   diskSpace: () => [...bundleKeys.all, "diskSpace"] as const,
 };
 
-export function useBuilds() {
-  return useQuery({
-    queryKey: bundleKeys.list(),
-    queryFn: () => api.get<Bundle[]>(`${BASE}/builds`),
-  });
-}
-
 export function useBuild(slug: string | undefined) {
   return useQuery({
     queryKey: bundleKeys.detail(slug ?? ""),
     queryFn: () =>
       api.get<BundleWithArtifacts>(`${BASE}/builds/${slug}`),
     enabled: Boolean(slug),
-  });
-}
-
-export function useDiskSpace() {
-  return useQuery({
-    queryKey: bundleKeys.diskSpace(),
-    queryFn: () => api.get<DiskSpace>(`${BASE}/disk-space`),
   });
 }
 
@@ -53,47 +36,11 @@ function invalidateBuild(
   qc.invalidateQueries({ queryKey: bundleKeys.list() });
   qc.invalidateQueries({ queryKey: bundleKeys.detail(slug) });
   qc.invalidateQueries({ queryKey: bundleKeys.diskSpace() });
-}
-
-export function useCreateBuild() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: CreateBundle) => api.post<Bundle>(`${BASE}/builds`, body),
-    onSuccess: (bundle) => {
-      qc.invalidateQueries({ queryKey: bundleKeys.list() });
-      toast.success(`Build "${bundle.name}" created`);
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to create build")),
-  });
-}
-
-export function useUpdateBuild() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ slug, ...body }: { slug: string } & UpdateBundle) =>
-      api.put<Bundle>(`${BASE}/builds/${slug}`, body),
-    onSuccess: (bundle) => {
-      invalidateBuild(qc, bundle.slug);
-      toast.success("Build updated");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to update build")),
-  });
-}
-
-export function useDeleteBuild() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (slug: string) =>
-      api.delete<{ message: string }>(`${BASE}/builds/${slug}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: bundleKeys.all });
-      toast.success("Build deleted");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to delete build")),
-  });
+  // Cross-feature: a build's catalog summary (Builds list `filesCount`, the
+  // manifest panel) is derived from the admin clients query. Invalidate it by its
+  // literal key prefix rather than importing `catalogKeys` from features/catalog,
+  // which would create a cyclic feature dependency.
+  qc.invalidateQueries({ queryKey: ["catalog", "clients"] });
 }
 
 /// Upload a ZIP archive under form field `archive` to a build.
@@ -239,6 +186,58 @@ export function useBulkDelete() {
     },
     onError: (error) =>
       toast.error(errorMessage(error, "Failed to delete entries")),
+  });
+}
+
+/// Move a single entry into `targetDir` (the destination folder's relativePath;
+/// `""` = build root). The backend recomputes the new path as `join(targetDir,
+/// name)`, recursing into folders. A name collision returns 409 and an illegal move
+/// (e.g. into the entry's own subtree) a 4xx — both surfaced via `errorMessage`.
+export function useMoveFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      slug,
+      entryId,
+      targetDir,
+    }: {
+      slug: string;
+      entryId: string;
+      targetDir: string;
+    }) =>
+      api.post<Bundle>(`${BASE}/builds/${slug}/files/${entryId}/move`, {
+        targetDir,
+      }),
+    onSuccess: (bundle) => {
+      invalidateBuild(qc, bundle.slug);
+      toast.success("Moved");
+    },
+    onError: (error) => toast.error(errorMessage(error, "Failed to move entry")),
+  });
+}
+
+/// Move many entries into `targetDir` in a single all-or-nothing request (one
+/// manifest regen at the end). Same 409 (collision) / 4xx (illegal move) semantics
+/// as `useMoveFile`.
+export function useMoveFiles() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      slug,
+      ids,
+      targetDir,
+    }: {
+      slug: string;
+      ids: string[];
+      targetDir: string;
+    }) =>
+      api.post<Bundle>(`${BASE}/builds/${slug}/files/move`, { ids, targetDir }),
+    onSuccess: (bundle) => {
+      invalidateBuild(qc, bundle.slug);
+      toast.success("Moved");
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Failed to move entries")),
   });
 }
 

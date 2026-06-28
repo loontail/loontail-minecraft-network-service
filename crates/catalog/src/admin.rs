@@ -1,10 +1,10 @@
 //! Admin catalog CRUD (mounted at `/admin/catalog`, `AdminUser`-guarded). These
 //! are deliberately minimal but functional: create/update/delete clients,
-//! keywords, and servers; publish/unpublish; and a basic media-attach. Admin
-//! reads return rows directly (drafts included) rather than the public Strapi
-//! envelope.
+//! keywords, and servers; publish/unpublish; and media management (real byte
+//! upload + list + delete, plus a JSON attach escape hatch for external URLs).
 
-use axum::extract::{Path, State};
+use axum::body::Bytes;
+use axum::extract::{Multipart, OriginalUri, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
@@ -14,6 +14,11 @@ use uuid::Uuid;
 use loontail_core::auth::AdminUser;
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::AppState;
+
+use crate::dto::ClientAdminList;
+use crate::query::CatalogQuery;
+use crate::store;
+use crate::{repo, MAX_MEDIA_UPLOAD_BYTES};
 
 fn unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
@@ -34,6 +39,11 @@ pub struct UpsertClient {
     pub bundle_slug: Option<String>,
     #[serde(default)]
     pub sort_order: i32,
+    /// When `Some(true)`, publish the client on create (`published_at = now()`);
+    /// absent/`false` leaves it a draft (the default). Only consulted by
+    /// [`create_client`].
+    #[serde(default)]
+    pub publish: Option<bool>,
     /// Localized text rows to (re)write for this client.
     #[serde(default)]
     pub locales: Vec<ClientLocaleInput>,
@@ -48,18 +58,42 @@ pub struct ClientLocaleInput {
     pub short_description: Option<String>,
 }
 
+/// `GET /clients` (admin) — list every client including drafts, each with its
+/// real `published` state. The public `/api/clients` hides drafts, so the admin
+/// SPA must read this to manage freshly created (unpublished) builds.
+pub async fn list_clients(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    OriginalUri(uri): OriginalUri,
+) -> AppResult<Json<ClientAdminList>> {
+    let query = CatalogQuery::parse(uri.query().unwrap_or(""));
+    let clients = repo::list_clients_admin(&state.pool, &query).await?;
+    Ok(Json(ClientAdminList { clients }))
+}
+
+/// `POST /clients` — create a build. The client row is inserted (published when
+/// `publish: true`, draft otherwise) with its locales, then its owned bundle is
+/// find-or-created (1:1 model) and linked via `bundle_id`/`bundle_slug` so the
+/// build immediately has a resolvable manifest URL — no separate "create a bundle"
+/// step. Returns `{ id, bundleSlug }`.
 pub async fn create_client(
     State(state): State<AppState>,
     _admin: AdminUser,
     Json(body): Json<UpsertClient>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    let published_setter = if body.publish == Some(true) {
+        "now()"
+    } else {
+        "NULL"
+    };
+
     let mut tx = state.pool.begin().await?;
-    let id = sqlx::query_scalar::<_, Uuid>(
+    let id = sqlx::query_scalar::<_, Uuid>(&format!(
         "INSERT INTO catalog_clients \
          (slug, available, minecraft_version, forge_version, fabric_version, \
-          runtime_version, bundle_slug, sort_order) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
-    )
+          runtime_version, bundle_slug, sort_order, published_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,{published_setter}) RETURNING id"
+    ))
     .bind(&body.slug)
     .bind(body.available)
     .bind(&body.minecraft_version)
@@ -79,8 +113,81 @@ pub async fn create_client(
     })?;
 
     write_client_locales(&mut tx, id, &body.locales).await?;
+
+    let LinkedBundle {
+        effective_slug,
+        provisioned,
+    } = link_owned_bundle(&mut tx, id, &body).await?;
+
     tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+
+    // Create the on-disk bundle dir only after the tx commits (idempotent), so a
+    // rolled-back create leaves no stray directory. Reusing a pre-existing bundle
+    // already has its dir.
+    if provisioned {
+        loontail_bundles::ensure_bundle_dir(&state.config.bundles.storage_root, &effective_slug)?;
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "bundleSlug": effective_slug })),
+    ))
+}
+
+/// Result of [`link_owned_bundle`]: the slug that was linked and whether a new bundle
+/// row was provisioned (so the caller knows to create the on-disk dir after commit).
+struct LinkedBundle {
+    effective_slug: String,
+    provisioned: bool,
+}
+
+/// Auto-provision (find-or-create) the owned bundle (1:1) and link it onto the client
+/// — all inside the caller's tx, so a provision failure rolls the whole upsert back
+/// (no bundle-less client persists). Shared by [`create_client`] and [`update_client`]
+/// so both link the bundle the same way: the effective slug defaults to the client
+/// slug, an explicit non-empty `bundle_slug` overrides it (and can point at a
+/// pre-existing bundle, which is reused rather than duplicated), and `bundle_id` is
+/// re-resolved from that effective slug on every call (fixing slug/bundle_id
+/// divergence on update). The on-disk dir must be created by the caller after commit
+/// when `provisioned` is true.
+async fn link_owned_bundle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: Uuid,
+    body: &UpsertClient,
+) -> AppResult<LinkedBundle> {
+    let effective_slug = body
+        .bundle_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body.slug.trim())
+        .to_string();
+
+    let (bundle_id, provisioned) =
+        match loontail_bundles::find_bundle_id_by_slug(&mut **tx, &effective_slug).await? {
+            Some(existing) => (existing, false),
+            None => {
+                let name = body
+                    .locales
+                    .first()
+                    .map(|l| l.title.clone())
+                    .unwrap_or_else(|| effective_slug.clone());
+                let id = loontail_bundles::provision_bundle_row(tx, &effective_slug, &name).await?;
+                (id, true)
+            }
+        };
+
+    sqlx::query("UPDATE catalog_clients SET bundle_id = $1, bundle_slug = $2 WHERE id = $3")
+        .bind(bundle_id)
+        .bind(&effective_slug)
+        .bind(client_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(LinkedBundle {
+        effective_slug,
+        provisioned,
+    })
 }
 
 pub async fn update_client(
@@ -124,7 +231,24 @@ pub async fn update_client(
             .await?;
         write_client_locales(&mut tx, id, &body.locales).await?;
     }
+
+    // Re-resolve and link the owned bundle the same way create does. This both gives a
+    // legacy/null-bundle build a bundle (no more dead-end) and re-points `bundle_id`
+    // from the effective slug whenever `bundleSlug`/`slug` changed (no slug/bundle_id
+    // divergence).
+    let LinkedBundle {
+        effective_slug,
+        provisioned,
+    } = link_owned_bundle(&mut tx, id, &body).await?;
+
     tx.commit().await?;
+
+    // Create the on-disk bundle dir after commit (idempotent) only when newly
+    // provisioned, mirroring create.
+    if provisioned {
+        loontail_bundles::ensure_bundle_dir(&state.config.bundles.storage_root, &effective_slug)?;
+    }
+
     Ok(Json(json!({ "id": id })))
 }
 
@@ -153,19 +277,63 @@ async fn write_client_locales(
     Ok(())
 }
 
+/// `DELETE /clients/{id}` — delete a build and its owned bundle. The FK
+/// `catalog_clients.bundle_id REFERENCES bundles(id) ON DELETE SET NULL` would
+/// otherwise orphan the owned `bundles` row, its `bundle_artifacts`, and the on-disk
+/// `builds/{slug}/` tree forever (there is no Bundles admin page to clean them up).
+/// So in ONE transaction we read the owned `bundle_id`/slug, delete the client row
+/// (dropping the FK ref), then delete the bundle row (CASCADE drops artifacts); the
+/// on-disk files are removed best-effort *after* commit. Legacy builds with a NULL
+/// `bundle_id` just delete the client.
 pub async fn delete_client(
     State(state): State<AppState>,
     _admin: AdminUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let affected = sqlx::query("DELETE FROM catalog_clients WHERE id = $1")
+    let mut tx = state.pool.begin().await?;
+
+    // Outer Option = row presence (404 guard); inner = the nullable `bundle_id`.
+    let bundle_id: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT bundle_id FROM catalog_clients WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("client not found".into()))?;
+
+    // Delete the client first to drop the FK reference, then the owned bundle row in
+    // the same tx so both rows go or neither does.
+    sqlx::query("DELETE FROM catalog_clients WHERE id = $1")
         .bind(id)
-        .execute(&state.pool)
-        .await?
-        .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("client not found".into()));
+        .execute(&mut *tx)
+        .await?;
+
+    let bundle_slug = match bundle_id {
+        Some(bundle_id) => {
+            let slug = loontail_bundles::bundle_slug_by_id(&mut *tx, bundle_id).await?;
+            loontail_bundles::delete_bundle_row(&mut *tx, bundle_id).await?;
+            slug
+        }
+        None => None,
+    };
+
+    tx.commit().await?;
+
+    // Best-effort on-disk cleanup after the DB deletes are durable.
+    if let Some(slug) = bundle_slug {
+        loontail_bundles::remove_bundle_dir(&state.config.bundles.storage_root, &slug);
     }
+
+    // Also remove the client's catalog-media dir `{storage_root}/{client_hex}/`,
+    // which holds uploaded poster/background/titleImage/screenshot files. The
+    // cascade dropped the `catalog_media` rows but never the bytes on disk, so
+    // without this the images leak forever (no admin page to clean them up).
+    // Post-commit and best-effort, mirroring the bundle dir removal; uses the same
+    // undashed hex form (`id.simple()`) the upload path writes to.
+    let media_dir =
+        std::path::Path::new(&state.config.catalog.storage_root).join(id.simple().to_string());
+    tokio::fs::remove_dir_all(media_dir).await.ok();
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -237,6 +405,12 @@ fn default_formats() -> Value {
 
 const MEDIA_ROLES: [&str; 4] = ["poster", "background", "titleImage", "screenshot"];
 
+/// Roles that occupy a single slot per client: a new upload replaces the existing
+/// row (and unlinks its file). `screenshot` is the only multi-row role.
+const SINGULAR_ROLES: [&str; 3] = ["poster", "background", "titleImage"];
+
+/// JSON media-attach escape hatch: register a typed URL string without uploading
+/// bytes. Kept for callers that host media elsewhere.
 pub async fn attach_media(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -249,14 +423,7 @@ pub async fn attach_media(
             body.role
         )));
     }
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM catalog_clients WHERE id=$1)")
-            .bind(client_id)
-            .fetch_one(&state.pool)
-            .await?;
-    if !exists {
-        return Err(AppError::NotFound("client not found".into()));
-    }
+    require_client(&state, client_id).await?;
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO catalog_media \
          (client_id, role, url, ext, name, hash, mime, width, height, size, formats, sort_order) \
@@ -277,6 +444,264 @@ pub async fn attach_media(
     .fetch_one(&state.pool)
     .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+async fn require_client(state: &AppState, client_id: Uuid) -> AppResult<()> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM catalog_clients WHERE id=$1)")
+            .bind(client_id)
+            .fetch_one(&state.pool)
+            .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("client not found".into()))
+    }
+}
+
+/// A sniffed image format: its file extension and MIME type.
+struct ImageKind {
+    ext: &'static str,
+    mime: &'static str,
+}
+
+/// Sniff the image format from magic bytes. PNG (`89 50 4E 47`), JPEG
+/// (`FF D8 FF`), WebP (`RIFF....WEBP`), and GIF (`GIF8`, covering GIF87a/GIF89a)
+/// are accepted; anything else is rejected with `None` (the caller maps it to a
+/// 400). HEIC/AVIF would need transcoding and are out of scope.
+fn sniff_image(bytes: &[u8]) -> Option<ImageKind> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        Some(ImageKind {
+            ext: "png",
+            mime: "image/png",
+        })
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(ImageKind {
+            ext: "jpg",
+            mime: "image/jpeg",
+        })
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(ImageKind {
+            ext: "webp",
+            mime: "image/webp",
+        })
+    } else if bytes.starts_with(b"GIF8") {
+        Some(ImageKind {
+            ext: "gif",
+            mime: "image/gif",
+        })
+    } else {
+        None
+    }
+}
+
+/// Best-effort pixel dimensions. Only PNG is decoded (IHDR width/height at a fixed
+/// offset); JPEG/WebP return `None` rather than parsing their variable headers.
+fn image_dimensions(bytes: &[u8], ext: &str) -> (Option<i32>, Option<i32>) {
+    if ext == "png" && bytes.len() >= 24 && &bytes[12..16] == b"IHDR" {
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        (Some(w as i32), Some(h as i32))
+    } else {
+        (None, None)
+    }
+}
+
+/// `POST /clients/{id}/media/upload` (multipart) — upload real image bytes. Reads
+/// the `file` field chunked under [`MAX_MEDIA_UPLOAD_BYTES`], sniffs the format,
+/// writes a fresh revision to disk, and inserts a `catalog_media` row with a
+/// server-relative `url`. For singular roles the prior row of that role is deleted
+/// (and its file unlinked) first so a slot is replaced; screenshots append. The
+/// `role` comes from a `role` form field (path query not used here). Returns
+/// `201 {id, url}`.
+pub async fn upload_media(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(client_id): Path<Uuid>,
+    multipart: Multipart,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    require_client(&state, client_id).await?;
+
+    let UploadMediaFields { file, role } = read_media_upload(multipart).await?;
+    let role = role.ok_or_else(|| AppError::BadRequest("missing role field".into()))?;
+    if !MEDIA_ROLES.contains(&role.as_str()) {
+        return Err(AppError::BadRequest(format!("invalid media role '{role}'")));
+    }
+    let file = file.ok_or_else(|| AppError::BadRequest("missing file field".into()))?;
+
+    let kind = sniff_image(&file).ok_or_else(|| {
+        AppError::BadRequest("unsupported image type — use PNG, JPG, WebP, or GIF".into())
+    })?;
+    let (width, height) = image_dimensions(&file, kind.ext);
+
+    let client_hex = client_id.simple().to_string();
+    let revision = store::revision_hex();
+    let disk_path = store::disk_path(
+        &state.config.catalog.storage_root,
+        &client_hex,
+        &role,
+        &revision,
+        kind.ext,
+    );
+    let url = store::public_url(&client_hex, &role, &revision, kind.ext);
+    let size = file.len() as i32;
+
+    store::write_file(&disk_path, &file)
+        .await
+        .map_err(|err| AppError::Internal(anyhow::anyhow!("write catalog media: {err}")))?;
+
+    let mut tx = state.pool.begin().await?;
+    if SINGULAR_ROLES.contains(&role.as_str()) {
+        // Replace the slot: capture old files, delete the rows, unlink after commit.
+        let old_urls: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM catalog_media WHERE client_id = $1 AND role = $2 RETURNING url",
+        )
+        .bind(client_id)
+        .bind(&role)
+        .fetch_all(&mut *tx)
+        .await?;
+        for old in old_urls {
+            if let Some(path) = url_to_disk_path(&state.config.catalog.storage_root, &old) {
+                store::unlink_quiet(&path).await;
+            }
+        }
+    }
+
+    let id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO catalog_media \
+         (client_id, role, url, ext, mime, width, height, size) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+    )
+    .bind(client_id)
+    .bind(&role)
+    .bind(&url)
+    .bind(kind.ext)
+    .bind(kind.mime)
+    .bind(width)
+    .bind(height)
+    .bind(size)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "url": url }))))
+}
+
+/// `GET /clients/{id}/media` — list the client's media rows (role/url/id/sortOrder)
+/// for the admin SPA's per-slot previews.
+pub async fn list_media(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(client_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    require_client(&state, client_id).await?;
+    let rows = sqlx::query_as::<_, (Uuid, String, String, Option<i32>, Option<i32>, i32)>(
+        "SELECT id, role, url, width, height, sort_order FROM catalog_media \
+         WHERE client_id = $1 ORDER BY sort_order, created_at",
+    )
+    .bind(client_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let media: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, role, url, width, height, sort_order)| {
+            json!({
+                "id": id,
+                "role": role,
+                "url": url,
+                "width": width,
+                "height": height,
+                "sortOrder": sort_order,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "media": media })))
+}
+
+/// `DELETE /clients/{id}/media/{media_id}` — delete a media row and unlink its
+/// on-disk file (best effort).
+pub async fn delete_media(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path((client_id, media_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    let url = sqlx::query_scalar::<_, String>(
+        "DELETE FROM catalog_media WHERE id = $1 AND client_id = $2 RETURNING url",
+    )
+    .bind(media_id)
+    .bind(client_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let url = url.ok_or_else(|| AppError::NotFound("media not found".into()))?;
+    if let Some(path) = url_to_disk_path(&state.config.catalog.storage_root, &url) {
+        store::unlink_quiet(&path).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Map a server-relative `/catalog-media/{client}/{file}` url back to its on-disk
+/// path under the storage root. Returns `None` for externally-hosted urls (the
+/// JSON `attach_media` escape hatch) so deleting them never touches the disk.
+fn url_to_disk_path(storage_root: &str, url: &str) -> Option<std::path::PathBuf> {
+    let rel = url.strip_prefix("/catalog-media/")?;
+    if rel.is_empty() || rel.contains("..") {
+        return None;
+    }
+    Some(std::path::Path::new(storage_root).join(rel))
+}
+
+struct UploadMediaFields {
+    file: Option<Bytes>,
+    role: Option<String>,
+}
+
+/// Drain the multipart body into the `file` bytes and the `role` text, enforcing
+/// the per-upload size cap as bytes are read. The `file` field is read chunk by
+/// chunk and aborted the instant the accumulated size crosses
+/// [`MAX_MEDIA_UPLOAD_BYTES`], so an oversized upload is never fully buffered.
+async fn read_media_upload(mut multipart: Multipart) -> AppResult<UploadMediaFields> {
+    let mut file: Option<Bytes> = None;
+    let mut role: Option<String> = None;
+
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| AppError::BadRequest(format!("malformed multipart: {err}")))?
+    {
+        match field.name() {
+            Some("file") => {
+                let mut buf: Vec<u8> = Vec::with_capacity(MAX_MEDIA_UPLOAD_BYTES.min(64 * 1024));
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|err| AppError::BadRequest(format!("reading file: {err}")))?
+                {
+                    if buf.len() + chunk.len() > MAX_MEDIA_UPLOAD_BYTES {
+                        return Err(AppError::BadRequest(
+                            "image is too large (max 32 MB)".into(),
+                        ));
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                file = Some(Bytes::from(buf));
+            }
+            Some("role") => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|err| AppError::BadRequest(format!("reading role: {err}")))?;
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    role = Some(trimmed.to_string());
+                }
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    Ok(UploadMediaFields { file, role })
 }
 
 // --- Keywords --------------------------------------------------------------
@@ -302,8 +727,11 @@ pub async fn create_keyword(
     Json(body): Json<UpsertKeyword>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let mut tx = state.pool.begin().await?;
+    // Published on insert: keywords are now only created to be attached to a build, and
+    // the catalog read inlines a client's keyword only when `published_at IS NOT NULL`,
+    // so an unpublished keyword would never reach the launcher/UI.
     let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO catalog_keywords (slug) VALUES ($1) RETURNING id",
+        "INSERT INTO catalog_keywords (slug, published_at) VALUES ($1, now()) RETURNING id",
     )
     .bind(&body.slug)
     .fetch_one(&mut *tx)
@@ -378,8 +806,11 @@ pub async fn create_server(
     _admin: AdminUser,
     Json(body): Json<UpsertServer>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    // Published on insert (see `create_keyword`): the catalog read inlines a client's
+    // server only when `published_at IS NOT NULL`.
     let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO catalog_servers (slug, name, address) VALUES ($1,$2,$3) RETURNING id",
+        "INSERT INTO catalog_servers (slug, name, address, published_at) \
+         VALUES ($1,$2,$3, now()) RETURNING id",
     )
     .bind(&body.slug)
     .bind(&body.name)
@@ -490,6 +921,36 @@ pub async fn attach_server(
     .execute(&state.pool)
     .await
     .map_err(map_fk)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /clients/{client_id}/keywords/{keyword_id}` — detach a keyword from a
+/// build by deleting the join row. Idempotent: a `204` even when no row was present.
+pub async fn detach_keyword(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path((client_id, keyword_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    sqlx::query("DELETE FROM catalog_client_keywords WHERE client_id = $1 AND keyword_id = $2")
+        .bind(client_id)
+        .bind(keyword_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /clients/{client_id}/servers/{server_id}` — detach a server from a build
+/// by deleting the join row. Idempotent (see [`detach_keyword`]).
+pub async fn detach_server(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path((client_id, server_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    sqlx::query("DELETE FROM catalog_client_servers WHERE client_id = $1 AND server_id = $2")
+        .bind(client_id)
+        .bind(server_id)
+        .execute(&state.pool)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

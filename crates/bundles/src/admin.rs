@@ -11,8 +11,9 @@ use loontail_core::AppState;
 
 use crate::archive::{extract_zip, hash_file, scan_directory};
 use crate::models::{
-    BulkDelete, Bundle, BundleWithArtifacts, CreateBundle, CreateFolder, DiskSpace, MissingEntry,
-    OrphanEntry, RenameFile, ToggleDownloadOnce, UpdateBundle, ValidateResult,
+    BulkDelete, Bundle, BundleArtifact, BundleWithArtifacts, CreateBundle, CreateFolder, DiskSpace,
+    MissingEntry, MoveFile, MoveFiles, OrphanEntry, RenameFile, ToggleDownloadOnce, UpdateBundle,
+    ValidateResult,
 };
 use crate::storage::{
     delete_build_files, disk_space, ensure_build_dir, files_path, normalize_relative_path,
@@ -46,7 +47,10 @@ pub async fn list(
     Ok(Json(repo::list_bundles(&state.pool).await?))
 }
 
-/// `POST /builds` — create a draft build and its on-disk directory.
+/// `POST /builds` — create a draft build and its on-disk directory. Delegates the
+/// slug check, row insert, and directory creation to [`repo::provision_bundle`] (the
+/// same path the catalog uses to auto-provision a build's owned bundle), then applies
+/// any supplied description/version.
 pub async fn create(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -55,23 +59,27 @@ pub async fn create(
     if body.name.trim().is_empty() || body.slug.trim().is_empty() {
         return Err(AppError::BadRequest("name and slug are required".into()));
     }
-    if repo::find_by_slug(&state.pool, &body.slug).await?.is_some() {
-        return Err(AppError::Conflict(
-            "a build with this slug already exists".into(),
-        ));
-    }
 
-    let bundle = repo::create_bundle(
+    let id = repo::provision_bundle(
         &state.pool,
-        body.name.trim(),
+        storage_root(&state),
         body.slug.trim(),
-        body.description.as_deref(),
-        body.version.as_deref(),
+        body.name.trim(),
     )
     .await?;
 
-    ensure_build_dir(storage_root(&state), &bundle.slug)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir build dir: {e}")))?;
+    let bundle = if body.description.is_some() || body.version.is_some() {
+        repo::update_bundle_meta(
+            &state.pool,
+            id,
+            None,
+            body.description.as_deref(),
+            body.version.as_deref(),
+        )
+        .await?
+    } else {
+        repo::require_by_slug(&state.pool, body.slug.trim()).await?
+    };
 
     Ok((axum::http::StatusCode::CREATED, Json(bundle)))
 }
@@ -460,7 +468,8 @@ pub async fn toggle_download_once(
 }
 
 /// `POST /builds/{slug}/files/{entryId}/rename` — move/rename a file or folder
-/// (descendant rows follow).
+/// (descendant rows follow). Shares the hardened [`repo::move_subtree`] path with the
+/// `move` endpoints: DB-aware conflict (409), self-into-subtree guard, atomic tx.
 pub async fn rename_file(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -472,50 +481,163 @@ pub async fn rename_file(
     let normalized = normalize_relative_path(body.new_relative_path.trim(), "newRelativePath")?;
 
     let files_root = files_path(storage_root(&state), &slug);
-    let old_physical = repo::join_files(&files_root, &entry.relative_path);
-    let new_physical = repo::join_files(&files_root, &normalized);
+    apply_move(&state, &bundle, &files_root, &entry, &normalized).await?;
 
-    if new_physical.exists() && normalized != entry.relative_path {
+    regenerate(&state, &bundle).await?;
+    Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
+}
+
+/// `POST /builds/{slug}/files/{entryId}/move` — move a single entry into
+/// `targetDir` (`""` = build root). The new path is `join(targetDir, name)`.
+pub async fn move_file(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path((slug, entry_id)): Path<(String, Uuid)>,
+    Json(body): Json<MoveFile>,
+) -> AppResult<Json<Bundle>> {
+    let bundle = repo::require_by_slug(&state.pool, &slug).await?;
+    let entry = artifact_in_bundle(&state, bundle.id, entry_id).await?;
+
+    let new_rel = join_target_dir(&body.target_dir, &entry.name)?;
+    let files_root = files_path(storage_root(&state), &slug);
+    apply_move(&state, &bundle, &files_root, &entry, &new_rel).await?;
+
+    regenerate(&state, &bundle).await?;
+    Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
+}
+
+/// `POST /builds/{slug}/files/move` — move many entries into `targetDir` (`""` =
+/// build root). Validates every id belongs to the bundle, moves them all in ONE
+/// transaction (all-or-nothing: a collision aborts the whole batch with a 409), then
+/// regenerates the manifest exactly once at the end.
+pub async fn move_files(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(slug): Path<String>,
+    Json(body): Json<MoveFiles>,
+) -> AppResult<Json<Bundle>> {
+    if body.ids.is_empty() {
+        return Err(AppError::BadRequest("ids must be a non-empty array".into()));
+    }
+    let bundle = repo::require_by_slug(&state.pool, &slug).await?;
+    let files_root = files_path(storage_root(&state), &slug);
+
+    // Resolve every id up front (mirror bulk_delete's ownership check) so a bad id is
+    // a clean 404 before any row is touched.
+    let mut moves: Vec<(BundleArtifact, String)> = Vec::with_capacity(body.ids.len());
+    for id in &body.ids {
+        let entry = artifact_in_bundle(&state, bundle.id, *id).await?;
+        let new_rel = join_target_dir(&body.target_dir, &entry.name)?;
+        validate_move(&entry, &new_rel)?;
+        moves.push((entry, new_rel));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    for (entry, new_rel) in &moves {
+        check_destination_free(&mut tx, bundle.id, new_rel, entry.is_dir).await?;
+        repo::move_subtree(
+            &mut tx,
+            bundle.id,
+            &files_root,
+            &entry.relative_path,
+            new_rel,
+            entry.is_dir,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+
+    regenerate(&state, &bundle).await?;
+    Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
+}
+
+/// Join a `targetDir` (`""` = root) with an entry's `name` into a normalized,
+/// validated relative path. Rejects traversal/absolute target dirs.
+fn join_target_dir(target_dir: &str, name: &str) -> AppResult<String> {
+    let target = target_dir.trim();
+    let raw = if target.is_empty() {
+        name.to_string()
+    } else {
+        format!("{target}/{name}")
+    };
+    normalize_relative_path(&raw, "targetDir")
+}
+
+/// Reject an illegal move before touching disk/DB: a no-op (same path) or moving a
+/// folder into its own descendant.
+fn validate_move(entry: &BundleArtifact, new_rel: &str) -> AppResult<()> {
+    if new_rel == entry.relative_path {
+        return Err(AppError::Conflict(
+            "the entry is already at that path".into(),
+        ));
+    }
+    if entry.is_dir && new_rel.starts_with(&format!("{}/", entry.relative_path)) {
+        return Err(AppError::BadRequest(
+            "cannot move a folder into its own descendant".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// DB-aware destination check on a tx executor: refuse with a clean 409 if a row
+/// already occupies `new_rel` (or, for a folder, anything under `new_rel/`) instead of
+/// letting the unique index raise a raw 500. Callers must have already passed
+/// [`validate_move`] (no-op and folder-into-self are rejected there), so any prefix
+/// hit here is a genuinely occupied destination.
+async fn check_destination_free(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    bundle_id: Uuid,
+    new_rel: &str,
+    is_dir: bool,
+) -> AppResult<()> {
+    if repo::artifact_exists_at(&mut **tx, bundle_id, new_rel).await? {
+        return Err(AppError::Conflict(
+            "a file or folder already exists at that path".into(),
+        ));
+    }
+    if is_dir {
+        let new_prefix = format!("{new_rel}/");
+        if repo::any_artifact_with_prefix(&mut **tx, bundle_id, &new_prefix).await? {
+            return Err(AppError::Conflict(
+                "a folder already exists at that path".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Run a validated single move inside its own transaction: guard, conflict check,
+/// [`repo::move_subtree`], commit. Shared by `rename_file` and `move_file`.
+async fn apply_move(
+    state: &AppState,
+    bundle: &Bundle,
+    files_root: &std::path::Path,
+    entry: &BundleArtifact,
+    new_rel: &str,
+) -> AppResult<()> {
+    validate_move(entry, new_rel)?;
+
+    // Physical-exists defense (kept alongside the DB-aware check below).
+    let new_physical = repo::join_files(files_root, new_rel);
+    if new_physical.exists() && new_rel != entry.relative_path {
         return Err(AppError::Conflict(
             "a file or folder already exists at that path".into(),
         ));
     }
 
-    if old_physical.exists() {
-        if let Some(parent) = new_physical.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("mkdir: {e}")))?;
-        }
-        tokio::fs::rename(&old_physical, &new_physical)
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("rename: {e}")))?;
-    }
-
-    let (name, category) = split_relative_path(&normalized);
-    repo::update_artifact_path(&state.pool, entry.id, &normalized, &name, &category).await?;
-
-    if entry.is_dir {
-        let old_prefix = format!("{}/", entry.relative_path);
-        let children = repo::list_artifacts(&state.pool, bundle.id).await?;
-        for child in children {
-            if let Some(suffix) = child.relative_path.strip_prefix(&old_prefix) {
-                let child_new = format!("{normalized}/{suffix}");
-                let (child_name, child_category) = split_relative_path(&child_new);
-                repo::update_artifact_path(
-                    &state.pool,
-                    child.id,
-                    &child_new,
-                    &child_name,
-                    &child_category,
-                )
-                .await?;
-            }
-        }
-    }
-
-    regenerate(&state, &bundle).await?;
-    Ok(Json(repo::require_by_slug(&state.pool, &slug).await?))
+    let mut tx = state.pool.begin().await?;
+    check_destination_free(&mut tx, bundle.id, new_rel, entry.is_dir).await?;
+    repo::move_subtree(
+        &mut tx,
+        bundle.id,
+        files_root,
+        &entry.relative_path,
+        new_rel,
+        entry.is_dir,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// `POST /builds/{slug}/files/{entryId}/rehash` — recompute a file's SHA-256.

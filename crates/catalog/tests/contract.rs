@@ -1,8 +1,8 @@
 //! Contract tests for the launcher catalog. Each test seeds a published client
 //! with locales, media, keywords, and servers, then drives the public
 //! `routes()` via `tower::ServiceExt::oneshot` against a per-test database
-//! (`#[sqlx::test]`). Assertions pin the exact JSON field names + envelope shape
-//! the launcher's `normalizeClient`/Strapi schemas consume.
+//! (`#[sqlx::test]`). Assertions pin the exact native JSON field names + flat
+//! shape (no envelopes, relations always inlined) the launcher consumes.
 
 use std::time::Duration;
 
@@ -16,9 +16,6 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-const POPULATE: &str = "populate[screenshots]=true&populate[background]=true&\
-populate[poster]=true&populate[titleImage]=true&populate[keywords]=true&populate[servers]=true";
-
 fn state(pool: PgPool) -> AppState {
     // Config::from_env reads DATABASE_URL (set for the test) + defaults for the rest.
     let config = Config::from_env().expect("config from env");
@@ -26,12 +23,10 @@ fn state(pool: PgPool) -> AppState {
 }
 
 /// Create a fresh non-admin account and mint a session, returning its raw token.
-/// Every public catalog read now requires a valid `AuthUser`, so the launcher
-/// attaches this as a Bearer token; the user is unrelated to the seeded catalog
-/// rows, so it does not perturb any envelope/pagination assertion.
+/// Every public catalog read requires a valid `AuthUser`, so the launcher attaches
+/// this as a Bearer token; the user is unrelated to the seeded catalog rows, so it
+/// does not perturb any assertion.
 async fn seed_session_token(pool: &PgPool) -> String {
-    // Unique per call: tests issue several reads (each seeds its own reader), and
-    // `normalized_username`/`email` are UNIQUE.
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let user = register_user(
         pool,
@@ -85,6 +80,23 @@ async fn seed_published_client(pool: &PgPool) -> uuid::Uuid {
     .await
     .unwrap();
 
+    // Owned bundle for the build, linked via the real FK. The client's text
+    // `bundle_slug` stays for the frozen `bundleSlug` contract; `bundle_id` drives
+    // the additive inlined `bundle` summary.
+    let bundle_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO bundles (slug, name, version, status, files_count) \
+         VALUES ('aurora-bundle', 'Aurora', '1.0.0', 'ready', 3) RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE catalog_clients SET bundle_id = $1 WHERE id = $2")
+        .bind(bundle_id)
+        .bind(client_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
     for (locale, title, desc, short) in [
         ("en", "Aurora", "The Aurora build", "Short EN"),
         ("ru", "Аврора", "Сборка Аврора", "Кратко RU"),
@@ -105,16 +117,15 @@ async fn seed_published_client(pool: &PgPool) -> uuid::Uuid {
     }
 
     for (role, url) in [
-        ("poster", "/uploads/poster.png"),
-        ("background", "/uploads/bg.png"),
-        ("titleImage", "/uploads/logo.png"),
-        ("screenshot", "/uploads/shot1.png"),
+        ("poster", "/catalog-media/aurora/poster.png"),
+        ("background", "/catalog-media/aurora/bg.png"),
+        ("titleImage", "/catalog-media/aurora/logo.png"),
+        ("screenshot", "/catalog-media/aurora/shot1.png"),
     ] {
         sqlx::query(
             "INSERT INTO catalog_media \
-             (client_id, role, url, ext, name, hash, mime, width, height, size, formats) \
-             VALUES ($1,$2,$3,'.png','img','abc','image/png',1920,1080,5000, \
-             '{\"thumbnail\":{\"url\":\"/uploads/thumb.png\",\"ext\":\".png\",\"width\":16,\"height\":9,\"size\":10,\"name\":\"t\",\"hash\":\"h\"}}'::jsonb)",
+             (client_id, role, url, ext, mime, width, height, size) \
+             VALUES ($1,$2,$3,'png','image/png',1920,1080,5000)",
         )
         .bind(client_id)
         .bind(role)
@@ -166,30 +177,37 @@ async fn seed_published_client(pool: &PgPool) -> uuid::Uuid {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn clients_envelope_and_populated_relations(pool: PgPool) {
-    seed_published_client(&pool).await;
-    let uri = format!("/clients?{POPULATE}&locale=en");
-    let (status, body) = get_json(pool, &uri).await;
+async fn clients_native_list_and_inlined_relations(pool: PgPool) {
+    let client_id = seed_published_client(&pool).await;
+    let (status, body) = get_json(pool, "/clients?locale=en").await;
     assert_eq!(status, StatusCode::OK);
 
-    // Envelope shape.
-    let data = body
-        .get("data")
+    // Native list wrapper: { clients: [...] } — no `data`/`meta` envelope.
+    assert!(
+        body.get("data").is_none(),
+        "native shape must not carry `data`"
+    );
+    assert!(
+        body.get("meta").is_none(),
+        "native shape must not carry `meta`"
+    );
+    let clients = body
+        .get("clients")
         .and_then(Value::as_array)
-        .expect("data array");
-    assert_eq!(data.len(), 1);
-    let pagination = body
-        .pointer("/meta/pagination")
-        .expect("meta.pagination present");
-    assert_eq!(pagination.get("page").and_then(Value::as_i64), Some(1));
-    assert_eq!(pagination.get("pageCount").and_then(Value::as_i64), Some(1));
-    assert_eq!(pagination.get("total").and_then(Value::as_i64), Some(1));
-    assert!(pagination.get("pageSize").and_then(Value::as_i64).is_some());
+        .expect("clients array");
+    assert_eq!(clients.len(), 1);
 
-    let client = &data[0];
-    // Exact field names the launcher's ClientResponseSchema/normalizeClient expect.
-    assert!(client.get("id").and_then(Value::as_i64).is_some());
-    assert!(client.get("documentId").and_then(Value::as_str).is_some());
+    let client = &clients[0];
+    // `id` is the undashed UUID; no documentId/seq/createdAt/updatedAt/publishedAt.
+    assert_eq!(
+        client.get("id").and_then(Value::as_str),
+        Some(client_id.simple().to_string().as_str())
+    );
+    assert!(client.get("documentId").is_none());
+    assert!(client.get("createdAt").is_none());
+    assert!(client.get("updatedAt").is_none());
+    assert!(client.get("publishedAt").is_none());
+
     assert_eq!(client.get("slug").and_then(Value::as_str), Some("aurora"));
     assert_eq!(client.get("title").and_then(Value::as_str), Some("Aurora"));
     assert_eq!(
@@ -205,7 +223,6 @@ async fn clients_envelope_and_populated_relations(pool: PgPool) {
         client.get("minecraftVersion").and_then(Value::as_str),
         Some("1.21.4")
     );
-    // Nullable version field stays null (forgeVersion was NULL).
     assert!(client.get("forgeVersion").unwrap().is_null());
     assert_eq!(
         client.get("fabricVersion").and_then(Value::as_str),
@@ -219,27 +236,43 @@ async fn clients_envelope_and_populated_relations(pool: PgPool) {
         client.get("bundleSlug").and_then(Value::as_str),
         Some("aurora-bundle")
     );
-    assert!(client.get("createdAt").and_then(Value::as_str).is_some());
-    assert!(client.get("updatedAt").and_then(Value::as_str).is_some());
-    assert!(client.get("publishedAt").and_then(Value::as_str).is_some());
 
-    // Populated media: server-relative url (launcher absolutizes).
+    // Additive inlined bundle summary from the linked `bundle_id`. `bundleSlug`
+    // (asserted above) MUST still be present alongside it.
+    let bundle = client.get("bundle").expect("bundle present");
+    assert_eq!(
+        bundle.get("slug").and_then(Value::as_str),
+        Some("aurora-bundle")
+    );
+    assert_eq!(bundle.get("status").and_then(Value::as_str), Some("ready"));
+    assert_eq!(bundle.get("version").and_then(Value::as_str), Some("1.0.0"));
+    assert_eq!(bundle.get("filesCount").and_then(Value::as_i64), Some(3));
+    assert_eq!(
+        bundle.get("manifestUrl").and_then(Value::as_str),
+        Some("/api/bundle-registry/builds/aurora-bundle/manifest")
+    );
+
+    // Media: { url, width, height } only — no id/ext/name/hash/size/formats.
     let poster = client.get("poster").expect("poster present");
     assert_eq!(
         poster.get("url").and_then(Value::as_str),
-        Some("/uploads/poster.png")
+        Some("/catalog-media/aurora/poster.png")
     );
-    assert!(poster.get("id").and_then(Value::as_i64).is_some());
-    assert!(poster.get("formats").is_some());
+    assert_eq!(poster.get("width").and_then(Value::as_i64), Some(1920));
+    assert_eq!(poster.get("height").and_then(Value::as_i64), Some(1080));
+    assert!(poster.get("id").is_none());
+    assert!(poster.get("ext").is_none());
+    assert!(poster.get("formats").is_none());
+
     let background = client.get("background").expect("background present");
     assert_eq!(
         background.get("url").and_then(Value::as_str),
-        Some("/uploads/bg.png")
+        Some("/catalog-media/aurora/bg.png")
     );
     let title_image = client.get("titleImage").expect("titleImage present");
     assert_eq!(
         title_image.get("url").and_then(Value::as_str),
-        Some("/uploads/logo.png")
+        Some("/catalog-media/aurora/logo.png")
     );
     let screenshots = client
         .get("screenshots")
@@ -248,10 +281,10 @@ async fn clients_envelope_and_populated_relations(pool: PgPool) {
     assert_eq!(screenshots.len(), 1);
     assert_eq!(
         screenshots[0].get("url").and_then(Value::as_str),
-        Some("/uploads/shot1.png")
+        Some("/catalog-media/aurora/shot1.png")
     );
 
-    // Populated keywords with localized title.
+    // Keywords are always inlined: { id (undashed uuid), title }.
     let keywords = client
         .get("keywords")
         .and_then(Value::as_array)
@@ -261,8 +294,10 @@ async fn clients_envelope_and_populated_relations(pool: PgPool) {
         keywords[0].get("title").and_then(Value::as_str),
         Some("Survival")
     );
+    let kw_id = keywords[0].get("id").and_then(Value::as_str).unwrap();
+    assert_eq!(kw_id.len(), 32, "keyword id is undashed 32-char hex");
 
-    // Populated servers.
+    // Servers are always inlined: { id, name, address }.
     let servers = client
         .get("servers")
         .and_then(Value::as_array)
@@ -280,8 +315,8 @@ async fn locale_fallback_to_default_then_any(pool: PgPool) {
     seed_published_client(&pool).await;
 
     // Requested ru → ru title.
-    let (_, body) = get_json(pool.clone(), &format!("/clients?{POPULATE}&locale=ru")).await;
-    let client = &body.pointer("/data/0").unwrap();
+    let (_, body) = get_json(pool.clone(), "/clients?locale=ru").await;
+    let client = &body.pointer("/clients/0").unwrap();
     assert_eq!(client.get("title").and_then(Value::as_str), Some("Аврора"));
     assert_eq!(
         client.pointer("/keywords/0/title").and_then(Value::as_str),
@@ -289,14 +324,13 @@ async fn locale_fallback_to_default_then_any(pool: PgPool) {
     );
 
     // Requested an unknown locale → falls back to default ("en").
-    let (_, body) = get_json(pool, &format!("/clients?{POPULATE}&locale=fr")).await;
-    let client = &body.pointer("/data/0").unwrap();
+    let (_, body) = get_json(pool, "/clients?locale=fr").await;
+    let client = &body.pointer("/clients/0").unwrap();
     assert_eq!(client.get("title").and_then(Value::as_str), Some("Aurora"));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn draft_client_hidden_from_public(pool: PgPool) {
-    // A draft client (published_at NULL) must not appear in public reads.
     sqlx::query(
         "INSERT INTO catalog_clients (slug, available, published_at) VALUES ('hidden', true, NULL)",
     )
@@ -311,26 +345,35 @@ async fn draft_client_hidden_from_public(pool: PgPool) {
     .await
     .unwrap();
 
-    let (status, body) = get_json(pool, &format!("/clients?{POPULATE}&locale=en")).await;
+    let (status, body) = get_json(pool, "/clients?locale=en").await;
     assert_eq!(status, StatusCode::OK);
-    let data = body.get("data").and_then(Value::as_array).unwrap();
-    assert!(data.is_empty(), "draft client must be hidden");
-    assert_eq!(
-        body.pointer("/meta/pagination/total")
-            .and_then(Value::as_i64),
-        Some(0)
-    );
+    let clients = body.get("clients").and_then(Value::as_array).unwrap();
+    assert!(clients.is_empty(), "draft client must be hidden");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn unpopulated_relations_are_empty(pool: PgPool) {
-    seed_published_client(&pool).await;
-    // No populate params → relations default empty/null (Strapi behavior).
+async fn relations_default_empty_when_absent(pool: PgPool) {
+    // A client with no media/keywords/servers gets null slots + empty arrays.
+    sqlx::query(
+        "INSERT INTO catalog_clients (slug, available, published_at) VALUES ('bare', true, now())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_client_locales (client_id, locale, title) \
+         SELECT id, 'en', 'Bare' FROM catalog_clients WHERE slug = 'bare'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let (status, body) = get_json(pool, "/clients?locale=en").await;
     assert_eq!(status, StatusCode::OK);
-    let client = body.pointer("/data/0").unwrap();
+    let client = body.pointer("/clients/0").unwrap();
     assert!(client.get("poster").unwrap().is_null());
     assert!(client.get("background").unwrap().is_null());
+    assert!(client.get("titleImage").unwrap().is_null());
     assert!(client
         .get("screenshots")
         .and_then(Value::as_array)
@@ -346,36 +389,29 @@ async fn unpopulated_relations_are_empty(pool: PgPool) {
         .and_then(Value::as_array)
         .unwrap()
         .is_empty());
-    // titleImage is optional ⇒ absent entirely when not populated.
-    assert!(client.get("titleImage").is_none());
+    // A client with no linked bundle inlines `bundle: null`.
+    assert!(
+        client.get("bundle").unwrap().is_null(),
+        "client without a bundle link must have null bundle"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn get_client_by_id_document_id_and_slug(pool: PgPool) {
+async fn get_client_by_id_and_slug(pool: PgPool) {
     let uuid = seed_published_client(&pool).await;
-
-    // By slug.
-    let (status, body) = get_json(pool.clone(), &format!("/clients/aurora?{POPULATE}")).await;
-    assert_eq!(status, StatusCode::OK);
-    let seq = body.pointer("/data/id").and_then(Value::as_i64).unwrap();
-    assert_eq!(
-        body.pointer("/data/slug").and_then(Value::as_str),
-        Some("aurora")
-    );
-
-    // By documentId (undashed UUID).
     let doc = uuid.simple().to_string();
-    let (status, body) = get_json(pool.clone(), &format!("/clients/{doc}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body.pointer("/data/documentId").and_then(Value::as_str),
-        Some(doc.as_str())
-    );
 
-    // By numeric id.
-    let (status, body) = get_json(pool, &format!("/clients/{seq}")).await;
+    // By slug — returns the bare client object (no envelope).
+    let (status, body) = get_json(pool.clone(), "/clients/aurora").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.pointer("/data/id").and_then(Value::as_i64), Some(seq));
+    assert!(body.get("data").is_none());
+    assert_eq!(body.get("slug").and_then(Value::as_str), Some("aurora"));
+    assert_eq!(body.get("id").and_then(Value::as_str), Some(doc.as_str()));
+
+    // By undashed UUID id.
+    let (status, body) = get_json(pool, &format!("/clients/{doc}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.get("id").and_then(Value::as_str), Some(doc.as_str()));
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -390,33 +426,32 @@ async fn keywords_and_servers_lists(pool: PgPool) {
 
     let (status, body) = get_json(pool.clone(), "/keywords?locale=ru").await;
     assert_eq!(status, StatusCode::OK);
-    let data = body.get("data").and_then(Value::as_array).unwrap();
-    assert_eq!(data.len(), 1);
+    let keywords = body.get("keywords").and_then(Value::as_array).unwrap();
+    assert_eq!(keywords.len(), 1);
     assert_eq!(
-        data[0].get("title").and_then(Value::as_str),
+        keywords[0].get("title").and_then(Value::as_str),
         Some("Выживание")
-    );
-    assert_eq!(
-        body.pointer("/meta/pagination/total")
-            .and_then(Value::as_i64),
-        Some(1)
     );
 
     let (status, body) = get_json(pool, "/servers").await;
     assert_eq!(status, StatusCode::OK);
-    let data = body.get("data").and_then(Value::as_array).unwrap();
-    assert_eq!(data.len(), 1);
+    let servers = body.get("servers").and_then(Value::as_array).unwrap();
+    assert_eq!(servers.len(), 1);
     assert_eq!(
-        data[0].get("address").and_then(Value::as_str),
+        servers[0].get("address").and_then(Value::as_str),
         Some("play.loontail.com")
     );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn empty_bundle_slug_collapses_to_null(pool: PgPool) {
+async fn dangling_bundle_slug_reads_null(pool: PgPool) {
+    // A published client carries a non-empty `bundle_slug` column but `bundle_id`
+    // is NULL (dangling/never-linked: the named bundle row does not exist). The wire
+    // `bundleSlug` is sourced from the VERIFIED bundle, so it reads null and the
+    // inlined `bundle` is null — no consumer chases a slug with no bundle behind it.
     sqlx::query(
         "INSERT INTO catalog_clients (slug, available, bundle_slug, published_at) \
-         VALUES ('nobundle', true, '   ', now())",
+         VALUES ('nobundle', true, 'ghost-bundle', now())",
     )
     .execute(&pool)
     .await
@@ -429,11 +464,16 @@ async fn empty_bundle_slug_collapses_to_null(pool: PgPool) {
     .await
     .unwrap();
 
-    let (_, body) = get_json(pool, "/clients?locale=en").await;
-    let client = body.pointer("/data/0").unwrap();
+    let (status, body) = get_json(pool, "/clients?locale=en").await;
+    assert_eq!(status, StatusCode::OK);
+    let client = body.pointer("/clients/0").unwrap();
     assert!(
         client.get("bundleSlug").unwrap().is_null(),
-        "whitespace-only bundleSlug must collapse to null"
+        "dangling bundleSlug (no matching bundle row) must read null"
+    );
+    assert!(
+        client.get("bundle").unwrap().is_null(),
+        "dangling bundle link must inline bundle: null"
     );
 }
 

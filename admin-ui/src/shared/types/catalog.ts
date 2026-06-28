@@ -1,61 +1,48 @@
-// Mirrors crates/catalog/src/dto.rs + admin.rs. Public reads use the Strapi
-// envelope: a numeric `id` plus a string `documentId` (the UUID used in admin
-// CRUD paths). Media URLs stay server-relative.
+// Mirrors crates/catalog/src/dto.rs + admin.rs. Public reads are flat camelCase
+// JSON: `id` is the entity's UUID as an undashed 32-char hex string (also the id
+// used in admin CRUD paths). Lists are wrapped as { clients|keywords|servers }.
+// Media URLs stay server-relative; the admin SPA is same-origin as the API.
 
-export interface Pagination {
-  page: number;
-  pageSize: number;
-  pageCount: number;
-  total: number;
+export interface ClientList {
+  clients: Client[];
 }
 
-export interface ListEnvelope<T> {
-  data: T[];
-  meta: { pagination: Pagination };
+export interface KeywordList {
+  keywords: Keyword[];
 }
 
-export interface EntityEnvelope<T> {
-  data: T;
+export interface ServerList {
+  servers: Server[];
 }
 
 export interface Media {
-  id: number;
-  documentId: string;
   url: string;
-  ext: string;
-  width: number;
-  height: number;
-  size: number;
-  name: string;
-  hash: string;
-  formats: unknown;
-  createdAt: string;
-  updatedAt: string;
-  publishedAt?: string | null;
+  width: number | null;
+  height: number | null;
 }
 
 export interface Keyword {
-  id: number;
-  documentId: string;
+  id: string;
   title: string;
-  createdAt: string;
-  updatedAt: string;
-  publishedAt?: string | null;
 }
 
 export interface Server {
-  id: number;
-  documentId: string;
-  name?: string | null;
+  id: string;
+  name: string | null;
   address: string;
-  createdAt: string;
-  updatedAt: string;
-  publishedAt?: string | null;
+}
+
+/// The owned bundle inlined onto a client (additive `bundle` field on reads).
+export interface BundleSummary {
+  slug: string;
+  version: string | null;
+  status: string;
+  filesCount: number;
+  manifestUrl: string;
 }
 
 export interface Client {
-  id: number;
-  documentId: string;
+  id: string;
   slug: string;
   title: string;
   description: string;
@@ -72,9 +59,41 @@ export interface Client {
   screenshots: Media[];
   keywords: Keyword[];
   servers: Server[];
-  createdAt: string;
-  updatedAt: string;
-  publishedAt?: string | null;
+  bundle: BundleSummary | null;
+}
+
+/// A client plus its admin-only `published` state, from GET /admin/catalog/clients
+/// (includes drafts the public /api/clients hides).
+export interface ClientAdmin extends Client {
+  published: boolean;
+}
+
+export interface ClientAdminList {
+  clients: ClientAdmin[];
+}
+
+// --- Admin media management (admin.rs) -------------------------------------
+
+export type MediaRole = "poster" | "background" | "titleImage" | "screenshot";
+
+/// A row from GET /admin/catalog/clients/{id}/media.
+export interface MediaRow {
+  id: string;
+  role: MediaRole;
+  url: string;
+  width: number | null;
+  height: number | null;
+  sortOrder: number;
+}
+
+export interface MediaListResponse {
+  media: MediaRow[];
+}
+
+/// `201 { id, url }` from a media upload.
+export interface UploadMediaResult {
+  id: string;
+  url: string;
 }
 
 // --- Admin write payloads (admin.rs) ---------------------------------------
@@ -129,7 +148,9 @@ export interface AttachMedia {
 }
 
 /// `{ id }` from create/update, `{ id, published }` from publish toggles.
+/// Create also returns the auto-provisioned owned bundle's slug.
 export interface CatalogMutationResult {
   id: string;
   published?: boolean;
+  bundleSlug?: string;
 }

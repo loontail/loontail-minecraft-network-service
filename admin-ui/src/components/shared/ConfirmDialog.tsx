@@ -21,6 +21,8 @@ interface ConfirmDialogProps {
   destructive?: boolean;
   pending?: boolean;
   onConfirm: () => void;
+  /** Override the dialog width (e.g. `"sm:max-w-md"` for richer descriptions). */
+  widthClassName?: string;
 }
 
 export function ConfirmDialog({
@@ -33,14 +35,19 @@ export function ConfirmDialog({
   destructive = false,
   pending = false,
   onConfirm,
+  widthClassName,
 }: ConfirmDialogProps) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+    <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
+      <DialogContent className={widthClassName}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? (
-            <DialogDescription>{description}</DialogDescription>
+            // asChild + div so a ReactNode description (block content) is valid
+            // markup (DialogDescription renders a <p> otherwise).
+            <DialogDescription asChild>
+              <div className="text-text-mute">{description}</div>
+            </DialogDescription>
           ) : null}
         </DialogHeader>
         <DialogFooter>

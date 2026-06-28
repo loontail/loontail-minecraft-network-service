@@ -197,12 +197,14 @@ pub fn normalize_base64(encoded: &str) -> Result<String, Base64Error> {
 }
 
 /// The textures-lookup response: `GET /textures/{uuid}` →
-/// `{skin?:{url,variant},cape?:{url}}`. Variant is `CLASSIC`|`SLIM` (uppercase).
+/// `{skin:{url,variant}|null, cape:{url}|null}`. Variant is `CLASSIC`|`SLIM`
+/// (uppercase). Both keys are ALWAYS present (`null` when absent): the launcher's
+/// `TexturesLookupResponseSchema` declares them `nullable()` (key required, value
+/// may be null), so omitting a field fails its Zod parse and the post-upload URL
+/// lookup silently returns nothing. Do not re-add `skip_serializing_if` here.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TexturesLookupResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub skin: Option<LookupSkin>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cape: Option<LookupCape>,
 }
 
@@ -356,9 +358,13 @@ mod tests {
             json,
             "{\"skin\":{\"url\":\"u\",\"variant\":\"SLIM\"},\"cape\":{\"url\":\"c\"}}"
         );
-        // Empty lookup omits both keys.
+        // Empty lookup emits both keys as null (the launcher schema requires the
+        // keys present), not an empty object.
         let empty = TexturesLookupResponse::default();
-        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            "{\"skin\":null,\"cape\":null}"
+        );
     }
 
     #[test]

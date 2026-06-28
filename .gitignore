@@ -14,3 +14,4 @@ node_modules/
 /data/yggdrasil/keys/*.pem
 /data/textures/
 /data/bundle-registry/
+/data/catalog-media/

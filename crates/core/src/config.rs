@@ -20,6 +20,7 @@ pub struct Config {
     pub request_log: RequestLogConfig,
     pub yggdrasil: YggdrasilConfig,
     pub textures: TexturesConfig,
+    pub catalog: CatalogConfig,
     pub bundles: BundlesConfig,
     pub admin: AdminConfig,
 }
@@ -84,6 +85,15 @@ pub struct TexturesConfig {
     pub storage_root: String,
 }
 
+/// Catalog media (client poster/background/titleImage/screenshots) storage
+/// configuration.
+///
+/// Env var: `CATALOG_MEDIA_STORAGE_ROOT` (default `data/catalog-media`).
+#[derive(Debug, Clone)]
+pub struct CatalogConfig {
+    pub storage_root: String,
+}
+
 /// Bundle-registry storage configuration.
 ///
 /// Env vars: `BUNDLES_STORAGE_ROOT` (default `data/bundle-registry`),
@@ -142,6 +152,7 @@ impl Config {
             request_log: RequestLogConfig::from_env(),
             yggdrasil: YggdrasilConfig::from_env(),
             textures: TexturesConfig::from_env(),
+            catalog: CatalogConfig::from_env(),
             bundles: BundlesConfig::from_env(),
             admin: AdminConfig::from_env(),
         })
@@ -173,6 +184,15 @@ impl TexturesConfig {
         Self {
             storage_root: env::var("TEXTURES_STORAGE_ROOT")
                 .unwrap_or_else(|_| "data/textures".to_string()),
+        }
+    }
+}
+
+impl CatalogConfig {
+    fn from_env() -> Self {
+        Self {
+            storage_root: env::var("CATALOG_MEDIA_STORAGE_ROOT")
+                .unwrap_or_else(|_| "data/catalog-media".to_string()),
         }
     }
 }

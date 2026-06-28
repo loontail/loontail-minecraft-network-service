@@ -1,9 +1,9 @@
 import {
-  Boxes,
   LayoutDashboard,
-  Library,
   LogOut,
+  Package,
   ScrollText,
+  Shirt,
   Users,
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
@@ -16,9 +16,9 @@ import { cn } from "@/shared/lib/cn";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
+  { to: "/builds", label: "Builds", icon: Package, end: false },
   { to: "/users", label: "Users", icon: Users, end: false },
-  { to: "/catalog", label: "Catalog", icon: Library, end: false },
-  { to: "/bundles", label: "Bundles", icon: Boxes, end: false },
+  { to: "/textures", label: "Textures", icon: Shirt, end: false },
   { to: "/logs", label: "Logs & Traffic", icon: ScrollText, end: false },
 ] as const;
 

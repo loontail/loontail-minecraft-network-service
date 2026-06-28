@@ -16,6 +16,28 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${rounded} ${SIZE_UNITS[exponent]}`;
 }
 
+export function formatDate(value: string | null | undefined): string {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  return date.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+export function shortUuid(value: string | null | undefined): string {
+  if (!value) {
+    return "—";
+  }
+  return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
 export function formatDateTime(value: string | null | undefined): string {
   if (!value) {
     return "—";

@@ -19,8 +19,8 @@ pub use auth::{
     AdminUser, AuthUser, IssuedSession, YggdrasilUser,
 };
 pub use config::{
-    AdminConfig, BundlesConfig, Config, RateLimitConfig, RequestLogConfig, TexturesConfig,
-    YggdrasilConfig,
+    AdminConfig, BundlesConfig, CatalogConfig, Config, RateLimitConfig, RequestLogConfig,
+    TexturesConfig, YggdrasilConfig,
 };
 pub use error::{AppError, AppResult};
 pub use identity::{hash_password, verify_password};

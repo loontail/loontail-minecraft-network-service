@@ -405,6 +405,136 @@ async fn block_reset_and_revoke_tokens(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn last_admin_cannot_be_removed(pool: PgPool) {
+    let state = test_state(pool.clone());
+    ensure_bootstrap_admin(&pool, &state.config.admin)
+        .await
+        .unwrap();
+    let app = app(state);
+    let session = login(&app, "rootadmin", "rootpass123").await.unwrap();
+
+    // The bootstrap admin is the sole admin.
+    let admin_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM users WHERE normalized_username = 'rootadmin'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let mutate = |path: String, method: &'static str, json_body: Option<Value>| {
+        let app = app.clone();
+        let cookie = session.cookie_header();
+        let csrf = session.csrf.clone();
+        async move {
+            let body = match &json_body {
+                Some(v) => Body::from(v.to_string()),
+                None => Body::empty(),
+            };
+            app.oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(COOKIE, cookie)
+                    .header("x-csrf-token", csrf)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Delete the last admin → 409.
+    let resp = mutate(format!("/admin/users/{admin_id}"), "DELETE", None).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "deleting the last admin is refused"
+    );
+
+    // Block the last admin → 409.
+    let resp = mutate(format!("/admin/users/{admin_id}/block"), "POST", None).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "blocking the last admin is refused"
+    );
+
+    // Demote the last admin (is_admin=false) → 409.
+    let resp = mutate(
+        format!("/admin/users/{admin_id}"),
+        "PATCH",
+        Some(json!({ "isAdmin": false })),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "demoting the last admin is refused"
+    );
+
+    // The admin is still intact (usable: is_admin && not blocked).
+    let still_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_admin = true AND blocked = false)",
+    )
+    .bind(admin_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(still_admin, "last admin survives all three rejected ops");
+
+    // With a SECOND admin present, the same operations on the first one are allowed.
+    let second = loontail_core::identity::admin_create_user(
+        &pool,
+        loontail_core::identity::AdminCreateUser {
+            username: "second".into(),
+            email: "second@example.com".into(),
+            password: "secondpass".into(),
+            minecraft_uuid: None,
+            is_admin: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resp = mutate(
+        format!("/admin/users/{admin_id}"),
+        "PATCH",
+        Some(json!({ "isAdmin": false })),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "demotion allowed once a second admin exists"
+    );
+
+    // Demoting `rootadmin` revoked its sessions, so the original cookie is dead now.
+    // Log in as the surviving admin to drive the next mutation.
+    let session2 = login(&app, "second", "secondpass").await.unwrap();
+    // `second` is now the last admin and cannot be demoted in turn.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/users/{}", second.id))
+                .header(COOKIE, session2.cookie_header())
+                .header("x-csrf-token", &session2.csrf)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "isAdmin": false }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "the remaining admin becomes the protected last admin"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn analytics_overview_counts_seeded_rows(pool: PgPool) {
     let state = test_state(pool.clone());
     ensure_bootstrap_admin(&pool, &state.config.admin)

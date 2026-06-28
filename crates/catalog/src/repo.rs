@@ -1,15 +1,13 @@
 //! Catalog reads. All queries are runtime sqlx (no `query!` macros). The reads
 //! apply the public draft filter (`published_at IS NOT NULL`), i18n locale
 //! fallback (requested locale row, else the default-locale row, else any row),
-//! and only inline relations the caller asked to populate.
+//! and always inline relations (the native contract has no populate gating).
 
-use chrono::{DateTime, Utc};
 use loontail_core::error::AppResult;
-use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::dto::{ClientDto, KeywordDto, MediaDto, ServerDto};
+use crate::dto::{BundleSummaryDto, ClientAdminDto, ClientDto, KeywordDto, MediaDto, ServerDto};
 use crate::query::CatalogQuery;
 
 /// The locale used when neither the requested locale nor an explicit fallback is
@@ -19,17 +17,46 @@ pub const DEFAULT_LOCALE: &str = "en";
 #[derive(sqlx::FromRow)]
 struct ClientRow {
     id: Uuid,
-    seq: i64,
     slug: String,
     available: bool,
     minecraft_version: Option<String>,
     forge_version: Option<String>,
     fabric_version: Option<String>,
     runtime_version: Option<String>,
-    bundle_slug: Option<String>,
-    published_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    bundle_id: Option<Uuid>,
+}
+
+/// A client row plus the admin-only `published` flag (no draft filter). Used by
+/// [`list_clients_admin`]; splits into a plain [`ClientRow`] for DTO assembly.
+#[derive(sqlx::FromRow)]
+struct ClientAdminRow {
+    id: Uuid,
+    slug: String,
+    available: bool,
+    minecraft_version: Option<String>,
+    forge_version: Option<String>,
+    fabric_version: Option<String>,
+    runtime_version: Option<String>,
+    bundle_id: Option<Uuid>,
+    published: bool,
+}
+
+impl ClientAdminRow {
+    fn split(self) -> (ClientRow, bool) {
+        (
+            ClientRow {
+                id: self.id,
+                slug: self.slug,
+                available: self.available,
+                minecraft_version: self.minecraft_version,
+                forge_version: self.forge_version,
+                fabric_version: self.fabric_version,
+                runtime_version: self.runtime_version,
+                bundle_id: self.bundle_id,
+            },
+            self.published,
+        )
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -42,28 +69,15 @@ struct ClientLocaleRow {
 
 #[derive(sqlx::FromRow)]
 struct MediaRow {
-    seq: i64,
-    id: Uuid,
     role: String,
     url: String,
-    ext: Option<String>,
-    name: Option<String>,
-    hash: Option<String>,
     width: Option<i32>,
     height: Option<i32>,
-    size: Option<i32>,
-    formats: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
 }
 
 #[derive(sqlx::FromRow)]
 struct KeywordRow {
-    seq: i64,
     id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    published_at: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -74,46 +88,24 @@ struct KeywordLocaleRow {
 
 #[derive(sqlx::FromRow)]
 struct ServerRow {
-    seq: i64,
     id: Uuid,
     name: Option<String>,
     address: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    published_at: Option<DateTime<Utc>>,
 }
 
-const CLIENT_COLS: &str = "id, seq, slug, available, minecraft_version, forge_version, \
-    fabric_version, runtime_version, bundle_slug, published_at, created_at, updated_at";
+const CLIENT_COLS: &str = "id, slug, available, minecraft_version, forge_version, \
+    fabric_version, runtime_version, bundle_id";
 
-/// Empty-string media/version fields are kept as-is; only `bundle_slug` collapses
-/// empty → null to mirror the launcher's `coerceBundleSlug`.
-fn collapse_bundle_slug(value: Option<String>) -> Option<String> {
-    value.and_then(|v| {
-        let t = v.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    })
+/// Render an entity UUID as the contract's undashed 32-char hex `id`.
+fn id_hex(id: Uuid) -> String {
+    id.simple().to_string()
 }
 
 fn media_dto(row: MediaRow) -> MediaDto {
     MediaDto {
-        id: row.seq,
-        document_id: row.id.simple().to_string(),
         url: row.url,
-        ext: row.ext.unwrap_or_default(),
-        width: row.width.unwrap_or(0) as i64,
-        height: row.height.unwrap_or(0) as i64,
-        size: row.size.unwrap_or(0) as i64,
-        name: row.name.unwrap_or_default(),
-        hash: row.hash.unwrap_or_default(),
-        formats: row.formats,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        published_at: None,
+        width: row.width,
+        height: row.height,
     }
 }
 
@@ -155,7 +147,6 @@ async fn client_locale(
 async fn client_media(
     pool: &PgPool,
     client_id: Uuid,
-    query: &CatalogQuery,
 ) -> AppResult<(
     Option<MediaDto>,
     Option<MediaDto>,
@@ -163,8 +154,7 @@ async fn client_media(
     Vec<MediaDto>,
 )> {
     let rows = sqlx::query_as::<_, MediaRow>(
-        "SELECT seq, id, role, url, ext, name, hash, width, height, size, formats, \
-         created_at, updated_at FROM catalog_media WHERE client_id = $1 \
+        "SELECT role, url, width, height FROM catalog_media WHERE client_id = $1 \
          ORDER BY sort_order, created_at",
     )
     .bind(client_id)
@@ -178,18 +168,10 @@ async fn client_media(
 
     for row in rows {
         match row.role.as_str() {
-            "background" if query.wants_background() && background.is_none() => {
-                background = Some(media_dto(row));
-            }
-            "poster" if query.wants_poster() && poster.is_none() => {
-                poster = Some(media_dto(row));
-            }
-            "titleImage" if query.wants_title_image() && title_image.is_none() => {
-                title_image = Some(media_dto(row));
-            }
-            "screenshot" if query.wants_screenshots() => {
-                screenshots.push(media_dto(row));
-            }
+            "background" if background.is_none() => background = Some(media_dto(row)),
+            "poster" if poster.is_none() => poster = Some(media_dto(row)),
+            "titleImage" if title_image.is_none() => title_image = Some(media_dto(row)),
+            "screenshot" => screenshots.push(media_dto(row)),
             _ => {}
         }
     }
@@ -203,7 +185,7 @@ async fn client_keywords(
     requested: &str,
 ) -> AppResult<Vec<KeywordDto>> {
     let rows = sqlx::query_as::<_, KeywordRow>(
-        "SELECT k.seq, k.id, k.created_at, k.updated_at, k.published_at \
+        "SELECT k.id \
          FROM catalog_keywords k \
          JOIN catalog_client_keywords ck ON ck.keyword_id = k.id \
          WHERE ck.client_id = $1 AND k.published_at IS NOT NULL \
@@ -217,12 +199,8 @@ async fn client_keywords(
     for row in rows {
         let title = keyword_title(pool, row.id, requested).await?;
         out.push(KeywordDto {
-            id: row.seq,
-            document_id: row.id.simple().to_string(),
+            id: id_hex(row.id),
             title,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            published_at: row.published_at,
         });
     }
     Ok(out)
@@ -243,7 +221,7 @@ async fn keyword_title(pool: &PgPool, keyword_id: Uuid, requested: &str) -> AppR
 
 async fn client_servers(pool: &PgPool, client_id: Uuid) -> AppResult<Vec<ServerDto>> {
     let rows = sqlx::query_as::<_, ServerRow>(
-        "SELECT s.seq, s.id, s.name, s.address, s.created_at, s.updated_at, s.published_at \
+        "SELECT s.id, s.name, s.address \
          FROM catalog_servers s \
          JOIN catalog_client_servers cs ON cs.server_id = s.id \
          WHERE cs.client_id = $1 AND s.published_at IS NOT NULL \
@@ -255,15 +233,47 @@ async fn client_servers(pool: &PgPool, client_id: Uuid) -> AppResult<Vec<ServerD
     Ok(rows
         .into_iter()
         .map(|r| ServerDto {
-            id: r.seq,
-            document_id: r.id.simple().to_string(),
+            id: id_hex(r.id),
             name: r.name,
             address: r.address,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            published_at: r.published_at,
         })
         .collect())
+}
+
+#[derive(sqlx::FromRow)]
+struct BundleSummaryRow {
+    slug: String,
+    version: Option<String>,
+    status: String,
+    files_count: i64,
+}
+
+/// Read the linked bundle's summary for inlining into [`ClientDto`]. Returns
+/// `None` when the client has no `bundle_id` (legacy/unlinked build) or, defensively,
+/// if the referenced bundle row is missing — a build owns its bundle 1:1 and the two
+/// are deleted together, so a live client never outlives its bundle, but the read
+/// stays tolerant. `manifestUrl` is the frozen bundle-registry manifest route,
+/// derived from the bundle slug.
+async fn bundle_summary(
+    pool: &PgPool,
+    bundle_id: Option<Uuid>,
+) -> AppResult<Option<BundleSummaryDto>> {
+    let Some(bundle_id) = bundle_id else {
+        return Ok(None);
+    };
+    let row = sqlx::query_as::<_, BundleSummaryRow>(
+        "SELECT slug, version, status, files_count::BIGINT AS files_count FROM bundles WHERE id = $1",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| BundleSummaryDto {
+        manifest_url: format!("/api/bundle-registry/builds/{}/manifest", r.slug),
+        slug: r.slug,
+        version: r.version,
+        status: r.status,
+        files_count: r.files_count,
+    }))
 }
 
 async fn build_client_dto(
@@ -273,21 +283,13 @@ async fn build_client_dto(
 ) -> AppResult<ClientDto> {
     let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
     let (title, description, short_description) = client_locale(pool, row.id, locale).await?;
-    let (background, poster, title_image, screenshots) = client_media(pool, row.id, query).await?;
-    let keywords = if query.wants_keywords() {
-        client_keywords(pool, row.id, locale).await?
-    } else {
-        Vec::new()
-    };
-    let servers = if query.wants_servers() {
-        client_servers(pool, row.id).await?
-    } else {
-        Vec::new()
-    };
+    let (background, poster, title_image, screenshots) = client_media(pool, row.id).await?;
+    let keywords = client_keywords(pool, row.id, locale).await?;
+    let servers = client_servers(pool, row.id).await?;
+    let bundle = bundle_summary(pool, row.bundle_id).await?;
 
     Ok(ClientDto {
-        id: row.seq,
-        document_id: row.id.simple().to_string(),
+        id: id_hex(row.id),
         slug: row.slug,
         title,
         description: description.unwrap_or_default(),
@@ -297,20 +299,21 @@ async fn build_client_dto(
         forge_version: row.forge_version,
         fabric_version: row.fabric_version,
         runtime_version: row.runtime_version,
-        bundle_slug: collapse_bundle_slug(row.bundle_slug),
+        // Wire `bundleSlug` is derived from the VERIFIED bundle only: a dangling
+        // `bundle_slug` column (bundle row missing / never linked) reads null so no
+        // consumer chases a slug with no bundle behind it.
+        bundle_slug: bundle.as_ref().map(|b| b.slug.clone()),
         background,
         poster,
         title_image,
         screenshots,
         keywords,
         servers,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        published_at: row.published_at,
+        bundle,
     })
 }
 
-/// List published clients in the launcher's shape, applying populate + locale.
+/// List published clients in the native shape, applying the locale.
 pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<ClientDto>> {
     let rows = sqlx::query_as::<_, ClientRow>(&format!(
         "SELECT {CLIENT_COLS} FROM catalog_clients \
@@ -326,43 +329,47 @@ pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<
     Ok(out)
 }
 
-/// Fetch one published client by its numeric `seq`, UUID `documentId`, or slug.
+/// List ALL clients including drafts in the native shape, plus the admin-only
+/// `published` flag. Admin-only; the public [`list_clients`] keeps the draft
+/// filter so unpublished builds stay hidden from the launcher.
+pub async fn list_clients_admin(
+    pool: &PgPool,
+    query: &CatalogQuery,
+) -> AppResult<Vec<ClientAdminDto>> {
+    let rows = sqlx::query_as::<_, ClientAdminRow>(&format!(
+        "SELECT {CLIENT_COLS}, (published_at IS NOT NULL) AS published \
+         FROM catalog_clients ORDER BY sort_order, created_at"
+    ))
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (client_row, published) = row.split();
+        let client = build_client_dto(pool, client_row, query).await?;
+        out.push(ClientAdminDto { client, published });
+    }
+    Ok(out)
+}
+
+/// Fetch one published client by its UUID `id` (undashed or dashed) or slug.
 pub async fn get_client(
     pool: &PgPool,
     ident: &str,
     query: &CatalogQuery,
 ) -> AppResult<Option<ClientDto>> {
-    let row = fetch_client_row(pool, ident, true).await?;
+    let row = fetch_client_row(pool, ident).await?;
     match row {
         Some(row) => Ok(Some(build_client_dto(pool, row, query).await?)),
         None => Ok(None),
     }
 }
 
-async fn fetch_client_row(
-    pool: &PgPool,
-    ident: &str,
-    published_only: bool,
-) -> AppResult<Option<ClientRow>> {
-    let draft = if published_only {
-        " AND published_at IS NOT NULL"
-    } else {
-        ""
-    };
-    if let Ok(seq) = ident.parse::<i64>() {
+async fn fetch_client_row(pool: &PgPool, ident: &str) -> AppResult<Option<ClientRow>> {
+    if let Ok(id) = parse_id(ident) {
         let row = sqlx::query_as::<_, ClientRow>(&format!(
-            "SELECT {CLIENT_COLS} FROM catalog_clients WHERE seq = $1{draft}"
-        ))
-        .bind(seq)
-        .fetch_optional(pool)
-        .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    if let Ok(id) = Uuid::parse_str(ident) {
-        let row = sqlx::query_as::<_, ClientRow>(&format!(
-            "SELECT {CLIENT_COLS} FROM catalog_clients WHERE id = $1{draft}"
+            "SELECT {CLIENT_COLS} FROM catalog_clients \
+             WHERE id = $1 AND published_at IS NOT NULL"
         ))
         .bind(id)
         .fetch_optional(pool)
@@ -372,7 +379,8 @@ async fn fetch_client_row(
         }
     }
     let row = sqlx::query_as::<_, ClientRow>(&format!(
-        "SELECT {CLIENT_COLS} FROM catalog_clients WHERE slug = $1{draft}"
+        "SELECT {CLIENT_COLS} FROM catalog_clients \
+         WHERE slug = $1 AND published_at IS NOT NULL"
     ))
     .bind(ident)
     .fetch_optional(pool)
@@ -380,10 +388,16 @@ async fn fetch_client_row(
     Ok(row)
 }
 
+/// Parse an `id` ident in the contract's undashed 32-char hex form (also accepts a
+/// dashed UUID for tolerance).
+fn parse_id(ident: &str) -> Result<Uuid, uuid::Error> {
+    Uuid::parse_str(ident)
+}
+
 /// List published keywords (locale-resolved titles).
 pub async fn list_keywords(pool: &PgPool, locale: &str) -> AppResult<Vec<KeywordDto>> {
     let rows = sqlx::query_as::<_, KeywordRow>(
-        "SELECT seq, id, created_at, updated_at, published_at FROM catalog_keywords \
+        "SELECT id FROM catalog_keywords \
          WHERE published_at IS NOT NULL ORDER BY created_at",
     )
     .fetch_all(pool)
@@ -392,65 +406,37 @@ pub async fn list_keywords(pool: &PgPool, locale: &str) -> AppResult<Vec<Keyword
     for row in rows {
         let title = keyword_title(pool, row.id, locale).await?;
         out.push(KeywordDto {
-            id: row.seq,
-            document_id: row.id.simple().to_string(),
+            id: id_hex(row.id),
             title,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            published_at: row.published_at,
         });
     }
     Ok(out)
 }
 
-/// Fetch one published keyword by `seq`, UUID, or slug.
+/// Fetch one published keyword by UUID `id` or slug.
 pub async fn get_keyword(
     pool: &PgPool,
     ident: &str,
     locale: &str,
 ) -> AppResult<Option<KeywordDto>> {
-    let row = fetch_keyword_row(pool, ident, true).await?;
+    let row = fetch_keyword_row(pool, ident).await?;
     match row {
         Some(row) => {
             let title = keyword_title(pool, row.id, locale).await?;
             Ok(Some(KeywordDto {
-                id: row.seq,
-                document_id: row.id.simple().to_string(),
+                id: id_hex(row.id),
                 title,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                published_at: row.published_at,
             }))
         }
         None => Ok(None),
     }
 }
 
-async fn fetch_keyword_row(
-    pool: &PgPool,
-    ident: &str,
-    published_only: bool,
-) -> AppResult<Option<KeywordRow>> {
-    let draft = if published_only {
-        " AND published_at IS NOT NULL"
-    } else {
-        ""
-    };
-    const COLS: &str = "seq, id, created_at, updated_at, published_at";
-    if let Ok(seq) = ident.parse::<i64>() {
+async fn fetch_keyword_row(pool: &PgPool, ident: &str) -> AppResult<Option<KeywordRow>> {
+    const COLS: &str = "id";
+    if let Ok(id) = parse_id(ident) {
         let row = sqlx::query_as::<_, KeywordRow>(&format!(
-            "SELECT {COLS} FROM catalog_keywords WHERE seq = $1{draft}"
-        ))
-        .bind(seq)
-        .fetch_optional(pool)
-        .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    if let Ok(id) = Uuid::parse_str(ident) {
-        let row = sqlx::query_as::<_, KeywordRow>(&format!(
-            "SELECT {COLS} FROM catalog_keywords WHERE id = $1{draft}"
+            "SELECT {COLS} FROM catalog_keywords WHERE id = $1 AND published_at IS NOT NULL"
         ))
         .bind(id)
         .fetch_optional(pool)
@@ -460,7 +446,7 @@ async fn fetch_keyword_row(
         }
     }
     let row = sqlx::query_as::<_, KeywordRow>(&format!(
-        "SELECT {COLS} FROM catalog_keywords WHERE slug = $1{draft}"
+        "SELECT {COLS} FROM catalog_keywords WHERE slug = $1 AND published_at IS NOT NULL"
     ))
     .bind(ident)
     .fetch_optional(pool)
@@ -471,57 +457,33 @@ async fn fetch_keyword_row(
 /// List published servers.
 pub async fn list_servers(pool: &PgPool) -> AppResult<Vec<ServerDto>> {
     let rows = sqlx::query_as::<_, ServerRow>(
-        "SELECT seq, id, name, address, created_at, updated_at, published_at \
-         FROM catalog_servers WHERE published_at IS NOT NULL ORDER BY created_at",
+        "SELECT id, name, address FROM catalog_servers \
+         WHERE published_at IS NOT NULL ORDER BY created_at",
     )
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(server_dto).collect())
 }
 
-/// Fetch one published server by `seq`, UUID, or slug.
+/// Fetch one published server by UUID `id` or slug.
 pub async fn get_server(pool: &PgPool, ident: &str) -> AppResult<Option<ServerDto>> {
-    let row = fetch_server_row(pool, ident, true).await?;
+    let row = fetch_server_row(pool, ident).await?;
     Ok(row.map(server_dto))
 }
 
 fn server_dto(r: ServerRow) -> ServerDto {
     ServerDto {
-        id: r.seq,
-        document_id: r.id.simple().to_string(),
+        id: id_hex(r.id),
         name: r.name,
         address: r.address,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-        published_at: r.published_at,
     }
 }
 
-async fn fetch_server_row(
-    pool: &PgPool,
-    ident: &str,
-    published_only: bool,
-) -> AppResult<Option<ServerRow>> {
-    let draft = if published_only {
-        " AND published_at IS NOT NULL"
-    } else {
-        ""
-    };
-    const COLS: &str = "seq, id, name, address, created_at, updated_at, published_at";
-    if let Ok(seq) = ident.parse::<i64>() {
+async fn fetch_server_row(pool: &PgPool, ident: &str) -> AppResult<Option<ServerRow>> {
+    const COLS: &str = "id, name, address";
+    if let Ok(id) = parse_id(ident) {
         let row = sqlx::query_as::<_, ServerRow>(&format!(
-            "SELECT {COLS} FROM catalog_servers WHERE seq = $1{draft}"
-        ))
-        .bind(seq)
-        .fetch_optional(pool)
-        .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    if let Ok(id) = Uuid::parse_str(ident) {
-        let row = sqlx::query_as::<_, ServerRow>(&format!(
-            "SELECT {COLS} FROM catalog_servers WHERE id = $1{draft}"
+            "SELECT {COLS} FROM catalog_servers WHERE id = $1 AND published_at IS NOT NULL"
         ))
         .bind(id)
         .fetch_optional(pool)
@@ -531,7 +493,7 @@ async fn fetch_server_row(
         }
     }
     let row = sqlx::query_as::<_, ServerRow>(&format!(
-        "SELECT {COLS} FROM catalog_servers WHERE slug = $1{draft}"
+        "SELECT {COLS} FROM catalog_servers WHERE slug = $1 AND published_at IS NOT NULL"
     ))
     .bind(ident)
     .fetch_optional(pool)

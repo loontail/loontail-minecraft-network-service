@@ -6,10 +6,11 @@ import { errorMessage } from "@/shared/api/toast";
 import type {
   AttachMedia,
   CatalogMutationResult,
-  Client,
-  Keyword,
-  ListEnvelope,
-  Server,
+  ClientAdminList,
+  KeywordList,
+  MediaListResponse,
+  ServerList,
+  UploadMediaResult,
   UpsertClient,
   UpsertKeyword,
   UpsertServer,
@@ -18,22 +19,24 @@ import type {
 export const catalogKeys = {
   all: ["catalog"] as const,
   clients: () => [...catalogKeys.all, "clients"] as const,
+  adminClients: () => [...catalogKeys.all, "clients", "admin"] as const,
   keywords: () => [...catalogKeys.all, "keywords"] as const,
   servers: () => [...catalogKeys.all, "servers"] as const,
+  media: (clientId: string) => [...catalogKeys.all, "media", clientId] as const,
 };
 
-// Reads come from the public catalog surface (Strapi envelope). Clients need
-// their relations + media populated; admin writes target /admin/catalog by the
-// entity's `documentId` (the UUID).
-const CLIENTS_POPULATE =
-  "/api/clients?populate[background]=true&populate[poster]=true&populate[titleImage]=true&populate[screenshots]=true&populate[keywords]=true&populate[servers]=true";
+// Reads come from the public catalog surface (flat native shape). Relations are
+// always inlined by the API; admin writes target /admin/catalog by the entity's
+// `id` (the UUID).
 
-export function useClients() {
+// The admin clients list includes drafts (and the real publish state); the public
+// `/api/clients` hides unpublished builds, so the admin table must use this.
+export function useAdminClients() {
   return useQuery({
-    queryKey: catalogKeys.clients(),
+    queryKey: catalogKeys.adminClients(),
     queryFn: async () => {
-      const res = await api.get<ListEnvelope<Client>>(CLIENTS_POPULATE);
-      return res.data;
+      const res = await api.get<ClientAdminList>("/admin/catalog/clients");
+      return res.clients;
     },
   });
 }
@@ -42,8 +45,8 @@ export function useKeywords() {
   return useQuery({
     queryKey: catalogKeys.keywords(),
     queryFn: async () => {
-      const res = await api.get<ListEnvelope<Keyword>>("/api/keywords");
-      return res.data;
+      const res = await api.get<KeywordList>("/api/keywords");
+      return res.keywords;
     },
   });
 }
@@ -52,8 +55,8 @@ export function useServers() {
   return useQuery({
     queryKey: catalogKeys.servers(),
     queryFn: async () => {
-      const res = await api.get<ListEnvelope<Server>>("/api/servers");
-      return res.data;
+      const res = await api.get<ServerList>("/api/servers");
+      return res.servers;
     },
   });
 }
@@ -132,6 +135,64 @@ export function useAttachMedia() {
   });
 }
 
+export function useClientMedia(clientId: string | undefined) {
+  return useQuery({
+    queryKey: catalogKeys.media(clientId ?? ""),
+    queryFn: async () => {
+      const res = await api.get<MediaListResponse>(
+        `/admin/catalog/clients/${clientId}/media`,
+      );
+      return res.media;
+    },
+    enabled: Boolean(clientId),
+  });
+}
+
+export function useUploadMedia() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      clientId,
+      role,
+      file,
+    }: {
+      clientId: string;
+      role: string;
+      file: File;
+    }) => {
+      const fd = new FormData();
+      fd.append("role", role);
+      fd.append("file", file);
+      return api.upload<UploadMediaResult>(
+        `/admin/catalog/clients/${clientId}/media/upload`,
+        fd,
+      );
+    },
+    onSuccess: (_, { clientId }) => {
+      qc.invalidateQueries({ queryKey: catalogKeys.media(clientId) });
+      qc.invalidateQueries({ queryKey: catalogKeys.clients() });
+      toast.success("Media uploaded");
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Failed to upload media")),
+  });
+}
+
+export function useDeleteMedia() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clientId, mediaId }: { clientId: string; mediaId: string }) =>
+      api.delete<void>(`/admin/catalog/clients/${clientId}/media/${mediaId}`),
+    onSuccess: (_, { clientId }) => {
+      qc.invalidateQueries({ queryKey: catalogKeys.media(clientId) });
+      qc.invalidateQueries({ queryKey: catalogKeys.clients() });
+      toast.success("Media deleted");
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Failed to delete media")),
+  });
+}
+
 export function useAttachKeyword() {
   const qc = useQueryClient();
   return useMutation({
@@ -157,6 +218,34 @@ export function useAttachServer() {
     },
     onError: (error) =>
       toast.error(errorMessage(error, "Failed to attach server")),
+  });
+}
+
+export function useDetachKeyword() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clientId, keywordId }: { clientId: string; keywordId: string }) =>
+      api.delete<void>(`/admin/catalog/clients/${clientId}/keywords/${keywordId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: catalogKeys.clients() });
+      toast.success("Keyword removed");
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Failed to remove keyword")),
+  });
+}
+
+export function useDetachServer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clientId, serverId }: { clientId: string; serverId: string }) =>
+      api.delete<void>(`/admin/catalog/clients/${clientId}/servers/${serverId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: catalogKeys.clients() });
+      toast.success("Server removed");
+    },
+    onError: (error) =>
+      toast.error(errorMessage(error, "Failed to remove server")),
   });
 }
 
@@ -187,22 +276,6 @@ export function useDeleteKeyword() {
     },
     onError: (error) =>
       toast.error(errorMessage(error, "Failed to delete keyword")),
-  });
-}
-
-export function usePublishKeyword() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, publish }: { id: string; publish: boolean }) =>
-      api.post<CatalogMutationResult>(
-        `/admin/catalog/keywords/${id}/${publish ? "publish" : "unpublish"}`,
-      ),
-    onSuccess: (_, { publish }) => {
-      qc.invalidateQueries({ queryKey: catalogKeys.keywords() });
-      toast.success(publish ? "Keyword published" : "Keyword unpublished");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to change publish state")),
   });
 }
 
@@ -250,18 +323,3 @@ export function useDeleteServer() {
   });
 }
 
-export function usePublishServer() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, publish }: { id: string; publish: boolean }) =>
-      api.post<CatalogMutationResult>(
-        `/admin/catalog/servers/${id}/${publish ? "publish" : "unpublish"}`,
-      ),
-    onSuccess: (_, { publish }) => {
-      qc.invalidateQueries({ queryKey: catalogKeys.servers() });
-      toast.success(publish ? "Server published" : "Server unpublished");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to change publish state")),
-  });
-}

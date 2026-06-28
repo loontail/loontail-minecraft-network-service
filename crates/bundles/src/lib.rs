@@ -21,6 +21,19 @@ use axum::Router;
 
 use loontail_core::AppState;
 
+/// Provisioning + teardown of a build's owned bundle, reusable across crates (the
+/// catalog owns a 1:1 bundle per build). [`provision_bundle`] inserts the draft row
+/// and its on-disk directory; [`provision_bundle_row`] + [`ensure_bundle_dir`] are
+/// the tx-capable split (DB row inside the caller's transaction, dir after commit).
+/// [`find_bundle_id_by_slug`] is the find half. [`delete_owned_bundle`] (and its
+/// tx-capable parts [`delete_bundle_row`] / [`bundle_slug_by_id`] / [`remove_bundle_dir`])
+/// fully tear a bundle down (row + CASCADE artifacts + on-disk files) so deleting a
+/// build never orphans its bundle.
+pub use repo::{
+    bundle_slug_by_id, delete_bundle_row, delete_owned_bundle, ensure_bundle_dir,
+    find_bundle_id_by_slug, provision_bundle, provision_bundle_row, remove_bundle_dir,
+};
+
 /// Hard cap on a single bundle upload (ZIP archive or individual file): 10 GiB,
 /// matching the archive's uncompressed ceiling. Enforced both as axum's
 /// `DefaultBodyLimit` on the route and as a running byte cap while streaming each
@@ -69,6 +82,7 @@ pub fn admin_routes() -> Router<AppState> {
         )
         .route("/builds/{slug}/folders", post(admin::create_folder))
         .route("/builds/{slug}/files/bulk-delete", post(admin::bulk_delete))
+        .route("/builds/{slug}/files/move", post(admin::move_files))
         .route(
             "/builds/{slug}/files/{entryId}",
             delete(admin::delete_file).put(admin::toggle_download_once),
@@ -76,6 +90,10 @@ pub fn admin_routes() -> Router<AppState> {
         .route(
             "/builds/{slug}/files/{entryId}/rename",
             post(admin::rename_file),
+        )
+        .route(
+            "/builds/{slug}/files/{entryId}/move",
+            post(admin::move_file),
         )
         .route(
             "/builds/{slug}/files/{entryId}/rehash",

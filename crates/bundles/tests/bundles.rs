@@ -412,6 +412,64 @@ async fn toggle_download_once_reflects_in_manifest(pool: PgPool) {
     assert_eq!(entry["downloadOnce"], true);
 }
 
+/// `upsert_artifact` is an `INSERT ... ON CONFLICT DO UPDATE` that deliberately omits
+/// `download_once` from the update set — so a re-upload (rescan) of an existing path
+/// must NOT reset an operator's `downloadOnce = true` toggle.
+#[sqlx::test(migrations = "../../migrations")]
+async fn reupload_preserves_download_once(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "preserve-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    let entry_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT a.id FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+         WHERE b.slug = $1 AND a.relative_path = 'mods/alpha.jar'",
+    )
+    .bind(slug)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Toggle download_once = true via the admin route.
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/builds/{slug}/files/{entry_id}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({ "downloadOnce": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Re-upload the same archive — the existing artifact row is upserted (ON CONFLICT).
+    assert_eq!(
+        upload_zip(&state, &token, slug, &build_test_zip()).await,
+        StatusCode::OK
+    );
+
+    let download_once: bool =
+        sqlx::query_scalar("SELECT download_once FROM bundle_artifacts WHERE id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        download_once,
+        "re-upload preserved the download_once toggle"
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn public_reads_require_a_session(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
@@ -551,4 +609,287 @@ async fn admin_routes_require_admin(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ----- Wave D: file-manager move endpoints -----
+
+/// Look up an artifact id by its exact `relative_path` within a build.
+async fn artifact_id(pool: &PgPool, slug: &str, relative_path: &str) -> uuid::Uuid {
+    sqlx::query_scalar(
+        "SELECT a.id FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+         WHERE b.slug = $1 AND a.relative_path = $2",
+    )
+    .bind(slug)
+    .bind(relative_path)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `category` column for an artifact path (the manifest grouping key).
+async fn artifact_category(pool: &PgPool, slug: &str, relative_path: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT a.category FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+         WHERE b.slug = $1 AND a.relative_path = $2",
+    )
+    .bind(slug)
+    .bind(relative_path)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn read_manifest(tmp: &Path, slug: &str) -> serde_json::Value {
+    let manifest_path = tmp.join("builds").join(slug).join("artifacts.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+/// POST a JSON body to an admin route, returning the response status + body bytes.
+async fn admin_post_json(
+    state: &AppState,
+    token: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> StatusCode {
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.status()
+}
+
+/// Single move across a top-level dir updates `category`, moves the file on disk, and
+/// the regenerated manifest reflects the new path under the new category group.
+#[sqlx::test(migrations = "../../migrations")]
+async fn single_move_updates_category_and_manifest(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "move-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    // mods/alpha.jar -> config/alpha.jar (category mods -> config).
+    let id = artifact_id(&pool, slug, "mods/alpha.jar").await;
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/{id}/move"),
+        serde_json::json!({ "targetDir": "config" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "move should succeed");
+
+    // Row path + category re-derived.
+    assert_eq!(
+        artifact_category(&pool, slug, "config/alpha.jar").await,
+        "config"
+    );
+    // File physically moved.
+    let files_root = tmp.path().join("builds").join(slug).join("files");
+    assert!(files_root.join("config").join("alpha.jar").exists());
+    assert!(!files_root.join("mods").join("alpha.jar").exists());
+
+    // Manifest reflects the new path under the new category group.
+    let json = read_manifest(tmp.path(), slug);
+    let config = json["config"].as_array().unwrap();
+    assert!(
+        config.iter().any(|e| e["path"] == "config/alpha.jar"),
+        "manifest lists the moved file under config"
+    );
+    let mods = json["mods"].as_array().unwrap();
+    assert!(
+        !mods.iter().any(|e| e["path"] == "mods/alpha.jar"),
+        "manifest no longer lists the file under mods"
+    );
+}
+
+/// Multi-move of N entries into one target dir in a single request; one manifest regen.
+#[sqlx::test(migrations = "../../migrations")]
+async fn multi_move_relocates_all_entries(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "multi-move-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    // Move mods/alpha.jar AND config/settings.cfg into a fresh "vault" dir.
+    let alpha = artifact_id(&pool, slug, "mods/alpha.jar").await;
+    let cfg = artifact_id(&pool, slug, "config/settings.cfg").await;
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/move"),
+        serde_json::json!({ "ids": [alpha, cfg], "targetDir": "vault" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "multi-move should succeed");
+
+    assert_eq!(
+        artifact_category(&pool, slug, "vault/alpha.jar").await,
+        "vault"
+    );
+    assert_eq!(
+        artifact_category(&pool, slug, "vault/settings.cfg").await,
+        "vault"
+    );
+
+    let files_root = tmp.path().join("builds").join(slug).join("files");
+    assert!(files_root.join("vault").join("alpha.jar").exists());
+    assert!(files_root.join("vault").join("settings.cfg").exists());
+    assert!(!files_root.join("mods").join("alpha.jar").exists());
+
+    let json = read_manifest(tmp.path(), slug);
+    let vault = json["vault"].as_array().unwrap();
+    assert!(vault.iter().any(|e| e["path"] == "vault/alpha.jar"));
+    assert!(vault.iter().any(|e| e["path"] == "vault/settings.cfg"));
+}
+
+/// Moving a folder into its own descendant must be a 4xx (BadRequest), not a 500.
+#[sqlx::test(migrations = "../../migrations")]
+async fn move_folder_into_own_descendant_is_4xx(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "self-move-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    // The "mods" folder row exists (mods/sub/beta.jar implies mods + mods/sub dirs).
+    let mods_id = artifact_id(&pool, slug, "mods").await;
+    // Try to move "mods" into "mods/sub" -> new path "mods/sub/mods", a descendant.
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/{mods_id}/move"),
+        serde_json::json!({ "targetDir": "mods/sub" }),
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "self-into-descendant must be 4xx, got {status}"
+    );
+    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// Moving onto an existing path returns a clean 409 (not a unique-index 500).
+#[sqlx::test(migrations = "../../migrations")]
+async fn move_onto_existing_path_is_409(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "collide-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    // Put a file at config/alpha.jar, then try to move mods/alpha.jar onto config (same name).
+    // Upload a second alpha under config so the destination is occupied.
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let boundary = "----b";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"alpha.jar\"\r\n\r\n",
+    );
+    body.extend_from_slice(b"dupe");
+    body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"targetPath\"\r\n\r\n");
+    body.extend_from_slice(b"config/alpha.jar");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/builds/{slug}/files"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "seed config/alpha.jar");
+
+    // Now move mods/alpha.jar into config -> collides with config/alpha.jar.
+    let id = artifact_id(&pool, slug, "mods/alpha.jar").await;
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/{id}/move"),
+        serde_json::json!({ "targetDir": "config" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "collision must be 409");
+
+    // The source row is untouched (tx rolled back).
+    assert_eq!(
+        artifact_category(&pool, slug, "mods/alpha.jar").await,
+        "mods"
+    );
+}
+
+/// Regression: a normal rename (the existing endpoint, now sharing move_subtree) still
+/// moves the file + descendants and updates the manifest.
+#[sqlx::test(migrations = "../../migrations")]
+async fn rename_still_works_after_refactor(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "rename-build";
+
+    create_build(&state, &token, slug).await;
+    upload_zip(&state, &token, slug, &build_test_zip()).await;
+
+    // Rename the "mods" folder to "plugins" — children follow.
+    let mods_id = artifact_id(&pool, slug, "mods").await;
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/{mods_id}/rename"),
+        serde_json::json!({ "newRelativePath": "plugins" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rename should succeed");
+
+    // Folder + descendants rewritten, category re-derived.
+    assert_eq!(
+        artifact_category(&pool, slug, "plugins/alpha.jar").await,
+        "plugins"
+    );
+    assert_eq!(
+        artifact_category(&pool, slug, "plugins/sub/beta.jar").await,
+        "plugins"
+    );
+    let files_root = tmp.path().join("builds").join(slug).join("files");
+    assert!(files_root.join("plugins").join("alpha.jar").exists());
+    assert!(files_root
+        .join("plugins")
+        .join("sub")
+        .join("beta.jar")
+        .exists());
+    assert!(!files_root.join("mods").exists());
+
+    let json = read_manifest(tmp.path(), slug);
+    let plugins = json["plugins"].as_array().unwrap();
+    assert!(plugins.iter().any(|e| e["path"] == "plugins/alpha.jar"));
+    assert!(plugins.iter().any(|e| e["path"] == "plugins/sub/beta.jar"));
+    assert!(json.get("mods").is_none(), "old category group is gone");
 }
