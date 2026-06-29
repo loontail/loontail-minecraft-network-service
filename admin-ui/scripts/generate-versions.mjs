@@ -18,26 +18,47 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT_PATH = resolve(__dirname, "../public/versions.json");
 
-// Java majors always offered in the picker regardless of what we manage to
-// resolve — the common LTS/runtime set plus the newest known. Resolved majors
-// are merged on top (deduped, descending) so a build never ships an empty Java
-// dropdown.
-const DEFAULT_JAVA = [25, 21, 17, 16, 8];
+// Java runtime COMPONENTS always offered in the picker regardless of what we
+// manage to resolve — the well-known Mojang java-runtime set with their majors.
+// Resolved components are merged on top (deduped, newest versionName per
+// component, descending by major) so a build never ships an empty Java dropdown.
+// The launcher passes the chosen `component` straight to the kit as
+// `runtime.component`; a bare major would crash install ("Runtime component N
+// not available"), so the picker must speak component NAMES, never numbers.
+const DEFAULT_JAVA = [
+  { component: "java-runtime-epsilon", major: 24 },
+  { component: "java-runtime-delta", major: 21 },
+  { component: "java-runtime-gamma", major: 17 },
+  { component: "java-runtime-beta", major: 17 },
+  { component: "java-runtime-alpha", major: 16 },
+  { component: "jre-legacy", major: 8 },
+];
+
+// The non-JRE pseudo-component is never a launchable Java runtime — exclude it.
+const EXCLUDED_COMPONENTS = new Set(["minecraft-java-exe"]);
 
 // Bound the per-MC manifest resolution cost: each release needs one extra
-// (cached) HTTP round-trip to read its `javaVersion.majorVersion`. Resolve only
+// (cached) HTTP round-trip to read its `javaVersion.component`. Resolve only
 // the newest N releases; set to 0 to skip the Java step entirely (offline gate).
 const RESOLVE_LIMIT = Number(process.env.VERSIONS_JAVA_LIMIT ?? 30);
 const RESOLVE_CONCURRENCY = 6;
 
+function javaLabel(component, major) {
+  return Number.isFinite(major) ? `Java ${major} — ${component}` : component;
+}
+
 // Minimal committed fallback used only when no seed exists yet AND generation
 // fails. The real seed (a richer snapshot) is committed to public/versions.json.
 const MINIMAL_FALLBACK = {
-  version: 2,
+  version: 3,
   minecraft: [{ id: "1.21.4", type: "release" }],
   fabric: ["0.16.10"],
   forge: {},
-  java: [...DEFAULT_JAVA],
+  java: DEFAULT_JAVA.map(({ component, major }) => ({
+    component,
+    label: javaLabel(component, major),
+    major,
+  })),
   recommended: {},
   generatedAt: new Date(0).toISOString(),
 };
@@ -56,7 +77,7 @@ function keepExistingOrSeed(reason) {
 }
 
 // Read the prior committed catalog so a smaller run (lower RESOLVE_LIMIT) does
-// not drop Java majors a richer prior run already discovered.
+// not drop Java components a richer prior run already discovered.
 function readPriorCatalog() {
   if (!existsSync(OUTPUT_PATH)) return null;
   try {
@@ -98,7 +119,7 @@ async function main() {
     keepExistingOrSeed("@loontail/minecraft-kit is not installed");
     return;
   }
-  const { MinecraftKit, asMinecraftVersionId } = kitModule;
+  const { MinecraftKit, asMinecraftVersionId, detectSystem } = kitModule;
 
   const kit = new MinecraftKit();
   const prior = readPriorCatalog();
@@ -134,11 +155,33 @@ async function main() {
     forgeRecommended[mc] = chosen.forgeVersion;
   }
 
-  // Resolve the per-MC recommended Java major for the newest releases only,
+  // Enumerate the host platform's runtime components (the kit resolves Java by
+  // component NAME). Dedupe by component, keeping the newest versionName per
+  // component, and derive a major from the leading versionName integer. The
+  // non-JRE pseudo-component is excluded; failures keep the default set.
+  const componentEntries = new Map();
+  try {
+    const runtimes = await kit.versions.runtime.list({ system: detectSystem() });
+    for (const r of runtimes) {
+      if (EXCLUDED_COMPONENTS.has(r.component)) continue;
+      const major = Number.parseInt(r.versionName, 10);
+      const prev = componentEntries.get(r.component);
+      if (!prev || r.versionName > prev.versionName) {
+        componentEntries.set(r.component, {
+          component: r.component,
+          versionName: r.versionName,
+          major: Number.isFinite(major) ? major : undefined,
+        });
+      }
+    }
+  } catch {
+    // Runtime index unreachable; fall back to the default component set below.
+  }
+
+  // Resolve the per-MC recommended Java COMPONENT for the newest releases only,
   // bounded by RESOLVE_LIMIT + a small concurrency pool. A per-MC try/catch keeps
   // any single 404/parse failure from failing the build.
   const resolvedJava = {};
-  const resolvedMajors = new Set();
   const releases = mcSummaries.filter((s) => s.type === "release");
   const toResolve = releases.slice(0, Math.max(0, RESOLVE_LIMIT));
   const tasks = toResolve.map((m) => async () => {
@@ -146,41 +189,60 @@ async function main() {
       const r = await kit.versions.minecraft.resolve({
         version: asMinecraftVersionId(m.id),
       });
-      const major = r.manifest.javaVersion?.majorVersion ?? 8;
-      resolvedJava[m.id] = major;
-      resolvedMajors.add(major);
+      const component = r.manifest.javaVersion?.component ?? null;
+      if (component) resolvedJava[m.id] = component;
     } catch {
       // No Java for this MC; never fail the build.
     }
   });
   await runPool(tasks, RESOLVE_CONCURRENCY);
 
-  // Merge prior-run Java majors so a smaller run does not regress the per-MC map.
+  // Merge prior-run Java components so a smaller run does not regress the per-MC map.
   const priorRecommended = prior?.recommended ?? {};
   const recommended = {};
   for (const m of minecraft) {
     const mc = m.id;
-    const priorJava = priorRecommended[mc]?.java;
-    const java = resolvedJava[mc] ?? priorJava;
-    const entry = {};
-    if (java !== undefined) entry.java = java;
+    const priorJava =
+      typeof priorRecommended[mc]?.java === "string"
+        ? priorRecommended[mc].java
+        : undefined;
+    const java = resolvedJava[mc] ?? priorJava ?? null;
+    const entry = { java };
     if (mc in forgeRecommended) entry.forge = forgeRecommended[mc];
     else entry.forge = null;
     if (fabric.length > 0) entry.fabric = fabric[0];
     recommended[mc] = entry;
   }
 
-  // Surviving Java majors from a prior run (its `recommended[*].java`) join the
-  // default set so the dropdown never loses a major a richer run discovered.
-  const priorMajors = Object.values(priorRecommended)
-    .map((r) => r?.java)
-    .filter((j) => typeof j === "number");
-  const java = [
-    ...new Set([...resolvedMajors, ...priorMajors, ...DEFAULT_JAVA]),
-  ].sort((a, b) => b - a);
+  // Surviving Java components from a prior run (its component-shaped `java`
+  // array) join the resolved + default set so a smaller run never loses a
+  // component a richer run discovered. Keep the highest known major per component.
+  const merged = new Map();
+  function offer(component, major) {
+    const prev = merged.get(component);
+    const best =
+      Number.isFinite(major) && (!prev || !Number.isFinite(prev) || major > prev)
+        ? major
+        : prev;
+    merged.set(component, best);
+  }
+  for (const e of componentEntries.values()) offer(e.component, e.major);
+  for (const e of Array.isArray(prior?.java) ? prior.java : []) {
+    if (e && typeof e.component === "string")
+      offer(e.component, typeof e.major === "number" ? e.major : undefined);
+  }
+  for (const e of DEFAULT_JAVA) offer(e.component, e.major);
+
+  const java = [...merged.entries()]
+    .map(([component, major]) => ({
+      component,
+      label: javaLabel(component, major),
+      major: Number.isFinite(major) ? major : undefined,
+    }))
+    .sort((a, b) => (b.major ?? -1) - (a.major ?? -1));
 
   const payload = {
-    version: 2,
+    version: 3,
     minecraft,
     fabric,
     forge,
@@ -193,7 +255,8 @@ async function main() {
   console.log(
     `[generate-versions] wrote ${OUTPUT_PATH}: ${minecraft.length} MC, ` +
       `${fabric.length} fabric loaders, ${Object.keys(forge).length} forge MC keys, ` +
-      `java [${java.join(", ")}], ${Object.keys(resolvedJava).length} resolved Java majors`,
+      `java [${java.map((j) => j.component).join(", ")}], ` +
+      `${Object.keys(resolvedJava).length} resolved Java components`,
   );
 }
 

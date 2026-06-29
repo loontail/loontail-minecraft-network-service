@@ -75,21 +75,25 @@ const TABS: SectionTab<Tab>[] = [
 // Radix Select reserves "" for the placeholder, so a clearable select needs a sentinel value.
 const NONE = "__none__";
 
-// Picking this swaps the Java select for a free-text input (target a Java major not yet catalogued).
+// Picking this swaps the Java select for a free-text input (target a runtime component not yet catalogued).
 const CUSTOM = "__custom__";
 
 // The Star marker sits OUTSIDE `ItemText` so Radix never clones it into the trigger's `SelectValue`.
+// `value` is the stored string (version / component); `label` is the visible text (defaults to value).
 function VersionSelectItem({
   value,
+  label,
   recommended,
 }: {
   value: string;
+  label?: string;
   recommended?: boolean;
 }) {
+  const text = label ?? value;
   return (
     <SelectPrimitive.Item
       value={value}
-      textValue={value}
+      textValue={text}
       className={cn(
         "focus:bg-accent focus:text-accent-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
       )}
@@ -100,7 +104,7 @@ function VersionSelectItem({
         </SelectPrimitive.ItemIndicator>
       </span>
       <span className="flex items-center gap-1.5">
-        <SelectPrimitive.ItemText>{value}</SelectPrimitive.ItemText>
+        <SelectPrimitive.ItemText>{text}</SelectPrimitive.ItemText>
         {recommended ? (
           <Star className="size-3 text-primary" aria-label="recommended" />
         ) : null}
@@ -242,8 +246,22 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   const forgeOptions = withCurrent(forgeForMc, form.forgeVersion);
   const fabricOptions = withCurrent(catalog?.fabric ?? [], form.fabricVersion);
 
-  const javaList = (catalog?.java ?? []).map(String);
-  const javaOptions = withCurrent(javaList, form.runtimeVersion);
+  // Java options carry a component value + a visible label. A stored value not in
+  // the catalog (legacy major like "25", or a custom component) is surfaced first
+  // labelled by itself so editing never drops it.
+  const javaCatalog = catalog?.java ?? [];
+  const javaOptions: { value: string; label: string }[] = javaCatalog.map(
+    (o) => ({ value: o.component, label: o.label }),
+  );
+  if (
+    form.runtimeVersion !== "" &&
+    !javaOptions.some((o) => o.value === form.runtimeVersion)
+  ) {
+    javaOptions.unshift({
+      value: form.runtimeVersion,
+      label: form.runtimeVersion,
+    });
+  }
 
   // Per-MC recommended picks: drive the Star markers and seed the cascade on MC change.
   const rec = catalog?.recommended?.[form.minecraftVersion] ?? {};
@@ -251,8 +269,9 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
   const recFabric = rec.fabric ?? undefined;
   const recJava = rec.java;
 
-  // Changing MC cascades: Forge resets to recommended if its pick is now invalid; Fabric/Java keep an
-  // existing pick and only seed the recommended when empty.
+  // Changing MC cascades: Forge resets to recommended if its pick is now invalid; Fabric keeps an
+  // existing pick and only seeds the recommended when empty; Java seeds the recommended COMPONENT when
+  // the current value is empty or no longer a catalogued component (a valid existing component stays).
   function setMinecraft(next: string) {
     setForm((prev) => {
       if (next === "") {
@@ -260,7 +279,10 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
       }
       const r = catalog?.recommended?.[next] ?? {};
       const forgeList = catalog?.forge?.[next] ?? [];
-      const recJavaNext = r.java ?? catalog?.java?.[0];
+      const recJavaNext = r.java ?? catalog?.java?.[0]?.component ?? "";
+      const javaValid = (catalog?.java ?? []).some(
+        (o) => o.component === prev.runtimeVersion,
+      );
       return {
         ...prev,
         minecraftVersion: next,
@@ -269,8 +291,9 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
           : (r.forge ?? ""),
         fabricVersion: prev.fabricVersion || (r.fabric ?? ""),
         runtimeVersion:
-          prev.runtimeVersion ||
-          (recJavaNext !== undefined ? String(recJavaNext) : ""),
+          prev.runtimeVersion !== "" && javaValid
+            ? prev.runtimeVersion
+            : recJavaNext,
       };
     });
   }
@@ -377,7 +400,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
               <Input
                 id="build-runtime"
                 value={form.runtimeVersion}
-                placeholder="21"
+                placeholder="java-runtime-delta"
                 aria-label="Java version"
                 autoFocus
                 onChange={(event) => field("runtimeVersion", event.target.value)}
@@ -402,11 +425,12 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NONE}>—</SelectItem>
-                  {javaOptions.map((version) => (
+                  {javaOptions.map((option) => (
                     <VersionSelectItem
-                      key={version}
-                      value={version}
-                      recommended={String(recJava) === version}
+                      key={option.value}
+                      value={option.value}
+                      label={option.label}
+                      recommended={recJava === option.value}
                     />
                   ))}
                   <SelectItem value={CUSTOM}>Custom…</SelectItem>

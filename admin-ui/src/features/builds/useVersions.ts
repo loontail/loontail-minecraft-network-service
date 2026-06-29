@@ -8,9 +8,18 @@ export interface MinecraftVersionEntry {
   type: string;
 }
 
-// Each field optional so a partial/legacy entry never breaks the UI.
+// A Mojang Java-runtime component option. `component` is what the launcher passes
+// to the kit as `runtime.component`; `major` is informational (for the label).
+export interface JavaRuntimeOption {
+  component: string;
+  label: string;
+  major?: number;
+}
+
+// Each field optional so a partial/legacy entry never breaks the UI. `java` is a
+// component NAME (e.g. "java-runtime-delta"), not a major number.
 export interface RecommendedVersions {
-  java?: number;
+  java?: string | null;
   forge?: string | null;
   fabric?: string | null;
 }
@@ -20,7 +29,7 @@ export interface VersionsCatalog {
   minecraft: MinecraftVersionEntry[];
   fabric: string[];
   forge: Record<string, string[]>;
-  java: number[];
+  java: JavaRuntimeOption[];
   recommended: Record<string, RecommendedVersions>;
   generatedAt: string;
 }
@@ -51,11 +60,21 @@ export function useVersions() {
         return EMPTY_CATALOG;
       }
       // Normalize an older payload to the current shape; defaults must follow the
-      // spread so they win over any `undefined` field.
+      // spread so they win over any `undefined` field. A pre-v3 `java` was an
+      // array of major numbers — drop those entries (only component-shaped
+      // options are usable) so the picker degrades to empty rather than crashing.
       const data = (await res.json()) as Partial<VersionsCatalog>;
+      const java = Array.isArray(data.java)
+        ? data.java.filter(
+            (entry): entry is JavaRuntimeOption =>
+              typeof entry === "object" &&
+              entry !== null &&
+              typeof (entry as JavaRuntimeOption).component === "string",
+          )
+        : [];
       return {
         ...data,
-        java: data.java ?? [],
+        java,
         recommended: data.recommended ?? {},
         version: data.version ?? 1,
       } as VersionsCatalog;

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "minecraft": [
     {
       "id": "26.2",
@@ -5788,6 +5788,7 @@
       "63.0.0"
     ],
     "26.1.2": [
+      "64.0.11",
       "64.0.10",
       "64.0.9",
       "64.0.8",
@@ -5806,451 +5807,553 @@
     ]
   },
   "java": [
-    25,
-    21,
-    17,
-    16,
-    8
+    {
+      "component": "java-runtime-epsilon",
+      "label": "Java 25 — java-runtime-epsilon",
+      "major": 25
+    },
+    {
+      "component": "java-runtime-delta",
+      "label": "Java 21 — java-runtime-delta",
+      "major": 21
+    },
+    {
+      "component": "java-runtime-beta",
+      "label": "Java 17 — java-runtime-beta",
+      "major": 17
+    },
+    {
+      "component": "java-runtime-gamma",
+      "label": "Java 17 — java-runtime-gamma",
+      "major": 17
+    },
+    {
+      "component": "java-runtime-gamma-snapshot",
+      "label": "Java 17 — java-runtime-gamma-snapshot",
+      "major": 17
+    },
+    {
+      "component": "java-runtime-alpha",
+      "label": "Java 16 — java-runtime-alpha",
+      "major": 16
+    },
+    {
+      "component": "jre-legacy",
+      "label": "Java 8 — jre-legacy",
+      "major": 8
+    }
   ],
   "recommended": {
     "26.2": {
-      "java": 25,
+      "java": "java-runtime-epsilon",
       "forge": "65.0.1",
       "fabric": "0.19.3"
     },
     "26.1.2": {
-      "java": 25,
-      "forge": "64.0.10",
+      "java": "java-runtime-epsilon",
+      "forge": "64.0.11",
       "fabric": "0.19.3"
     },
     "26.1.1": {
-      "java": 25,
+      "java": "java-runtime-epsilon",
       "forge": "63.0.2",
       "fabric": "0.19.3"
     },
     "26.1": {
-      "java": 25,
+      "java": "java-runtime-epsilon",
       "forge": "62.0.9",
       "fabric": "0.19.3"
     },
     "1.21.11": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "61.1.0",
       "fabric": "0.19.3"
     },
     "1.21.10": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "60.1.0",
       "fabric": "0.19.3"
     },
     "1.21.9": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "59.0.5",
       "fabric": "0.19.3"
     },
     "1.21.8": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "58.1.0",
       "fabric": "0.19.3"
     },
     "1.21.7": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "57.0.3",
       "fabric": "0.19.3"
     },
     "1.21.6": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "56.0.9",
       "fabric": "0.19.3"
     },
     "1.21.5": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "55.1.0",
       "fabric": "0.19.3"
     },
     "1.21.4": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "54.1.14",
       "fabric": "0.19.3"
     },
     "1.21.3": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "53.1.0",
       "fabric": "0.19.3"
     },
     "1.21.2": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.21.1": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "52.1.0",
       "fabric": "0.19.3"
     },
     "1.21": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "51.0.33",
       "fabric": "0.19.3"
     },
     "1.20.6": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": "50.2.0",
       "fabric": "0.19.3"
     },
     "1.20.5": {
-      "java": 21,
+      "java": "java-runtime-delta",
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.20.4": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "49.2.0",
       "fabric": "0.19.3"
     },
     "1.20.3": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "49.0.2",
       "fabric": "0.19.3"
     },
     "1.20.2": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "48.1.0",
       "fabric": "0.19.3"
     },
     "1.20.1": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "47.4.10",
       "fabric": "0.19.3"
     },
     "1.20": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "46.0.14",
       "fabric": "0.19.3"
     },
     "1.19.4": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "45.4.0",
       "fabric": "0.19.3"
     },
     "1.19.3": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "44.1.0",
       "fabric": "0.19.3"
     },
     "1.19.2": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "43.5.0",
       "fabric": "0.19.3"
     },
     "1.19.1": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "42.0.9",
       "fabric": "0.19.3"
     },
     "1.19": {
-      "java": 17,
+      "java": "java-runtime-gamma",
       "forge": "41.1.0",
       "fabric": "0.19.3"
     },
     "1.18.2": {
-      "java": 17,
+      "java": "java-runtime-beta",
       "forge": "40.3.0",
       "fabric": "0.19.3"
     },
     "1.18.1": {
-      "java": 17,
+      "java": "java-runtime-beta",
       "forge": "39.1.0",
       "fabric": "0.19.3"
     },
     "1.18": {
+      "java": null,
       "forge": "38.0.17",
       "fabric": "0.19.3"
     },
     "1.17.1": {
+      "java": null,
       "forge": "37.1.1",
       "fabric": "0.19.3"
     },
     "1.17": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.16.5": {
+      "java": null,
       "forge": "36.2.34",
       "fabric": "0.19.3"
     },
     "1.16.4": {
+      "java": null,
       "forge": "35.1.4",
       "fabric": "0.19.3"
     },
     "1.16.3": {
+      "java": null,
       "forge": "34.1.0",
       "fabric": "0.19.3"
     },
     "1.16.2": {
+      "java": null,
       "forge": "33.0.61",
       "fabric": "0.19.3"
     },
     "1.16.1": {
+      "java": null,
       "forge": "32.0.108",
       "fabric": "0.19.3"
     },
     "1.16": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.15.2": {
+      "java": null,
       "forge": "31.2.57",
       "fabric": "0.19.3"
     },
     "1.15.1": {
+      "java": null,
       "forge": "30.0.51",
       "fabric": "0.19.3"
     },
     "1.15": {
+      "java": null,
       "forge": "29.0.4",
       "fabric": "0.19.3"
     },
     "1.14.4": {
+      "java": null,
       "forge": "28.2.26",
       "fabric": "0.19.3"
     },
     "1.14.3": {
+      "java": null,
       "forge": "27.0.60",
       "fabric": "0.19.3"
     },
     "1.14.2": {
+      "java": null,
       "forge": "26.0.63",
       "fabric": "0.19.3"
     },
     "1.14.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.14": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.13.2": {
+      "java": null,
       "forge": "25.0.223",
       "fabric": "0.19.3"
     },
     "1.13.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.13": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.12.2": {
+      "java": null,
       "forge": "14.23.5.2859",
       "fabric": "0.19.3"
     },
     "1.12.1": {
+      "java": null,
       "forge": "14.22.1.2478",
       "fabric": "0.19.3"
     },
     "1.12": {
+      "java": null,
       "forge": "14.21.1.2387",
       "fabric": "0.19.3"
     },
     "1.11.2": {
+      "java": null,
       "forge": "13.20.1.2588",
       "fabric": "0.19.3"
     },
     "1.11.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.11": {
+      "java": null,
       "forge": "13.19.1.2189",
       "fabric": "0.19.3"
     },
     "1.10.2": {
+      "java": null,
       "forge": "12.18.3.2511",
       "fabric": "0.19.3"
     },
     "1.10.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.10": {
+      "java": null,
       "forge": "12.18.0.1981-1.10.0",
       "fabric": "0.19.3"
     },
     "1.9.4": {
+      "java": null,
       "forge": "12.17.0.1908-1.9.4",
       "fabric": "0.19.3"
     },
     "1.9.3": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.9.2": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.9.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.9": {
+      "java": null,
       "forge": "12.16.1.1887",
       "fabric": "0.19.3"
     },
     "1.8.9": {
+      "java": null,
       "forge": "11.15.0.1656",
       "fabric": "0.19.3"
     },
     "1.8.8": {
+      "java": null,
       "forge": "11.15.0.1655",
       "fabric": "0.19.3"
     },
     "1.8.7": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8.6": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8.5": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8.4": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8.3": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8.2": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.8": {
+      "java": null,
       "forge": "11.14.4.1563",
       "fabric": "0.19.3"
     },
     "1.7.10": {
+      "java": null,
       "forge": "10.13.0.1150",
       "fabric": "0.19.3"
     },
     "1.7.9": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.8": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.7": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.6": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.5": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.4": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.3": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.7.2": {
+      "java": null,
       "forge": "10.12.0.967",
       "fabric": "0.19.3"
     },
     "1.6.4": {
+      "java": null,
       "forge": "9.11.1.1345",
       "fabric": "0.19.3"
     },
     "1.6.2": {
+      "java": null,
       "forge": "9.10.1.871",
       "fabric": "0.19.3"
     },
     "1.6.1": {
+      "java": null,
       "forge": "8.9.0.775",
       "fabric": "0.19.3"
     },
     "1.5.2": {
+      "java": null,
       "forge": "7.8.1.738",
       "fabric": "0.19.3"
     },
     "1.5.1": {
+      "java": null,
       "forge": "7.7.2.682",
       "fabric": "0.19.3"
     },
     "1.4.7": {
+      "java": null,
       "forge": "6.6.2.534",
       "fabric": "0.19.3"
     },
     "1.4.5": {
+      "java": null,
       "forge": "6.4.2.448",
       "fabric": "0.19.3"
     },
     "1.4.6": {
+      "java": null,
       "forge": "6.5.0.489",
       "fabric": "0.19.3"
     },
     "1.4.4": {
+      "java": null,
       "forge": "6.3.0.378",
       "fabric": "0.19.3"
     },
     "1.4.2": {
+      "java": null,
       "forge": "6.0.1.355",
       "fabric": "0.19.3"
     },
     "1.3.2": {
+      "java": null,
       "forge": "4.3.5.318",
       "fabric": "0.19.3"
     },
     "1.3.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.2.5": {
+      "java": null,
       "forge": "3.4.9.171",
       "fabric": "0.19.3"
     },
     "1.2.4": {
+      "java": null,
       "forge": "2.0.0.68",
       "fabric": "0.19.3"
     },
     "1.2.3": {
+      "java": null,
       "forge": "1.4.1.64",
       "fabric": "0.19.3"
     },
     "1.2.2": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.2.1": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     },
     "1.1": {
+      "java": null,
       "forge": "1.3.4.29",
       "fabric": "0.19.3"
     },
     "1.0": {
+      "java": null,
       "forge": null,
       "fabric": "0.19.3"
     }
   },
-  "generatedAt": "2026-06-28T20:16:40.810Z"
+  "generatedAt": "2026-06-29T00:01:45.375Z"
 }

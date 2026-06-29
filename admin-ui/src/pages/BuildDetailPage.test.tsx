@@ -27,7 +27,7 @@ beforeAll(() => {
 });
 
 const SAMPLE_VERSIONS: VersionsCatalog = {
-  version: 2,
+  version: 3,
   minecraft: [
     { id: "1.21.4", type: "release" },
     { id: "1.20.1", type: "release" },
@@ -37,10 +37,21 @@ const SAMPLE_VERSIONS: VersionsCatalog = {
     "1.21.4": ["54.1.6", "54.1.5"],
     "1.20.1": ["47.4.0", "47.3.0"],
   },
-  java: [21, 17],
+  java: [
+    { component: "java-runtime-delta", label: "Java 21 — java-runtime-delta", major: 21 },
+    { component: "java-runtime-gamma", label: "Java 17 — java-runtime-gamma", major: 17 },
+  ],
   recommended: {
-    "1.21.4": { java: 21, forge: "54.1.6", fabric: "0.16.10" },
-    "1.20.1": { java: 17, forge: "47.4.0", fabric: "0.16.10" },
+    "1.21.4": {
+      java: "java-runtime-delta",
+      forge: "54.1.6",
+      fabric: "0.16.10",
+    },
+    "1.20.1": {
+      java: "java-runtime-gamma",
+      forge: "47.4.0",
+      fabric: "0.16.10",
+    },
   },
   generatedAt: "2026-06-27T00:00:00.000Z",
 };
@@ -77,7 +88,7 @@ const SAMPLE_BUILD: ClientAdmin = {
   minecraftVersion: "1.21.4",
   forgeVersion: null,
   fabricVersion: null,
-  runtimeVersion: "21",
+  runtimeVersion: "java-runtime-delta",
   bundleSlug: "all-the-mods-9",
   background: null,
   poster: null,
@@ -288,41 +299,42 @@ describe("BuildDetailPage — version dropdowns", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders a Java select with the stored value and catalog majors plus Custom…", async () => {
+  it("renders a Java select with the stored component and catalog components plus Custom…", async () => {
     mockApi();
     const user = userEvent.setup();
     await renderDetailsTab();
 
     const java = await screen.findByRole("combobox", { name: "Java version" });
-    // The trigger shows the bare stored value (not "21 recommended").
-    expect(java).toHaveTextContent("21");
+    // The trigger shows the stored component's label (no "recommended" badge text).
+    expect(java).toHaveTextContent("java-runtime-delta");
     expect(java).not.toHaveTextContent(/recommended/i);
 
     await user.click(java);
     const listbox = await screen.findByRole("listbox");
     expect(
-      within(listbox).getByRole("option", { name: /^21/ }),
+      within(listbox).getByRole("option", { name: /java-runtime-delta/ }),
     ).toBeInTheDocument();
     expect(
-      within(listbox).getByRole("option", { name: /^17/ }),
+      within(listbox).getByRole("option", { name: /java-runtime-gamma/ }),
     ).toBeInTheDocument();
     expect(
       within(listbox).getByRole("option", { name: /custom/i }),
     ).toBeInTheDocument();
   });
 
-  it("preserves a legacy Java runtime value via withCurrent", async () => {
-    mockApi({ clients: [{ ...SAMPLE_BUILD, runtimeVersion: "11" }] });
+  it("preserves a legacy/out-of-list Java runtime value", async () => {
+    // An old build saved a bare major ("25") — surface it so it shows + can be cleared.
+    mockApi({ clients: [{ ...SAMPLE_BUILD, runtimeVersion: "25" }] });
     const user = userEvent.setup();
     await renderDetailsTab();
 
     const java = await screen.findByRole("combobox", { name: "Java version" });
-    expect(java).toHaveTextContent("11");
+    expect(java).toHaveTextContent("25");
 
     await user.click(java);
     const listbox = await screen.findByRole("listbox");
     expect(
-      within(listbox).getByRole("option", { name: /^11/ }),
+      within(listbox).getByRole("option", { name: /^25/ }),
     ).toBeInTheDocument();
   });
 
@@ -348,12 +360,20 @@ describe("BuildDetailPage — version dropdowns", () => {
     ).not.toBeInTheDocument();
     await user.keyboard("{Escape}");
 
-    // Java: 21 carries the marker, 17 does not.
+    // Java: java-runtime-delta carries the marker, java-runtime-gamma does not.
     const java = await screen.findByRole("combobox", { name: "Java version" });
     await user.click(java);
     listbox = await screen.findByRole("listbox");
-    const javaRec = within(listbox).getByRole("option", { name: /^21/ });
+    const javaRec = within(listbox).getByRole("option", {
+      name: /java-runtime-delta/,
+    });
     expect(within(javaRec).getByLabelText("recommended")).toBeInTheDocument();
+    const javaOther = within(listbox).getByRole("option", {
+      name: /java-runtime-gamma/,
+    });
+    expect(
+      within(javaOther).queryByLabelText("recommended"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the trigger value clean after selecting a recommended option", async () => {
@@ -419,7 +439,7 @@ describe("BuildDetailPage — version dropdowns", () => {
     let listbox = await screen.findByRole("listbox");
     await user.click(within(listbox).getByRole("option", { name: "1.20.1" }));
 
-    // Forge -> recommended for 1.20.1, Java -> recommended major for 1.20.1.
+    // Forge -> recommended for 1.20.1, Java -> recommended component for 1.20.1.
     await waitFor(() =>
       expect(
         screen.getByRole("combobox", { name: "Forge version" }),
@@ -427,7 +447,7 @@ describe("BuildDetailPage — version dropdowns", () => {
     );
     expect(
       screen.getByRole("combobox", { name: "Java version" }),
-    ).toHaveTextContent("17");
+    ).toHaveTextContent("java-runtime-gamma");
 
     // Forge listbox surfaces the new MC's options, not the old MC's.
     const forge = screen.getByRole("combobox", { name: "Forge version" });
@@ -442,7 +462,7 @@ describe("BuildDetailPage — version dropdowns", () => {
   });
 
   it("falls back to java[0] when the chosen MC has no recommended.java", async () => {
-    // 1.20.1 catalog entry with recommended but NO java -> seed from java[0] (21).
+    // 1.20.1 catalog entry with recommended but NO java -> seed from java[0]'s component.
     const versions: VersionsCatalog = {
       ...SAMPLE_VERSIONS,
       recommended: {
@@ -472,11 +492,11 @@ describe("BuildDetailPage — version dropdowns", () => {
     const listbox = await screen.findByRole("listbox");
     await user.click(within(listbox).getByRole("option", { name: "1.20.1" }));
 
-    // No recommended.java for 1.20.1 -> Java seeds from catalog.java[0] === 21.
+    // No recommended.java for 1.20.1 -> Java seeds from catalog.java[0].component.
     await waitFor(() =>
       expect(
         screen.getByRole("combobox", { name: "Java version" }),
-      ).toHaveTextContent("21"),
+      ).toHaveTextContent("java-runtime-delta"),
     );
   });
 });
