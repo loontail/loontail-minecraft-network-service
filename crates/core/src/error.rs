@@ -1,0 +1,131 @@
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
+
+/// Application-wide error type; handlers return `Result<_, AppError>` so failures
+/// become well-formed JSON responses instead of panics.
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("{0}")]
+    BadRequest(String),
+
+    #[error("unauthorized")]
+    Unauthorized,
+
+    #[error("forbidden")]
+    Forbidden,
+
+    #[error("{0}")]
+    NotFound(String),
+
+    #[error("{0}")]
+    Conflict(String),
+
+    #[error("too many requests")]
+    TooManyRequests,
+
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    error: ErrorDetail,
+}
+
+#[derive(Serialize)]
+struct ErrorDetail {
+    code: &'static str,
+    message: String,
+}
+
+impl AppError {
+    fn parts(&self) -> (StatusCode, &'static str, String) {
+        match self {
+            AppError::BadRequest(message) => {
+                (StatusCode::BAD_REQUEST, "bad_request", message.clone())
+            }
+            AppError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "missing or invalid authentication token".to_string(),
+            ),
+            AppError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "you are not allowed to perform this action".to_string(),
+            ),
+            AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message.clone()),
+            AppError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message.clone()),
+            AppError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_requests",
+                "too many requests, please retry later".to_string(),
+            ),
+            AppError::Database(err) => {
+                tracing::error!(error = %err, "database error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "internal server error".to_string(),
+                )
+            }
+            AppError::Internal(err) => {
+                tracing::error!(error = %err, "internal error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "internal server error".to_string(),
+                )
+            }
+        }
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = self.parts();
+        let body = Json(ErrorBody {
+            error: ErrorDetail { code, message },
+        });
+        (status, body).into_response()
+    }
+}
+
+pub type AppResult<T> = Result<T, AppError>;
+
+/// Whether a sqlx error is a Postgres unique-constraint violation, regardless of
+/// which constraint. Callers needing the specific name inspect `db.constraint()`.
+pub fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+pub fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_foreign_key_violation())
+}
+
+/// `.map_err(slug_conflict("client"))?` — the one spelling of "a duplicate slug is a
+/// 409, anything else is the underlying error". Written five times by hand in the
+/// catalog admin, which is how the fifth copy drifted into a different message shape.
+pub fn slug_conflict(entity: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
+    move |err| {
+        if is_unique_violation(&err) {
+            AppError::Conflict(format!("{entity} slug already exists"))
+        } else {
+            err.into()
+        }
+    }
+}
+
+/// `found(affected, "keyword")?` — a write that matched no row is a 404, not a silent
+/// success. Replaces ten hand-written `if affected == 0` blocks.
+pub fn found(affected: u64, what: &'static str) -> AppResult<()> {
+    if affected == 0 {
+        return Err(AppError::NotFound(format!("{what} not found")));
+    }
+    Ok(())
+}

@@ -1,0 +1,23 @@
+[package]
+name = "loontail-textures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — skin/cape registry with PNG validation and static serving"
+
+[dependencies]
+loontail-core = { workspace = true }
+loontail-yggdrasil-protocol = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"

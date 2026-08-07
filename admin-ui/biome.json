@@ -1,0 +1,37 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.7/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    "includes": ["**", "!**/dist/**", "!**/node_modules/**", "!**/scripts/**"]
+  },
+  "formatter": { "enabled": false },
+  "css": { "parser": { "tailwindDirectives": true } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        "useSemanticElements": "off"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": {
+          "level": "error",
+          "options": { "reportUnnecessaryDependencies": false }
+        }
+      },
+      "style": {
+        "noNonNullAssertion": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.test.ts", "**/*.test.tsx"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noDocumentCookie": "off" }
+        }
+      }
+    }
+  ]
+}

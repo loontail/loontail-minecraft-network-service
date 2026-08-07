@@ -1,0 +1,28 @@
+[package]
+name = "loontail-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loontail launcher API — shared kernel (state, config, db, error, metrics, models, auth, realtime)"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+argon2 = { workspace = true }
+loontail-yggdrasil-protocol = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

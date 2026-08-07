@@ -1,35 +1,62 @@
 # Build the service image, push it to GHCR, and roll it out on Hetzner.
 #
-# Flow: push to main -> build & push ghcr.io/<owner>/<repo>:sha-<commit> -> SSH
-# to the server, pull the pinned image, `docker compose up -d`, verify /health.
+# Flow: push to main -> CI (fmt/clippy/test/docker) goes green -> build & push
+# ghcr.io/<owner>/<repo> -> SSH to the server, pull the image BY DIGEST,
+# `docker compose up -d`, verify /health.
+#
+# TCI-02: this workflow is chained to CI via `workflow_run` instead of its own
+# `push` trigger. A `needs:` dependency cannot cross workflow files, and merging
+# these jobs into ci.yml would put the rollout under ci.yml's
+# `cancel-in-progress: true` concurrency group — a second push could then cancel a
+# deploy mid-flight. `workflow_run` keeps deploy-production's own
+# `cancel-in-progress: false` group while making a red CI run block the rollout.
+# Because `workflow_run` checks out the DEFAULT BRANCH by default, every checkout
+# and the image tag are pinned to `workflow_run.head_sha` — the commit CI actually
+# validated. The server is then given the image's `@sha256:` DIGEST, not the
+# `sha-<commit>` tag; GHCR tags are mutable, so the tag exists for humans only.
 #
 # --- Required repository secrets -------------------------------------------
-#   HETZNER_HOST        server IP or hostname
-#   HETZNER_USER        SSH user (e.g. deploy or root)
-#   HETZNER_SSH_KEY     private SSH key (PEM, no passphrase) for that user
-#   DB_PASSWORD         Postgres password (written into .env.prod on the server)
+#   HETZNER_HOST          server IP or hostname
+#   HETZNER_USER          SSH user
+#   HETZNER_SSH_KEY       private SSH key (PEM, no passphrase) for that user
+#   HETZNER_SSH_HOST_KEY  the server's PUBLIC host key, in known_hosts format
+#                         ("<host> ssh-ed25519 AAAA..."). Capture it ONCE from a
+#                         trusted network with `ssh-keyscan -p <port> <host>` and
+#                         paste the line(s) here. The rollout refuses to run
+#                         without it — see the comment on the pinning step.
+#   DB_PASSWORD           Postgres password (written into .env.prod on the server)
 # --- Optional (have defaults) -----------------------------------------------
 #   HETZNER_SSH_PORT    defaults to 22
-#   HETZNER_DEPLOY_DIR  defaults to /opt/loontail/minecraft-network-service
+#   HETZNER_DEPLOY_DIR  defaults to /opt/loontail/loontail-launcher-api
 #   DB_USER             defaults to loontail
-#   DB_NAME             defaults to loontail_network
+#   DB_NAME             defaults to loontail_launcher
 # NOTE: DB_USER / DB_NAME / DB_PASSWORD take effect only on the FIRST deploy
 # (when Postgres initialises its empty volume). Changing them later requires
 # resetting the volume (`docker compose ... down -v`) or manual SQL — see the
 # WARNING block in scripts/deploy-remote.sh.
-# GITHUB_TOKEN is provided automatically; it both pushes to GHCR and is used
-# (ephemerally) by the server to pull the image during this run.
+# GITHUB_TOKEN is provided automatically. The build job holds `packages: write`
+# to push; the deploy job holds only `packages: read`, so the token handed to the
+# server can pull the image and nothing else.
 #
 # --- One-time server setup -------------------------------------------------
 #   1. Install Docker Engine + the compose plugin, plus curl.
 #   2. The deploy dir and .env.prod are created/updated automatically on each
 #      deploy — no manual file creation needed.
 #   docker-compose.prod.yml is shipped automatically on every deploy.
+#
+# STILL OPEN, and only the operator can close it: the deploy key is a general
+# shell login, and `docker compose` membership is root-equivalent. Reduce it to a
+# forced command in the server's authorized_keys —
+# `command="/usr/local/bin/loontail-rollout",restrict ssh-ed25519 AAAA...` — with
+# that script performing the compose rollout under rootless docker or a narrow
+# sudoers entry. Nothing in this repo can enforce that.
 
 name: Deploy to Hetzner
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -37,38 +64,85 @@ concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   build-and-push:
     name: Build & push image
+    # Never roll out a commit whose CI run failed. A manual dispatch skips the CI
+    # gate by design (break-glass) but is still confined to main, and the
+    # ancestry check below re-verifies the commit either way.
+    #
+    # why: `workflow_run.branches` filters on the TRIGGERING run's head_branch,
+    # which for a pull request from a fork is the fork's own branch name — and a
+    # fork's default branch is `main`, so an ordinary fork PR satisfies it. Every
+    # later step checks out head_sha and pipes repository scripts into ssh with the
+    # production key in scope, so identity must be asserted here: the run has to
+    # come from this repository, from a push, on main.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
+    # Same environment as the rollout so `:latest` and the `sha-` tag cannot be
+    # written to GHCR without whatever approval `production` requires. Note the
+    # consequence: if required reviewers ARE configured, a deploy now needs two
+    # approvals (build, then rollout) rather than one.
+    environment: production
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+    # `image` is the DIGEST reference the server deploys; the `sha-<commit>` tag
+    # exists for humans only. GHCR tags are mutable, so a tag recorded in
+    # .env.prod is not evidence of what ran — a digest is.
     outputs:
-      image: ${{ steps.image.outputs.ref }}
+      image: ${{ steps.digest.outputs.ref }}
+      sha: ${{ steps.image.outputs.sha }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Second, independent check on the identity asserted in the job `if:`: the
+      # code about to be built and shipped must already be on main.
+      - name: Verify the deploy commit is on main
+        env:
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$DEPLOY_SHA" origin/main
 
       - name: Compute image reference
         id: image
+        env:
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           repo="${GITHUB_REPOSITORY,,}"            # GHCR requires a lowercase path
           echo "name=ghcr.io/${repo}" >> "$GITHUB_OUTPUT"
-          echo "ref=ghcr.io/${repo}:sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "sha=${DEPLOY_SHA}" >> "$GITHUB_OUTPUT"
+          echo "ref=ghcr.io/${repo}:sha-${DEPLOY_SHA:0:12}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ./Dockerfile
@@ -76,17 +150,47 @@ jobs:
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.ref }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # scope=deploy keeps the production layer cache disjoint from ci.yml's
+          # scope=ci, so neither path can feed layers to the other.
+          cache-from: type=gha,scope=deploy
+          cache-to: type=gha,mode=max,scope=deploy
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record the deployable digest
+        id: digest
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$IMAGE_DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::build-push-action produced no manifest digest"; exit 1 ;;
+          esac
+          echo "ref=${IMAGE_NAME}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy to Hetzner
     needs: build-and-push
     runs-on: ubuntu-latest
     environment: production
+    # packages: read — the GITHUB_TOKEN forwarded to the server can pull the
+    # image and nothing else. It must never carry packages: write.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.build-and-push.outputs.sha }}
+          persist-credentials: false
 
       - name: Ship compose file & roll out over SSH
         env:
@@ -94,25 +198,37 @@ jobs:
           SSH_USER: ${{ secrets.HETZNER_USER }}
           SSH_PORT: ${{ secrets.HETZNER_SSH_PORT != '' && secrets.HETZNER_SSH_PORT || '22' }}
           SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
-          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/minecraft-network-service' }}
+          SSH_HOST_KEY: ${{ secrets.HETZNER_SSH_HOST_KEY }}
+          DEPLOY_DIR: ${{ secrets.HETZNER_DEPLOY_DIR != '' && secrets.HETZNER_DEPLOY_DIR || '/opt/loontail/loontail-launcher-api' }}
           IMAGE: ${{ needs.build-and-push.outputs.image }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DB_USER: ${{ secrets.DB_USER != '' && secrets.DB_USER || 'loontail' }}
-          DB_NAME: ${{ secrets.DB_NAME != '' && secrets.DB_NAME || 'loontail_network' }}
+          DB_NAME: ${{ secrets.DB_NAME != '' && secrets.DB_NAME || 'loontail_launcher' }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          NETWORK_DOMAIN: ${{ secrets.NETWORK_DOMAIN != '' && secrets.NETWORK_DOMAIN || 'minecraft-network.loontail.dev' }}
+          NETWORK_DOMAIN: ${{ secrets.NETWORK_DOMAIN != '' && secrets.NETWORK_DOMAIN || 'launcher-api.loontail.dev' }}
         run: |
           set -euo pipefail
 
-          # Ephemeral key + TOFU host-key pinning for this run.
           install -d -m 700 ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # why: `ssh-keyscan` used to populate known_hosts here. Learning the key
+          # from the host you are about to trust authenticates nothing and makes
+          # StrictHostKeyChecking a no-op, so a DNS/BGP/egress MITM against the
+          # runner harvests the deploy key and DB_PASSWORD undetected. The key must
+          # come from a secret captured out of band.
+          if [ -z "${SSH_HOST_KEY//[[:space:]]/}" ]; then
+            echo "::error::HETZNER_SSH_HOST_KEY is not set. Run 'ssh-keyscan -p <port> <host>' once from a trusted network and store the output as that secret."
+            exit 1
+          fi
+          printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
           # ssh uses -p (lowercase), scp uses -P (uppercase) for port.
-          ssh_opts=(-i ~/.ssh/id_deploy -p "$SSH_PORT" -o StrictHostKeyChecking=yes)
-          scp_opts=(-i ~/.ssh/id_deploy -P "$SSH_PORT" -o StrictHostKeyChecking=yes)
+          ssh_opts=(-i ~/.ssh/id_deploy -p "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
+          scp_opts=(-i ~/.ssh/id_deploy -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
           target="$SSH_USER@$SSH_HOST"
 
           # Ensure the deploy dir exists and ship the prod compose + Caddyfile.
@@ -120,11 +236,12 @@ jobs:
           scp "${scp_opts[@]}" docker-compose.prod.yml "$target:$DEPLOY_DIR/docker-compose.prod.yml"
           scp "${scp_opts[@]}" Caddyfile "$target:$DEPLOY_DIR/Caddyfile"
 
-          # Roll out. Secrets are piped via stdin (never argv/ps);
-          # non-secret inputs ride along as a remote command env prefix.
-          { printf 'export REGISTRY_TOKEN=%q\n' "$REGISTRY_TOKEN";
-            printf 'export DB_PASSWORD=%q\n' "$DB_PASSWORD";
+          # why: EVERY value goes over stdin as `printf '%q'`, none as an ssh
+          # command prefix. ssh joins argv into one string that the REMOTE shell
+          # re-parses, so local quoting does not survive — a value containing a
+          # space, `;` or a backtick would execute on the production host.
+          { for v in IMAGE REGISTRY_USER REGISTRY_TOKEN DEPLOY_DIR DB_USER DB_NAME DB_PASSWORD NETWORK_DOMAIN; do
+              printf 'export %s=%q\n' "$v" "${!v}"
+            done
             cat scripts/deploy-remote.sh; } \
-            | ssh "${ssh_opts[@]}" "$target" \
-                IMAGE="$IMAGE" REGISTRY_USER="$REGISTRY_USER" DEPLOY_DIR="$DEPLOY_DIR" \
-                DB_USER="$DB_USER" DB_NAME="$DB_NAME" NETWORK_DOMAIN="$NETWORK_DOMAIN" bash -s
+            | ssh "${ssh_opts[@]}" "$target" bash -s

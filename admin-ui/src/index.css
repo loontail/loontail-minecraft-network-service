@@ -1,0 +1,223 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@import "@fontsource/nunito/400.css";
+@import "@fontsource/nunito/600.css";
+@import "@fontsource/nunito/700.css";
+@import "@fontsource/nunito/800.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Loontail design tokens — shadcn "neutral-dark", monochrome. Copied from the
+  launcher (loontail-launcher/src/renderer/index.css) so the admin SPA shares one
+  design language: a dark-only neutral surface ladder (hue 0, chroma 0) + tiered
+  off-white text, no chromatic accent. The primary CTA is white; focus / active-nav
+  / selection use neutral white/gray. Status is icon + shape + text, never hue.
+*/
+@theme {
+  --font-sans: "Nunito", system-ui, sans-serif;
+
+  /* Canvas & opaque surface ladder — lighter = more elevated (not shadows). */
+  --color-canvas: oklch(0.145 0 0);
+  --color-surface-0: oklch(0.17 0 0);
+  --color-surface-1: oklch(0.205 0 0);
+  --color-surface-2: oklch(0.255 0 0);
+  --color-surface-3: oklch(0.31 0 0);
+
+  /* Primary CTA = white — the single brightest element. */
+  --color-cta: oklch(0.985 0 0);
+  --color-cta-hover: oklch(1 0 0);
+  --color-cta-press: oklch(0.92 0 0);
+  --color-on-cta: oklch(0.205 0 0);
+
+  /* Tiered off-white text. */
+  --color-text-hi: oklch(0.985 0 0);
+  --color-text: oklch(0.87 0 0);
+  --color-text-mute: oklch(0.708 0 0);
+  /* Bumped from 0.556 → 0.62: at 0.556 on card/surface-1 (0.205) the contrast was
+     ~4:1, under the WCAG AA 4.5:1 floor for the 11-12px captions this token is used
+     for pervasively (hints, page counts, SHA cells). */
+  --color-text-faint: oklch(0.62 0 0);
+
+  /* Neutral "accent" — focus ring / active nav / selection. */
+  --color-accent-soft: oklch(1 0 0 / 0.1);
+
+  /* Legacy semantic names, retuned to shadcn neutral-dark. */
+  --color-background: oklch(0.145 0 0);
+  --color-foreground: oklch(0.985 0 0);
+  --color-card: oklch(0.205 0 0);
+  --color-card-foreground: oklch(0.985 0 0);
+  --color-popover: oklch(0.225 0 0);
+  --color-popover-foreground: oklch(0.985 0 0);
+  --color-primary: oklch(0.985 0 0);
+  --color-primary-foreground: oklch(0.205 0 0);
+  --color-secondary: oklch(0.269 0 0);
+  --color-secondary-foreground: oklch(0.985 0 0);
+  --color-muted: oklch(0.235 0 0);
+  --color-muted-foreground: oklch(0.708 0 0);
+  --color-accent: oklch(0.269 0 0);
+  --color-accent-foreground: oklch(0.985 0 0);
+
+  /* Loading placeholders — a hair above the card/surface-1 ladder (0.205) so the
+     pulse reads as a recessed shimmer, not brighter than the content it stands in
+     for (the old bg-accent at 0.269 read backwards). */
+  --color-skeleton: oklch(0.23 0 0);
+  --color-border: oklch(1 0 0 / 0.1);
+  --color-input: oklch(1 0 0 / 0.15);
+  --color-ring: oklch(0.708 0 0);
+
+  /* Status = monochrome. Differentiated by brightness; meaning carried by icon + text. */
+  --color-destructive: oklch(0.75 0 0);
+  --color-destructive-foreground: oklch(0.205 0 0);
+  --color-success: oklch(0.87 0 0);
+  --color-success-foreground: oklch(0.205 0 0);
+  --color-warn: oklch(0.8 0 0);
+  --color-warn-foreground: oklch(0.205 0 0);
+
+  --color-glass: hsl(0 0% 100%);
+  --color-overlay: hsl(0 0% 0%);
+  --color-surface: oklch(0.205 0 0);
+  --color-ghost: hsl(0 0% 100% / 0.05);
+  --color-ghost-hover: hsl(0 0% 100% / 0.1);
+  --color-ghost-active: hsl(0 0% 100% / 0.15);
+  --color-chip: hsl(0 0% 0% / 0.2);
+  --color-chip-dark: hsl(0 0% 0% / 0.35);
+  --color-nav: hsl(0 0% 0% / 0.5);
+  --color-modal: hsl(0 0% 0% / 0.6);
+  --color-backdrop: hsl(0 0% 0% / 0.8);
+
+  --color-edge: hsl(0 0% 100% / 0.1);
+  --color-edge-md: hsl(0 0% 100% / 0.15);
+  --color-edge-lg: hsl(0 0% 100% / 0.22);
+  --color-edge-xl: hsl(0 0% 100% / 0.3);
+
+  --color-glow-glass: hsl(0 0% 100% / 0.4);
+  --color-glow-glass-strong: hsl(0 0% 100% / 0.7);
+  --color-glow-overlay-md: hsl(0 0% 0% / 0.55);
+  --color-glow-overlay-lg: hsl(0 0% 0% / 0.65);
+  --color-glow-success: hsl(0 0% 100% / 0.45);
+
+  /* shadcn chart palette — kept monochrome to match the no-hue rule. */
+  --color-chart-1: oklch(0.708 0 0);
+  --color-chart-2: oklch(0.6 0 0);
+  --color-chart-3: oklch(0.5 0 0);
+  --color-chart-4: oklch(0.42 0 0);
+  --color-chart-5: oklch(0.35 0 0);
+
+  /* Sidebar tokens (shadcn). */
+  --color-sidebar: oklch(0.17 0 0);
+  --color-sidebar-foreground: oklch(0.985 0 0);
+  --color-sidebar-primary: oklch(0.985 0 0);
+  --color-sidebar-primary-foreground: oklch(0.205 0 0);
+  --color-sidebar-accent: oklch(0.269 0 0);
+  --color-sidebar-accent-foreground: oklch(0.985 0 0);
+  --color-sidebar-border: oklch(1 0 0 / 0.1);
+  --color-sidebar-ring: oklch(0.708 0 0);
+
+  --radius-xs: 4px;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+
+  --tracking-eyebrow: 0.18em;
+
+  /* Type scale (Nunito). Sizes carry their line-height + default weight. */
+  --text-display: 1.75rem;
+  --text-display--line-height: 2rem;
+  --text-display--font-weight: 700;
+  --text-h1: 1.25rem;
+  --text-h1--line-height: 1.75rem;
+  --text-h1--font-weight: 700;
+  --text-h2: 1rem;
+  --text-h2--line-height: 1.5rem;
+  --text-h2--font-weight: 600;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.25rem;
+  --text-body-med: 0.875rem;
+  --text-body-med--line-height: 1.25rem;
+  --text-body-med--font-weight: 600;
+
+  --text-eyebrow: 11px;
+  --text-caption: 12px;
+  --text-microlabel: 10px;
+  --text-console-body: 12.5px;
+  --text-console-meta: 10.5px;
+  --text-console-badge: 9.5px;
+  --text-progress-label: 13px;
+  --text-progress-value: 14px;
+
+  /* Motion easings — enter decelerates, exit accelerates. */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-decelerate: cubic-bezier(0, 0, 0.2, 1);
+  --ease-accelerate: cubic-bezier(0.4, 0, 1, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Route content swap — fade + slight rise on enter. */
+  --animate-route-fade: route-fade 180ms var(--ease-decelerate);
+  @keyframes route-fade {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  --shadow-overlay: 0 16px 48px hsl(0 0% 0% / 0.55);
+  --shadow-inset-highlight: hsl(0 0% 100% / 0.1);
+}
+
+/* shadcn ui components reference these short aliases via @theme inline normally; we
+   map them directly to the token values above so border-border / bg-background etc.
+   resolve. radius alias mirrors shadcn's --radius. */
+@theme inline {
+  --radius: 0.5rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-canvas);
+    color: var(--color-foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * {
+    scrollbar-width: thin;
+  }
+}
+
+/* biome-ignore-start lint/complexity/noImportantStyles: the reduced-motion backstop must win over every component-level animation/transition. */
+/* Reduced-motion backstop. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* biome-ignore-end lint/complexity/noImportantStyles: end reduced-motion backstop. */
+
+/* Forced-colors / Windows High Contrast: restore a solid focus indicator. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+  }
+}

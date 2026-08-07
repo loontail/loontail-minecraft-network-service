@@ -19,7 +19,15 @@
 
 ## Test plan
 
-- [ ] `cargo build` passes
+The four gates CI enforces (see "Verify" in the README):
+
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace` (with `DATABASE_URL` pointed at a scratch database)
+- [ ] `admin-ui`: `npm run build && npm test`
+
+Plus, where relevant:
+
 - [ ] Migrations apply cleanly against a fresh Postgres instance
 - [ ] Affected endpoints tested manually (or via curl / integration test)
 - [ ] Docker compose (`docker compose up --build`) starts healthy
