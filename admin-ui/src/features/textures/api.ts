@@ -1,53 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { useQuery } from "@tanstack/react-query";
 
 import { api, queryString } from "@/shared/api/client";
-import { errorMessage } from "@/shared/api/toast";
-
-export type TextureKind = "skins" | "capes";
-
-export interface TextureRow {
-  userId: string;
-  profileUuid: string;
-  username: string;
-  fileUrl: string;
-  filePath: string;
-  fileSize: number;
-  // CLASSIC | SLIM for skins; null for capes.
-  variant: string | null;
-  updatedAt: string;
-}
-
-export interface PageMeta {
-  page: number;
-  pageSize: number;
-  total: number;
-  pageCount: number;
-}
-
-export interface TextureListResponse {
-  data: TextureRow[];
-  meta: PageMeta;
-}
-
-export interface TextureSearchQuery {
-  q?: string;
-  page?: number;
-}
-
-export interface OrphansResponse {
-  skins: TextureRow[];
-  capes: TextureRow[];
-}
-
-export interface PurgeResponse {
-  purgedSkins: number;
-  purgedCapes: number;
-}
-
-export interface DeleteAck {
-  deleted: boolean;
-}
+import { useAdminMutation } from "@/shared/api/useAdminMutation";
+import type {
+  DeleteAck,
+  OrphansResponse,
+  PurgeResponse,
+  TextureKind,
+  TextureListResponse,
+  TextureSearchQuery,
+} from "@/shared/types";
 
 export const textureKeys = {
   all: ["textures"] as const,
@@ -68,20 +30,16 @@ export function useTextures(kind: TextureKind, query: TextureSearchQuery = {}) {
 }
 
 export function useDeleteTexture(kind: TextureKind) {
-  const qc = useQueryClient();
-  return useMutation({
+  return useAdminMutation({
     mutationFn: (userId: string) =>
       api.delete<DeleteAck>(`/admin/textures/${kind}/${userId}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: textureKeys.all });
-      toast.success(kind === "skins" ? "Skin deleted" : "Cape deleted");
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to delete texture")),
+    invalidates: () => [textureKeys.all],
+    success: kind === "skins" ? "Skin deleted" : "Cape deleted",
+    failure: "Failed to delete texture",
   });
 }
 
-/// Opt-in only: stats every row's file on disk, so it never runs on page load.
+// Opt-in only: stats every row's file on disk, so it never runs on page load.
 export function useOrphans(enabled: boolean) {
   return useQuery({
     queryKey: textureKeys.orphans(),
@@ -91,19 +49,15 @@ export function useOrphans(enabled: boolean) {
 }
 
 export function usePurgeMissing() {
-  const qc = useQueryClient();
-  return useMutation({
+  return useAdminMutation<PurgeResponse, void>({
     mutationFn: () => api.post<PurgeResponse>("/admin/textures/purge-missing"),
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: textureKeys.all });
+    invalidates: () => [textureKeys.all],
+    success: (res) => {
       const total = res.purgedSkins + res.purgedCapes;
-      toast.success(
-        total === 0
-          ? "No missing rows to purge"
-          : `Purged ${total} missing row${total === 1 ? "" : "s"}`,
-      );
+      return total === 0
+        ? "No missing rows to purge"
+        : `Purged ${total} missing row${total === 1 ? "" : "s"}`;
     },
-    onError: (error) =>
-      toast.error(errorMessage(error, "Failed to purge missing textures")),
+    failure: "Failed to purge missing textures",
   });
 }

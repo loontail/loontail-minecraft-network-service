@@ -1,30 +1,16 @@
-import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { Route, Routes } from "react-router-dom";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import { Route, Routes } from "react-router";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { buildKeys } from "@/features/builds/api";
 import { BuildDetailPage } from "@/pages/BuildDetailPage";
 import type { VersionsCatalog } from "@/features/builds/useVersions";
-import type { ClientAdmin, Keyword, Server } from "@/shared/types";
-import { renderWithProviders } from "@/test/renderWithProviders";
-
-// Radix Select drives its trigger/listbox through Pointer Events and scrolls the
-// active item into view. jsdom implements neither, so polyfill the handful of
-// methods Radix touches; without them, opening the listbox throws.
-beforeAll(() => {
-  if (!Element.prototype.hasPointerCapture) {
-    Element.prototype.hasPointerCapture = () => false;
-  }
-  if (!Element.prototype.setPointerCapture) {
-    Element.prototype.setPointerCapture = () => {};
-  }
-  if (!Element.prototype.releasePointerCapture) {
-    Element.prototype.releasePointerCapture = () => {};
-  }
-  if (!Element.prototype.scrollIntoView) {
-    Element.prototype.scrollIntoView = () => {};
-  }
-});
+import type { BuildAdmin, Keyword, Server } from "@/shared/types";
+import {
+  makeTestQueryClient,
+  renderWithProviders,
+  setupUser,
+} from "@/test/renderWithProviders";
 
 const SAMPLE_VERSIONS: VersionsCatalog = {
   version: 3,
@@ -58,12 +44,12 @@ const SAMPLE_VERSIONS: VersionsCatalog = {
 
 // BuildDetailPage reads its `:slug` route param, so it must render inside a matching
 // <Route> rather than bare.
-function renderDetail() {
+function renderDetail(client = makeTestQueryClient()) {
   return renderWithProviders(
     <Routes>
       <Route path="/builds/:slug" element={<BuildDetailPage />} />
     </Routes>,
-    { route: "/builds/all-the-mods-9" },
+    { route: "/builds/all-the-mods-9", client },
   );
 }
 
@@ -78,7 +64,7 @@ const SAMPLE_SERVER: Server = {
   address: "play.example.net",
 };
 
-const SAMPLE_BUILD: ClientAdmin = {
+const SAMPLE_BUILD: BuildAdmin = {
   id: "11111111111111111111111111111111",
   slug: "all-the-mods-9",
   title: "All the Mods 9",
@@ -113,13 +99,20 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-// Route the admin clients list (build resolution), the linked bundle read (manifest
-// panel + always-mounted Files tab), the per-client media list (always-mounted
+function errorResponse(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: { code: "internal", message } }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+// Route the admin builds list (build resolution), the linked bundle read (manifest
+// panel + always-mounted Files tab), the per-build media list (always-mounted
 // Media tab), and the public keyword/server surfaces the Servers & Tags tab pulls
 // from. The media branch must be checked before the generic clients branch since
 // its URL also contains `/admin/catalog/clients`.
 function mockApi({
-  clients = [SAMPLE_BUILD] as ClientAdmin[],
+  clients = [SAMPLE_BUILD] as BuildAdmin[],
   keywords = [] as Keyword[],
   servers = [] as Server[],
   versions = SAMPLE_VERSIONS as VersionsCatalog,
@@ -177,7 +170,7 @@ describe("BuildDetailPage — Servers & Tags", () => {
   });
 
   it("renders attached keywords and servers with add controls", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     renderDetail();
 
     await waitFor(() =>
@@ -188,7 +181,6 @@ describe("BuildDetailPage — Servers & Tags", () => {
 
     await user.click(screen.getByRole("tab", { name: /servers & tags/i }));
 
-    // The attached keyword chip and the server row both render.
     expect(screen.getByText("Tech")).toBeInTheDocument();
     expect(screen.getByText("Survival")).toBeInTheDocument();
     expect(screen.getByText("play.example.net")).toBeInTheDocument();
@@ -202,7 +194,6 @@ describe("BuildDetailPage — Servers & Tags", () => {
       screen.getByRole("combobox", { name: /add server/i }),
     ).toBeInTheDocument();
 
-    // Removing the attached keyword chip is wired (detach control present).
     const chip = screen.getByText("Tech").closest("span");
     expect(chip).not.toBeNull();
     expect(
@@ -228,7 +219,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("renders the Minecraft version select with the stored value and catalog options", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     // The Radix trigger is a combobox showing the build's stored MC value.
@@ -237,7 +228,6 @@ describe("BuildDetailPage — version dropdowns", () => {
     });
     expect(mc).toHaveTextContent("1.21.4");
 
-    // Opening it surfaces the catalog options as listbox items.
     await user.click(mc);
     const listbox = await screen.findByRole("listbox");
     expect(
@@ -250,7 +240,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("enables Forge once a Minecraft version is chosen, filtered to it", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     // The sample build already has MC 1.21.4, so Forge is enabled and scoped.
@@ -282,7 +272,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("preserves a legacy Minecraft value not in the catalog", async () => {
     mockApi({ clients: [{ ...SAMPLE_BUILD, minecraftVersion: "1.7.10" }] });
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const mc = await screen.findByRole("combobox", {
@@ -301,7 +291,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("renders a Java select with the stored component and catalog components plus Custom…", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const java = await screen.findByRole("combobox", { name: "Java version" });
@@ -325,7 +315,7 @@ describe("BuildDetailPage — version dropdowns", () => {
   it("preserves a legacy/out-of-list Java runtime value", async () => {
     // An old build saved a bare major ("25") — surface it so it shows + can be cleared.
     mockApi({ clients: [{ ...SAMPLE_BUILD, runtimeVersion: "25" }] });
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const java = await screen.findByRole("combobox", { name: "Java version" });
@@ -340,7 +330,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("marks the recommended option in the dependent dropdowns", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     // Forge: the recommended 54.1.6 carries the marker; its sibling does not.
@@ -378,7 +368,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("keeps the trigger value clean after selecting a recommended option", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const fabric = await screen.findByRole("combobox", {
@@ -398,7 +388,7 @@ describe("BuildDetailPage — version dropdowns", () => {
 
   it("swaps the Java select for a free-text input when Custom… is picked", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const java = await screen.findByRole("combobox", { name: "Java version" });
@@ -406,7 +396,6 @@ describe("BuildDetailPage — version dropdowns", () => {
     const listbox = await screen.findByRole("listbox");
     await user.click(within(listbox).getByRole("option", { name: /custom/i }));
 
-    // The combobox is replaced by a text input the admin can type into.
     const input = await screen.findByRole("textbox", { name: "Java version" });
     await user.clear(input);
     await user.type(input, "27");
@@ -429,7 +418,7 @@ describe("BuildDetailPage — version dropdowns", () => {
         },
       ],
     });
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const mc = await screen.findByRole("combobox", {
@@ -482,7 +471,7 @@ describe("BuildDetailPage — version dropdowns", () => {
         },
       ],
     });
-    const user = userEvent.setup();
+    const user = setupUser();
     await renderDetailsTab();
 
     const mc = await screen.findByRole("combobox", {
@@ -501,7 +490,281 @@ describe("BuildDetailPage — version dropdowns", () => {
   });
 });
 
-describe("BuildDetailPage — tab switching preserves edits (P1-4)", () => {
+// A fetch stub whose admin-clients answer is read from a mutable holder (so a
+// refetch can return different rows) and can be held pending on demand.
+function mockApiWithLiveClients(initial: BuildAdmin[]) {
+  const state = {
+    clients: initial,
+    holdNext: false,
+    failClients: false,
+    release: undefined as undefined | (() => void),
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("versions.json")) {
+        return Promise.resolve(jsonResponse(SAMPLE_VERSIONS));
+      }
+      if (url.includes("/media")) {
+        return Promise.resolve(jsonResponse({ media: [] }));
+      }
+      if (url.includes("/admin/catalog/clients")) {
+        const answer = () =>
+          state.failClients
+            ? errorResponse(500, "database is unavailable")
+            : jsonResponse({ clients: state.clients });
+        if (state.holdNext) {
+          state.holdNext = false;
+          return new Promise<Response>((resolve) => {
+            state.release = () => resolve(answer());
+          });
+        }
+        return Promise.resolve(answer());
+      }
+      if (url.includes("/admin/bundles/builds/")) {
+        return Promise.resolve(
+          jsonResponse({ ...SAMPLE_BUILD.bundle, artifacts: [] }),
+        );
+      }
+      if (url.includes("/api/keywords")) {
+        return Promise.resolve(jsonResponse({ keywords: [] }));
+      }
+      if (url.includes("/api/servers")) {
+        return Promise.resolve(jsonResponse({ servers: [] }));
+      }
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    }),
+  );
+  return state;
+}
+
+describe("BuildDetailPage — manifest URL", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("renders the manifest URL the server shipped, resolved against the origin", async () => {
+    mockApi();
+    renderDetail();
+
+    const input = await screen.findByDisplayValue(
+      `${window.location.origin}/api/bundle-registry/builds/all-the-mods-9/manifest`,
+    );
+    expect(input).toBeInTheDocument();
+  });
+
+  it("uses the server value even when it diverges from the slug-derived guess", async () => {
+    mockApi({
+      clients: [
+        {
+          ...SAMPLE_BUILD,
+          bundle: {
+            ...SAMPLE_BUILD.bundle!,
+            manifestUrl: "/registry/v2/builds/other-slug/manifest.json",
+          },
+        },
+      ],
+    });
+    renderDetail();
+
+    expect(
+      await screen.findByDisplayValue(
+        `${window.location.origin}/registry/v2/builds/other-slug/manifest.json`,
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("BuildDetailPage — just-created build", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("shows the skeleton, not 'Build not found', while the stale list refetches", async () => {
+    // The state after a create: BuildsPage already populated the admin list, the
+    // invalidated refetch that will contain the new build is still in flight.
+    const state = mockApiWithLiveClients([SAMPLE_BUILD]);
+    const client = makeTestQueryClient();
+    client.setQueryData(buildKeys.list(), [] as BuildAdmin[]);
+    state.holdNext = true;
+
+    renderDetail(client);
+
+    await waitFor(() => expect(state.release).toBeDefined());
+    expect(screen.queryByText(/Build not found/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      state.release?.();
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "All the Mods 9" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Build not found/i)).not.toBeInTheDocument();
+  });
+
+  it("still reports a genuinely missing build once the list is idle", async () => {
+    mockApiWithLiveClients([]);
+    renderDetail();
+
+    expect(await screen.findByText(/Build not found/i)).toBeInTheDocument();
+  });
+
+  it("blames the failed list load, not the build, when the backend is down", async () => {
+    const state = mockApiWithLiveClients([SAMPLE_BUILD]);
+    state.failClients = true;
+    const user = setupUser();
+    renderDetail();
+
+    expect(await screen.findByText(/couldn.t load builds/i)).toBeInTheDocument();
+    expect(screen.getByText(/database is unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Build not found/i)).not.toBeInTheDocument();
+
+    // Retry re-reads the list, so recovery does not need a page reload.
+    state.failClients = false;
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+
+    expect(
+      await screen.findByRole("heading", { name: "All the Mods 9" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("BuildDetailPage — unsaved edits vs background refetch", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps unsaved Title edits when the server copy changes underneath", async () => {
+    const state = mockApiWithLiveClients([SAMPLE_BUILD]);
+    const user = setupUser();
+    const { client } = renderDetail();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "All the Mods 9" }),
+      ).toBeInTheDocument(),
+    );
+
+    const title = screen.getByLabelText("Title") as HTMLInputElement;
+    await user.clear(title);
+    await user.type(title, "My unsaved edit");
+
+    // Another admin's edit lands via any invalidation of the clients list.
+    state.clients = [{ ...SAMPLE_BUILD, title: "Renamed elsewhere" }];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: buildKeys.list() });
+    });
+
+    // The refetch really landed (the heading reflects the server copy)...
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Renamed elsewhere" }),
+      ).toBeInTheDocument(),
+    );
+    // ...but the in-progress edit is not clobbered.
+    expect(
+      (screen.getByLabelText("Title") as HTMLInputElement).value,
+    ).toBe("My unsaved edit");
+  });
+
+  it("follows the server value again once a no-op edit is undone", async () => {
+    const state = mockApiWithLiveClients([SAMPLE_BUILD]);
+    const user = setupUser();
+    const { client } = renderDetail();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "All the Mods 9" }),
+      ).toBeInTheDocument(),
+    );
+
+    // A no-op edit sequence: the switch goes off and straight back on, so the form
+    // is byte-identical to the server again.
+    const available = screen.getByRole("switch", { name: "Available" });
+    await user.click(available);
+    await user.click(available);
+    expect(available).toBeChecked();
+
+    // Another admin changes a field this admin never touched.
+    state.clients = [
+      { ...SAMPLE_BUILD, title: "Renamed elsewhere", minecraftVersion: "1.20.1" },
+    ];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: buildKeys.list() });
+    });
+
+    // The pristine form adopts the newest server values instead of pinning the
+    // snapshot it held when the first toggle fired.
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Title") as HTMLInputElement).value,
+      ).toBe("Renamed elsewhere"),
+    );
+    expect(
+      screen.getByRole("combobox", { name: "Minecraft version" }),
+    ).toHaveTextContent("1.20.1");
+  });
+
+  it("re-seeds a field the user reverted, keeping the newest server value", async () => {
+    const state = mockApiWithLiveClients([SAMPLE_BUILD]);
+    const user = setupUser();
+    const { client } = renderDetail();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "All the Mods 9" }),
+      ).toBeInTheDocument(),
+    );
+
+    // Type an edit, then undo it by hand (the same state a failed save leaves
+    // behind once the admin gives up).
+    const title = screen.getByLabelText("Title") as HTMLInputElement;
+    await user.clear(title);
+    await user.type(title, "Half-typed");
+    await user.clear(title);
+    await user.type(title, "All the Mods 9");
+
+    state.clients = [{ ...SAMPLE_BUILD, title: "Renamed elsewhere" }];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: buildKeys.list() });
+    });
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Title") as HTMLInputElement).value,
+      ).toBe("Renamed elsewhere"),
+    );
+  });
+
+  it("follows the server value while the form is untouched", async () => {
+    const state = mockApiWithLiveClients([SAMPLE_BUILD]);
+    const { client } = renderDetail();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "All the Mods 9" }),
+      ).toBeInTheDocument(),
+    );
+
+    state.clients = [{ ...SAMPLE_BUILD, title: "Renamed elsewhere" }];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: buildKeys.list() });
+    });
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Title") as HTMLInputElement).value,
+      ).toBe("Renamed elsewhere"),
+    );
+  });
+});
+
+describe("BuildDetailPage — tab switching preserves edits", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -509,7 +772,7 @@ describe("BuildDetailPage — tab switching preserves edits (P1-4)", () => {
 
   it("keeps in-progress Details edits across a tab switch and back", async () => {
     mockApi();
-    const user = userEvent.setup();
+    const user = setupUser();
     renderDetail();
 
     await waitFor(() =>
@@ -518,13 +781,11 @@ describe("BuildDetailPage — tab switching preserves edits (P1-4)", () => {
       ).toBeInTheDocument(),
     );
 
-    // Type a new title in the Details form.
     const title = screen.getByLabelText("Title") as HTMLInputElement;
     await user.clear(title);
     await user.type(title, "Edited Title");
     expect(title.value).toBe("Edited Title");
 
-    // Switch away to another tab, then back to Details.
     await user.click(screen.getByRole("tab", { name: /servers & tags/i }));
     await user.click(screen.getByRole("tab", { name: /details/i }));
 

@@ -1,7 +1,7 @@
 //! PNG validation for skins/capes. Validates the 8-byte signature, the IHDR chunk
 //! (length 13 at offset 8, type "IHDR" at offset 12), the big-endian width@16 /
 //! height@20, and the allowed dimensions per texture kind. Mirrors
-//! `@loontail/yggdrasil-core`'s `png.ts`. Skins must be 64x64 or 64x32; capes 64x32.
+//! the launcher's `src/shared/yggdrasil/png.ts`. Skins must be 64x64 or 64x32; capes 64x32.
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 const IHDR_LENGTH: u32 = 13;
@@ -41,8 +41,9 @@ fn read_u32_be(buf: &[u8], offset: usize) -> u32 {
 }
 
 /// Parse and validate the PNG header, returning `(width, height)`. This is the
-/// shared structural check before per-kind dimension rules are applied.
-fn parse_png_header(buf: &[u8]) -> Result<(u32, u32), PngError> {
+/// shared structural check before per-kind dimension rules are applied, and the one
+/// place in the workspace that knows the IHDR byte offsets.
+pub fn parse_png_header(buf: &[u8]) -> Result<(u32, u32), PngError> {
     if buf.len() < PNG_HEADER_MIN_BYTES {
         return Err(PngError::TooSmall);
     }

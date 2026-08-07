@@ -4,8 +4,9 @@
 //! full channel drops the record rather than stalling the request path, so logging
 //! can never become a latency or availability hazard.
 
+use sqlx::AssertSqlSafe;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -54,6 +55,26 @@ impl ResolvedPrincipal {
             user_id: None,
             auth_kind: "anon",
         }
+    }
+}
+
+/// A write-once slot the auth extractor fills with the principal it already resolved,
+/// so the request-log middleware reads it instead of repeating the identical
+/// `sessions JOIN users` lookup. Inserted into request extensions before the route
+/// runs; a route with no auth extractor leaves it empty and the middleware falls back
+/// to [`resolve_principal`].
+#[derive(Clone, Default)]
+pub struct PrincipalSlot(Arc<OnceLock<ResolvedPrincipal>>);
+
+impl PrincipalSlot {
+    /// First writer wins; later calls are no-ops. `AdminUser` delegates to `AuthUser`,
+    /// so the extractor chain sets this exactly once anyway.
+    pub fn set(&self, principal: ResolvedPrincipal) {
+        let _ = self.0.set(principal);
+    }
+
+    pub fn get(&self) -> Option<&ResolvedPrincipal> {
+        self.0.get()
     }
 }
 
@@ -154,7 +175,7 @@ async fn insert_batch(pool: &PgPool, batch: &[RequestLog]) -> Result<(), sqlx::E
         sql.push(')');
     }
 
-    let mut query = sqlx::query(&sql);
+    let mut query = sqlx::query(AssertSqlSafe(sql));
     for log in batch {
         query = query
             .bind(log.ts)

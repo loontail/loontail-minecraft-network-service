@@ -1,9 +1,11 @@
 //! Network domain: friends, presence, world sessions, the join flow, relay and signaling.
 
+pub mod cleanup;
 pub mod friends;
 pub mod invites;
-pub mod join_requests;
+pub mod join;
 pub mod presence;
+pub(crate) mod queries;
 pub mod relay;
 pub mod signaling;
 pub mod users;
@@ -36,15 +38,15 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/world-sessions/{id}/join-ticket",
-            post(join_requests::create_join_ticket),
+            post(join::create_join_ticket),
         )
         .route(
             "/world-sessions/{id}/join-requests",
-            post(join_requests::create_join_request),
+            post(join::create_join_request),
         )
-        .route("/join-requests/incoming", get(join_requests::incoming))
-        .route("/join-requests/{id}/accept", post(join_requests::accept))
-        .route("/join-requests/{id}/decline", post(join_requests::decline))
+        .route("/join-requests/incoming", get(join::incoming))
+        .route("/join-requests/{id}/accept", post(join::accept))
+        .route("/join-requests/{id}/decline", post(join::decline))
         .route("/world-sessions/{id}/invites", post(invites::create))
         .route("/invites/incoming", get(invites::incoming))
         .route("/invites/outgoing", get(invites::outgoing))

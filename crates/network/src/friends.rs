@@ -2,16 +2,18 @@ use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::AssertSqlSafe;
 use uuid::Uuid;
 
 use loontail_core::auth::AuthUser;
-use loontail_core::error::{is_unique_violation, AppError, AppResult};
-use loontail_core::models::UserDto;
+use loontail_core::error::{found, is_unique_violation, AppError, AppResult};
+use loontail_core::models::{RequestStatus, UserDto};
 use loontail_core::AppState;
 use loontail_core::Metrics;
 use loontail_core::ServerEvent;
 
 use crate::presence::{self, FriendPresence};
+use crate::queries::{are_friends, user_exists};
 
 /// `GET /friends` — the user's friends with their effective presence.
 pub async fn list_friends(
@@ -32,7 +34,7 @@ pub struct CreateFriendRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FriendRequestDto {
     pub id: Uuid,
-    pub status: String,
+    pub status: RequestStatus,
     pub created_at: DateTime<Utc>,
     pub from_user: UserDto,
     pub to_user: UserDto,
@@ -41,18 +43,14 @@ pub struct FriendRequestDto {
 #[derive(sqlx::FromRow)]
 struct FriendRequestRow {
     id: Uuid,
-    status: String,
+    status: RequestStatus,
     created_at: DateTime<Utc>,
     from_id: Uuid,
     from_minecraft_uuid: Option<String>,
     from_username: String,
-    from_avatar_url: Option<String>,
-    from_skin_hash: Option<String>,
     to_id: Uuid,
     to_minecraft_uuid: Option<String>,
     to_username: String,
-    to_avatar_url: Option<String>,
-    to_skin_hash: Option<String>,
 }
 
 impl From<FriendRequestRow> for FriendRequestDto {
@@ -65,15 +63,11 @@ impl From<FriendRequestRow> for FriendRequestDto {
                 id: row.from_id,
                 minecraft_uuid: row.from_minecraft_uuid,
                 username: row.from_username,
-                avatar_url: row.from_avatar_url,
-                skin_hash: row.from_skin_hash,
             },
             to_user: UserDto {
                 id: row.to_id,
                 minecraft_uuid: row.to_minecraft_uuid,
                 username: row.to_username,
-                avatar_url: row.to_avatar_url,
-                skin_hash: row.to_skin_hash,
             },
         }
     }
@@ -83,11 +77,9 @@ const FRIEND_REQUEST_SELECT: &str = r#"
     SELECT
         r.id, r.status, r.created_at,
         fu.id AS from_id, fu.minecraft_uuid AS from_minecraft_uuid,
-        fu.username AS from_username, fu.avatar_url AS from_avatar_url,
-        fu.skin_hash AS from_skin_hash,
+        fu.username AS from_username,
         tu.id AS to_id, tu.minecraft_uuid AS to_minecraft_uuid,
-        tu.username AS to_username, tu.avatar_url AS to_avatar_url,
-        tu.skin_hash AS to_skin_hash
+        tu.username AS to_username
     FROM friend_requests r
     JOIN users fu ON fu.id = r.from_user_id
     JOIN users tu ON tu.id = r.to_user_id
@@ -95,7 +87,7 @@ const FRIEND_REQUEST_SELECT: &str = r#"
 
 async fn load_request(state: &AppState, id: Uuid) -> AppResult<FriendRequestRow> {
     let query = format!("{FRIEND_REQUEST_SELECT} WHERE r.id = $1");
-    sqlx::query_as::<_, FriendRequestRow>(&query)
+    sqlx::query_as::<_, FriendRequestRow>(AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(&state.pool)
         .await?
@@ -116,28 +108,10 @@ pub async fn create_request(
         return Err(AppError::BadRequest("you cannot add yourself".into()));
     }
 
-    let target_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
-            .bind(target)
-            .fetch_one(&state.pool)
-            .await?;
-    if !target_exists {
+    if !user_exists(&state.pool, target).await? {
         return Err(AppError::NotFound("user not found".into()));
     }
-
-    let already_friends: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM friendships
-            WHERE user_a_id = LEAST($1, $2) AND user_b_id = GREATEST($1, $2)
-        )
-        "#,
-    )
-    .bind(me)
-    .bind(target)
-    .fetch_one(&state.pool)
-    .await?;
-    if already_friends {
+    if are_friends(&state.pool, me, target).await? {
         return Err(AppError::Conflict("you are already friends".into()));
     }
 
@@ -199,7 +173,7 @@ pub async fn incoming(
     let query = format!(
         "{FRIEND_REQUEST_SELECT} WHERE r.to_user_id = $1 AND r.status = 'pending' ORDER BY r.created_at DESC"
     );
-    let rows = sqlx::query_as::<_, FriendRequestRow>(&query)
+    let rows = sqlx::query_as::<_, FriendRequestRow>(AssertSqlSafe(query))
         .bind(auth.id())
         .fetch_all(&state.pool)
         .await?;
@@ -214,7 +188,7 @@ pub async fn outgoing(
     let query = format!(
         "{FRIEND_REQUEST_SELECT} WHERE r.from_user_id = $1 AND r.status = 'pending' ORDER BY r.created_at DESC"
     );
-    let rows = sqlx::query_as::<_, FriendRequestRow>(&query)
+    let rows = sqlx::query_as::<_, FriendRequestRow>(AssertSqlSafe(query))
         .bind(auth.id())
         .fetch_all(&state.pool)
         .await?;
@@ -228,7 +202,7 @@ async fn accept_internal(
 ) -> AppResult<FriendRequestDto> {
     let mut tx = state.pool.begin().await?;
 
-    let request = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+    let request = sqlx::query_as::<_, (Uuid, Uuid, RequestStatus)>(
         "SELECT from_user_id, to_user_id, status FROM friend_requests WHERE id = $1 FOR UPDATE",
     )
     .bind(request_id)
@@ -240,7 +214,7 @@ async fn accept_internal(
     if to_user_id != me {
         return Err(AppError::Forbidden);
     }
-    if status != "pending" {
+    if status != RequestStatus::Pending {
         return Err(AppError::Conflict("request is not pending".into()));
     }
 
@@ -305,7 +279,7 @@ pub async fn decline(
     if request.to_id != auth.id() {
         return Err(AppError::Forbidden);
     }
-    if request.status != "pending" {
+    if request.status != RequestStatus::Pending {
         return Err(AppError::Conflict("request is not pending".into()));
     }
 
@@ -341,9 +315,7 @@ pub async fn remove_friend(
     .execute(&state.pool)
     .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("friendship not found".into()));
-    }
+    found(result.rows_affected(), "friendship")?;
 
     state
         .realtime

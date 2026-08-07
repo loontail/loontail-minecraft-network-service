@@ -7,7 +7,7 @@ use loontail_core::auth::{
 };
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::identity::{
-    admin_create_user, block, get_user, search_users, set_password, unblock, update_user,
+    admin_create_user, block, load_user, search_users, set_password, unblock, update_user,
     AdminCreateUser, UpdateUser,
 };
 use loontail_core::AppState;
@@ -94,7 +94,7 @@ pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<AdminUserDto>> {
-    let user = get_user(&state.pool, id).await?;
+    let user = load_user(&state.pool, id).await?;
     Ok(Json(AdminUserDto::from(user)))
 }
 
@@ -133,7 +133,7 @@ pub async fn delete(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Ack>> {
     // Ensure it exists so a missing id surfaces a 404 rather than a silent no-op.
-    get_user(&state.pool, id).await?;
+    load_user(&state.pool, id).await?;
     guard_last_admin(&state, id).await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
@@ -185,7 +185,7 @@ pub async fn revoke_tokens(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Ack>> {
-    get_user(&state.pool, id).await?;
+    load_user(&state.pool, id).await?;
     revoke_all_sessions_for_user(&state.pool, id).await?;
     invalidate_all_yggdrasil_for_user(&state.pool, id).await?;
     Ok(Json(Ack::ok()))

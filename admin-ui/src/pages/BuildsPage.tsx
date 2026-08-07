@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import type * as React from "react";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -39,12 +39,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  useAdminClients,
-  useCreateClient,
-  useDeleteClient,
+  useAdminBuilds,
+  useCreateBuild,
+  useDeleteBuild,
 } from "@/features/builds/api";
 import { errorMessage } from "@/shared/api/toast";
-import type { ClientAdmin } from "@/shared/types";
+import type { BuildAdmin } from "@/shared/types";
 
 const COLUMN_COUNT = 6;
 
@@ -58,7 +58,7 @@ function CreateBuildDialog({
   const navigate = useNavigate();
   const [slug, setSlug] = useState("");
   const [title, setTitle] = useState("");
-  const createClient = useCreateClient();
+  const createBuild = useCreateBuild();
 
   function handleOpenChange(next: boolean) {
     if (next) {
@@ -75,7 +75,7 @@ function CreateBuildDialog({
     if (!trimmedSlug || !trimmedTitle) {
       return;
     }
-    createClient.mutate(
+    createBuild.mutate(
       {
         slug: trimmedSlug,
         available: false,
@@ -84,7 +84,7 @@ function CreateBuildDialog({
       {
         onSuccess: () => {
           handleOpenChange(false);
-          // Navigate by the client slug, not the owned-bundle slug (which can differ and would 404).
+          // Navigate by the build slug, not the owned-bundle slug (which can differ and would 404).
           navigate(`/builds/${trimmedSlug}`);
         },
       },
@@ -127,17 +127,17 @@ function CreateBuildDialog({
               type="button"
               variant="outline"
               onClick={() => handleOpenChange(false)}
-              disabled={createClient.isPending}
+              disabled={createBuild.isPending}
             >
               Cancel
             </Button>
             <Button
               type="submit"
               disabled={
-                createClient.isPending || !slug.trim() || !title.trim()
+                createBuild.isPending || !slug.trim() || !title.trim()
               }
             >
-              {createClient.isPending ? (
+              {createBuild.isPending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : null}
               Create build
@@ -151,10 +151,10 @@ function CreateBuildDialog({
 
 export function BuildsPage() {
   const navigate = useNavigate();
-  const builds = useAdminClients();
-  const deleteClient = useDeleteClient();
+  const builds = useAdminBuilds();
+  const deleteBuild = useDeleteBuild();
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [confirm, setConfirm] = useState<ClientAdmin | null>(null);
+  const [confirm, setConfirm] = useState<BuildAdmin | null>(null);
   const rows = builds.data ?? [];
   const showEmpty = !builds.isLoading && !builds.isError && rows.length === 0;
 
@@ -195,25 +195,21 @@ export function BuildsPage() {
             )}
 
             {showEmpty && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={COLUMN_COUNT} className="h-48 text-center">
-                  <div className="flex flex-col items-center justify-center gap-2 text-text-mute">
-                    <Package className="size-8 text-text-faint" />
-                    <p className="text-body-med text-text-hi">No builds yet</p>
-                    <p className="text-caption">
-                      Create a build to surface a modpack in the launcher.
-                    </p>
-                    <Button
-                      variant="outline"
-                      className="mt-2"
-                      onClick={() => setDialogOpen(true)}
-                    >
-                      <Plus className="size-4" />
-                      New build
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
+              <TableStateRow
+                columns={COLUMN_COUNT}
+                icon={Package}
+                title="No builds yet"
+                description="Create a build to surface a modpack in the launcher."
+                action={
+                  <Button
+                    variant="outline"
+                    onClick={() => setDialogOpen(true)}
+                  >
+                    <Plus className="size-4" />
+                    New build
+                  </Button>
+                }
+              />
             )}
 
             {!builds.isLoading &&
@@ -282,12 +278,12 @@ export function BuildsPage() {
         description="This permanently deletes the build, its bundle, and all of its files. This cannot be undone."
         confirmLabel="Delete build"
         destructive
-        pending={deleteClient.isPending}
+        pending={deleteBuild.isPending}
         onConfirm={() => {
           if (!confirm) {
             return;
           }
-          deleteClient.mutate(confirm.id, {
+          deleteBuild.mutate(confirm.id, {
             onSuccess: () => setConfirm(null),
           });
         }}

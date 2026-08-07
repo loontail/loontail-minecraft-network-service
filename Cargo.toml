@@ -15,15 +15,15 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.94"
 license = "MIT"
 
 [workspace.dependencies]
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
-sqlx = { version = "0.8", features = [
+tower-http = { version = "0.7", features = ["cors", "trace", "fs"] }
+sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",
@@ -40,19 +40,20 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-sha2 = "0.10"
-rand = "0.8"
+sha2 = "0.11"
+rand = "0.10"
 hex = "0.4"
 subtle = "2"
 dotenvy = "0.15"
 futures-util = "0.3"
 sha1 = "0.10"
 argon2 = "0.5"
-rsa = { version = "0.9", features = ["sha1", "sha2"] }
-base64 = "0.22"
-zip = "2"
+rsa = { version = "0.9", features = ["sha1", "sha2", "getrandom"] }
+base64 = "0.23"
+zip = "8"
 rust-embed = "8"
 mime_guess = "2"
+form_urlencoded = "1"
 
 # Internal crates
 loontail-core = { path = "crates/core" }

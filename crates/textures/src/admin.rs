@@ -1,5 +1,5 @@
 //! Admin moderation surface for the texture registry: paginated listing of the
-//! skin/cape tables (search by username/profile uuid), delete-on-behalf, and an
+//! skin/cape registry (search by username/profile uuid), delete-on-behalf, and an
 //! orphan (missing-file) scan + purge. Mounted by the server crate under
 //! `/admin/textures` behind the admin cookie; the `AdminUser` extractor enforces
 //! the session and the CSRF double-submit on the mutating routes.
@@ -13,7 +13,7 @@ use loontail_core::auth::AdminUser;
 use loontail_core::error::{AppError, AppResult};
 use loontail_core::AppState;
 
-use crate::store::{self, AdminTextureRow, Kind};
+use crate::storage::{self, AdminTextureRow, TextureKind};
 
 /// Rows per page for the registry listing.
 const PAGE_SIZE: i64 = 20;
@@ -42,15 +42,15 @@ pub struct TextureListResponse {
 
 async fn list(
     state: &AppState,
-    kind: Kind,
+    kind: TextureKind,
     query: ListQuery,
 ) -> AppResult<Json<TextureListResponse>> {
     let search = query.q.unwrap_or_default();
     let page = query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * PAGE_SIZE;
 
-    let data = store::admin_list(&state.pool, kind, &search, PAGE_SIZE, offset).await?;
-    let total = store::admin_count(&state.pool, kind, &search).await?;
+    let data = storage::admin_list(&state.pool, kind, &search, PAGE_SIZE, offset).await?;
+    let total = storage::admin_count(&state.pool, kind, &search).await?;
     let page_count = if total > 0 {
         (total + PAGE_SIZE - 1) / PAGE_SIZE
     } else {
@@ -74,7 +74,7 @@ pub async fn list_skins(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<TextureListResponse>> {
-    list(&state, Kind::Skin, query).await
+    list(&state, TextureKind::Skin, query).await
 }
 
 /// `GET /admin/textures/capes?q=&page=`.
@@ -83,7 +83,7 @@ pub async fn list_capes(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<TextureListResponse>> {
-    list(&state, Kind::Cape, query).await
+    list(&state, TextureKind::Cape, query).await
 }
 
 #[derive(Debug, Serialize)]
@@ -92,12 +92,12 @@ pub struct DeleteAck {
     pub deleted: bool,
 }
 
-async fn delete(state: &AppState, kind: Kind, user_id: &str) -> AppResult<Json<DeleteAck>> {
+async fn delete(state: &AppState, kind: TextureKind, user_id: &str) -> AppResult<Json<DeleteAck>> {
     let id =
         Uuid::parse_str(user_id).map_err(|_| AppError::BadRequest("invalid user id".into()))?;
-    let removed = store::admin_delete_by_user(&state.pool, kind, id).await?;
+    let removed = storage::delete_by_user(&state.pool, kind, id).await?;
     if let Some(path) = &removed {
-        store::unlink_quiet(std::path::Path::new(path)).await;
+        storage::unlink_quiet(std::path::Path::new(path)).await;
     }
     Ok(Json(DeleteAck {
         deleted: removed.is_some(),
@@ -110,7 +110,7 @@ pub async fn delete_skin(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<DeleteAck>> {
-    delete(&state, Kind::Skin, &user_id).await
+    delete(&state, TextureKind::Skin, &user_id).await
 }
 
 /// `DELETE /admin/textures/capes/{user_id}` — remove a user's cape (row + file).
@@ -119,7 +119,7 @@ pub async fn delete_cape(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<DeleteAck>> {
-    delete(&state, Kind::Cape, &user_id).await
+    delete(&state, TextureKind::Cape, &user_id).await
 }
 
 #[derive(Debug, Serialize)]
@@ -129,8 +129,8 @@ pub struct OrphansResponse {
     pub capes: Vec<AdminTextureRow>,
 }
 
-async fn collect_orphans(state: &AppState, kind: Kind) -> AppResult<Vec<AdminTextureRow>> {
-    let rows = store::admin_fetch_all(&state.pool, kind).await?;
+async fn collect_orphans(state: &AppState, kind: TextureKind) -> AppResult<Vec<AdminTextureRow>> {
+    let rows = storage::admin_fetch_all(&state.pool, kind).await?;
     let mut orphans = Vec::new();
     for row in rows {
         // A registry row whose backing PNG is gone from disk is an orphan; the
@@ -149,8 +149,8 @@ pub async fn orphans(
     State(state): State<AppState>,
 ) -> AppResult<Json<OrphansResponse>> {
     Ok(Json(OrphansResponse {
-        skins: collect_orphans(&state, Kind::Skin).await?,
-        capes: collect_orphans(&state, Kind::Cape).await?,
+        skins: collect_orphans(&state, TextureKind::Skin).await?,
+        capes: collect_orphans(&state, TextureKind::Cape).await?,
     }))
 }
 
@@ -161,12 +161,12 @@ pub struct PurgeResponse {
     pub purged_capes: usize,
 }
 
-async fn purge_kind(state: &AppState, kind: Kind) -> AppResult<usize> {
+async fn purge_kind(state: &AppState, kind: TextureKind) -> AppResult<usize> {
     let orphans = collect_orphans(state, kind).await?;
     let mut purged = 0usize;
     for row in &orphans {
         if let Ok(id) = Uuid::parse_str(&row.user_id) {
-            store::admin_delete_by_user(&state.pool, kind, id).await?;
+            storage::delete_by_user(&state.pool, kind, id).await?;
             purged += 1;
         }
     }
@@ -180,7 +180,7 @@ pub async fn purge_missing(
     State(state): State<AppState>,
 ) -> AppResult<Json<PurgeResponse>> {
     Ok(Json(PurgeResponse {
-        purged_skins: purge_kind(&state, Kind::Skin).await?,
-        purged_capes: purge_kind(&state, Kind::Cape).await?,
+        purged_skins: purge_kind(&state, TextureKind::Skin).await?,
+        purged_capes: purge_kind(&state, TextureKind::Cape).await?,
     }))
 }

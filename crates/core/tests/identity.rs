@@ -3,8 +3,9 @@
 //! the workspace `migrations/` dir).
 
 use loontail_core::identity::{
-    admin_create_user, authenticate_password, block, find_or_create_from_bootstrap, get_user,
-    search_users, set_password, unblock, update_user, AdminCreateUser, UpdateUser,
+    admin_create_user, authenticate_password, block, find_or_create_from_bootstrap, load_user,
+    search_users, set_password, unblock, update_user, AdminCreateUser, BootstrapIdentity,
+    UpdateUser,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -14,10 +15,18 @@ const MC_UUID_UNDASHED: &str = "11111111222233334444555555555555";
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn bootstrap_creates_mod_user_with_profile_uuid(pool: PgPool) {
-    let user =
-        find_or_create_from_bootstrap(&pool, MC_UUID, "Steve", Some("microsoft"), None, None)
-            .await
-            .unwrap();
+    let user = find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: MC_UUID,
+            username: "Steve",
+            account_type: Some("microsoft"),
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(user.minecraft_uuid.as_deref(), Some(MC_UUID));
     assert_eq!(user.profile_uuid.as_deref(), Some(MC_UUID_UNDASHED));
@@ -28,12 +37,30 @@ async fn bootstrap_creates_mod_user_with_profile_uuid(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn bootstrap_is_idempotent_and_updates_username(pool: PgPool) {
-    let first = find_or_create_from_bootstrap(&pool, MC_UUID, "Steve", None, None, None)
-        .await
-        .unwrap();
-    let second = find_or_create_from_bootstrap(&pool, MC_UUID, "Steve_Renamed", None, None, None)
-        .await
-        .unwrap();
+    let first = find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: MC_UUID,
+            username: "Steve",
+            account_type: None,
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let second = find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: MC_UUID,
+            username: "Steve_Renamed",
+            account_type: None,
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(first.id, second.id, "same minecraft_uuid ⇒ same row");
     assert_eq!(second.username, "Steve_Renamed");
@@ -61,9 +88,18 @@ async fn bootstrap_reconciles_onto_credential_first_account(pool: PgPool) {
 
     // Same player bootstraps from the mod — must bind onto the existing row, not
     // create a duplicate.
-    let boot = find_or_create_from_bootstrap(&pool, MC_UUID, "Alex", None, None, None)
-        .await
-        .unwrap();
+    let boot = find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: MC_UUID,
+            username: "Alex",
+            account_type: None,
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(boot.id, created.id, "reconciled onto existing account");
     assert_eq!(boot.profile_uuid.as_deref(), Some(MC_UUID_UNDASHED));
 
@@ -76,14 +112,32 @@ async fn bootstrap_reconciles_onto_credential_first_account(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn bootstrap_username_collision_surfaces_conflict(pool: PgPool) {
-    find_or_create_from_bootstrap(&pool, MC_UUID, "Taken", None, None, None)
-        .await
-        .unwrap();
+    find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: MC_UUID,
+            username: "Taken",
+            account_type: None,
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap();
     // A different Minecraft identity claiming the same normalized username.
     let other = "99999999-8888-7777-6666-555555555555";
-    let err = find_or_create_from_bootstrap(&pool, other, "taken", None, None, None)
-        .await
-        .unwrap_err();
+    let err = find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: other,
+            username: "taken",
+            account_type: None,
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.to_lowercase().contains("conflict") || msg.to_lowercase().contains("taken"));
 }
@@ -212,9 +266,18 @@ async fn password_auth_rejects_blocked_user(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn mod_bootstrap_user_cannot_password_login(pool: PgPool) {
     // origin='mod' users have no password_hash and are unconfirmed ⇒ no login.
-    find_or_create_from_bootstrap(&pool, MC_UUID, "ModOnly", None, None, None)
-        .await
-        .unwrap();
+    find_or_create_from_bootstrap(
+        &pool,
+        BootstrapIdentity {
+            minecraft_uuid: MC_UUID,
+            username: "ModOnly",
+            account_type: None,
+            xuid: None,
+            client_id: None,
+        },
+    )
+    .await
+    .unwrap();
     let err = authenticate_password(&pool, "modonly", "anything")
         .await
         .unwrap_err();
@@ -274,13 +337,13 @@ async fn update_user_changes_username_and_normalized(pool: PgPool) {
     assert_eq!(updated.username, "After");
     assert_eq!(updated.normalized_username, "after");
 
-    let fetched = get_user(&pool, user.id).await.unwrap();
+    let fetched = load_user(&pool, user.id).await.unwrap();
     assert_eq!(fetched.username, "After");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn get_user_missing_is_not_found(pool: PgPool) {
-    let err = get_user(&pool, Uuid::new_v4()).await.unwrap_err();
+async fn load_user_missing_is_not_found(pool: PgPool) {
+    let err = load_user(&pool, Uuid::new_v4()).await.unwrap_err();
     assert!(format!("{err:?}").to_lowercase().contains("not"));
 }
 

@@ -39,6 +39,10 @@ fn app(pool: PgPool) -> (Router, PathBuf, AppState) {
     let mut config = Config::from_env().unwrap_or_else(|_| test_config());
     let root = std::env::temp_dir().join(format!("loontail-textures-test-{}", Uuid::new_v4()));
     config.textures.storage_root = root.to_string_lossy().to_string();
+    // why: texture URLs are built from the Yggdrasil public URL, so the assertions below
+    // would follow whatever `YGGDRASIL_PUBLIC_URL` the ambient env/.env happens to set.
+    // Pin it here instead of demanding the runner export it.
+    config.yggdrasil.public_url = "/api/yggdrasil".to_string();
 
     let state = AppState::new(pool, config);
     let router = Router::new()
@@ -50,7 +54,11 @@ fn app(pool: PgPool) -> (Router, PathBuf, AppState) {
 /// A standalone config when `DATABASE_URL` is unset in the test process; the pool
 /// is injected by `#[sqlx::test]`, so the DB URL here is never used.
 fn test_config() -> Config {
-    std::env::set_var("DATABASE_URL", "postgres://unused");
+    // why: only a placeholder when the var is absent — clobbering a real DATABASE_URL
+    // trips sqlx::test's "DATABASE_URL changed at runtime" assertion mid-run.
+    if std::env::var_os("DATABASE_URL").is_none() {
+        std::env::set_var("DATABASE_URL", "postgres://unused");
+    }
     Config::from_env().unwrap()
 }
 
@@ -142,7 +150,7 @@ async fn upload_skin_64x64_creates_row_file_and_lookup(pool: PgPool) {
 
     // Row created with the right url + variant default.
     let (file_url, file_path, variant): (String, String, String) =
-        sqlx::query_as("SELECT file_url, file_path, variant FROM skins WHERE profile_uuid = $1")
+        sqlx::query_as("SELECT file_url, file_path, variant FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'")
             .bind(&profile_uuid)
             .fetch_one(&pool)
             .await
@@ -173,11 +181,13 @@ async fn upload_skin_64x32_is_accepted(pool: PgPool) {
     let status = put_texture(&router, "skin", &token, &png(64, 32), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skins WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -189,11 +199,13 @@ async fn upload_skin_slim_variant_is_stored_and_returned(pool: PgPool) {
     let status = put_texture(&router, "skin", &token, &png(64, 64), Some("SLIM")).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let variant: String = sqlx::query_scalar("SELECT variant FROM skins WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let variant: String = sqlx::query_scalar(
+        "SELECT variant FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(variant, "SLIM");
 
     let (_status, json) = get_json(&router, &format!("/textures/{profile_uuid}")).await;
@@ -209,11 +221,13 @@ async fn reject_invalid_png_bad_dimensions(pool: PgPool) {
     let status = put_texture(&router, "skin", &token, &png(32, 32), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skins WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 0, "rejected upload must not create a row");
 }
 
@@ -244,11 +258,13 @@ async fn reject_oversized_upload(pool: PgPool) {
         "oversized upload must be rejected, got {status}"
     );
 
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skins WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 0, "oversized upload must not create a row");
 }
 
@@ -258,22 +274,24 @@ async fn replace_skin_unlinks_old_file_and_writes_new(pool: PgPool) {
     let (profile_uuid, token) = seed_user_with_token(&pool, "replacer").await;
 
     put_texture(&router, "skin", &token, &png(64, 64), None).await;
-    let old_path: String =
-        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
-            .bind(&profile_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let old_path: String = sqlx::query_scalar(
+        "SELECT file_path FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(std::path::Path::new(&old_path).exists());
 
     // Re-upload — a fresh revision is written and the old file is unlinked.
     put_texture(&router, "skin", &token, &png(64, 32), None).await;
-    let new_path: String =
-        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
-            .bind(&profile_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let new_path: String = sqlx::query_scalar(
+        "SELECT file_path FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_ne!(old_path, new_path, "new revision has a distinct path");
     assert!(
@@ -283,11 +301,13 @@ async fn replace_skin_unlinks_old_file_and_writes_new(pool: PgPool) {
     assert!(std::path::Path::new(&new_path).exists(), "new file present");
 
     // Exactly one row remains (upsert, not insert).
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skins WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -297,12 +317,13 @@ async fn delete_skin_removes_row_and_png_then_404(pool: PgPool) {
     let (profile_uuid, token) = seed_user_with_token(&pool, "deleter").await;
 
     put_texture(&router, "skin", &token, &png(64, 64), None).await;
-    let file_path: String =
-        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
-            .bind(&profile_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let file_path: String = sqlx::query_scalar(
+        "SELECT file_path FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     // PNG endpoint serves the bytes while present.
     let png_req = Request::builder()
@@ -331,11 +352,13 @@ async fn delete_skin_removes_row_and_png_then_404(pool: PgPool) {
     assert_eq!(del_status, StatusCode::NO_CONTENT);
 
     // Row gone, file gone.
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM skins WHERE profile_uuid = $1")
-        .bind(&profile_uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 0);
     assert!(!std::path::Path::new(&file_path).exists());
 
@@ -365,6 +388,54 @@ async fn upload_cape_then_lookup_includes_cape(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn lookup_returns_both_kinds_for_one_user(pool: PgPool) {
+    // CB-1: skins and capes share one `user_textures` table keyed on (user_id, kind),
+    // so one query serves both. A user carrying both must get both back, with the
+    // skin's variant and no variant leaking onto the cape.
+    let (router, _root, _s) = app(pool.clone());
+    let (profile_uuid, token) = seed_user_with_token(&pool, "dressed").await;
+
+    assert_eq!(
+        put_texture(&router, "skin", &token, &png(64, 64), Some("SLIM")).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_texture(&router, "cape", &token, &png(64, 32), None).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, json) = get_json(&router, &format!("/textures/{profile_uuid}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["skin"]["url"],
+        format!("/textures/{profile_uuid}/skin")
+    );
+    assert_eq!(json["skin"]["variant"], "SLIM");
+    assert_eq!(
+        json["cape"]["url"],
+        format!("/textures/{profile_uuid}/cape")
+    );
+    assert!(json["cape"]["variant"].is_null());
+
+    // The kind discriminator keeps the two rows distinct rather than upserting over
+    // each other, and only the skin row carries a variant.
+    let kinds: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT kind, variant FROM user_textures WHERE profile_uuid = $1 ORDER BY kind",
+    )
+    .bind(&profile_uuid)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kinds,
+        vec![
+            ("cape".to_string(), None),
+            ("skin".to_string(), Some("SLIM".to_string())),
+        ]
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn lookup_absent_profile_returns_null_skin_and_cape(pool: PgPool) {
     let (router, _root, _s) = app(pool.clone());
     let (profile_uuid, _token) = seed_user_with_token(&pool, "naked").await;
@@ -378,13 +449,13 @@ async fn lookup_absent_profile_returns_null_skin_and_cape(pool: PgPool) {
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn skin_survives_profile_uuid_reconcile(pool: PgPool) {
-    // BUG-2: a credential-only user uploads a skin (skins row keyed by user_id with a
+    // BUG-2: a credential-only user uploads a skin (row keyed by user_id with a
     // denormalized profile_uuid = the random one). Later the user's minecraft_uuid
     // becomes known and identity reconciliation rewrites users.profile_uuid. The skin
     // must still be served under the NEW profile_uuid (the row's stale denormalized
     // profile_uuid must not orphan it), and the URL the signed GameProfile embeds
     // (`/textures/{newUuid}/skin`) must resolve.
-    use loontail_core::identity::{assign_or_reconcile_profile_uuid, get_user};
+    use loontail_core::identity::{assign_or_reconcile_profile_uuid, load_user};
 
     let (textures, _root, _state) = app(pool.clone());
 
@@ -428,19 +499,21 @@ async fn skin_survives_profile_uuid_reconcile(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let bound = get_user(&pool, user_id).await.unwrap();
+    let bound = load_user(&pool, user_id).await.unwrap();
     let reconciled = assign_or_reconcile_profile_uuid(&pool, &bound)
         .await
         .unwrap();
     assert_eq!(reconciled.profile_uuid.as_deref(), Some(new_uuid));
     assert_ne!(old_uuid, new_uuid);
 
-    // The skins row still carries the OLD denormalized profile_uuid...
-    let stale: String = sqlx::query_scalar("SELECT profile_uuid FROM skins WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    // The texture row still carries the OLD denormalized profile_uuid...
+    let stale: String = sqlx::query_scalar(
+        "SELECT profile_uuid FROM user_textures WHERE user_id = $1 AND kind = 'skin'",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         stale, old_uuid,
         "row's denormalized profile_uuid went stale"
@@ -567,12 +640,13 @@ async fn admin_lists_and_deletes_a_skin(pool: PgPool) {
     assert_eq!(json["data"][0]["variant"], "SLIM");
 
     let user_id = json["data"][0]["userId"].as_str().unwrap().to_string();
-    let file_path: String =
-        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
-            .bind(&profile_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let file_path: String = sqlx::query_scalar(
+        "SELECT file_path FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(std::path::Path::new(&file_path).exists());
 
     // Admin delete removes the row and unlinks the file.
@@ -623,12 +697,13 @@ async fn admin_orphans_scan_and_purge(pool: PgPool) {
     put_texture(&textures, "skin", &user_token, &png(64, 64), None).await;
 
     // Simulate DB/disk drift: delete the file but keep the row.
-    let file_path: String =
-        sqlx::query_scalar("SELECT file_path FROM skins WHERE profile_uuid = $1")
-            .bind(&profile_uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let file_path: String = sqlx::query_scalar(
+        "SELECT file_path FROM user_textures WHERE profile_uuid = $1 AND kind = 'skin'",
+    )
+    .bind(&profile_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     std::fs::remove_file(&file_path).unwrap();
 
     // The orphan scan reports the row whose file is gone.
@@ -649,7 +724,7 @@ async fn admin_orphans_scan_and_purge(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["purgedSkins"], 1);
 
-    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM skins")
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM user_textures")
         .fetch_one(&pool)
         .await
         .unwrap();

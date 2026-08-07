@@ -94,31 +94,49 @@ describe("FileList", () => {
   it("toggles via the row checkbox without firing onAction", async () => {
     const user = userEvent.setup();
     const { onToggle, onAction } = setup();
-    await user.click(screen.getByRole("button", { name: /select a\.jar/i }));
+    await user.click(screen.getByRole("checkbox", { name: /select a\.jar/i }));
     expect(onToggle).toHaveBeenCalledWith("a.jar", false);
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("exposes the row selection state to assistive tech", () => {
+    setup({ selectedKeys: new Set(["a.jar"]) });
+    expect(
+      screen.getByRole("checkbox", { name: /select a\.jar/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("checkbox", { name: /select b\.jar/i }),
+    ).toHaveAttribute("aria-checked", "false");
   });
 
   it("passes shiftKey through the checkbox wrapper for range selection", async () => {
     const user = userEvent.setup();
     const { onToggle } = setup();
     await user.keyboard("{Shift>}");
-    await user.click(screen.getByRole("button", { name: /select c\.jar/i }));
+    await user.click(screen.getByRole("checkbox", { name: /select c\.jar/i }));
     await user.keyboard("{/Shift}");
+    expect(onToggle).toHaveBeenCalledWith("c.jar", true);
+  });
+
+  it("range-selects from the keyboard too (Shift+Enter on the row checkbox)", async () => {
+    const user = userEvent.setup();
+    const { onToggle } = setup();
+    screen.getByRole("checkbox", { name: /select c\.jar/i }).focus();
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
     expect(onToggle).toHaveBeenCalledWith("c.jar", true);
   });
 
   it("calls onToggleAll from the header checkbox", async () => {
     const user = userEvent.setup();
     const { onToggleAll } = setup();
-    await user.click(screen.getByRole("button", { name: /select all/i }));
+    await user.click(screen.getByRole("checkbox", { name: /select all/i }));
     expect(onToggleAll).toHaveBeenCalledWith(true);
   });
 
   it("folders are not selectable (no checkbox on the folder row)", () => {
     setup();
     expect(
-      screen.queryByRole("button", { name: /select mods/i }),
+      screen.queryByRole("checkbox", { name: /select mods/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -159,13 +177,30 @@ describe("FileList", () => {
     expect(row).toHaveAttribute("data-state", "selected");
   });
 
-  it("the header checkbox reflects allSelected as a partial state", () => {
+  it("the header checkbox reports a partial selection as mixed", () => {
     setup({ someSelected: true });
-    // Header "Select all" exists and someSelected styles it; clicking still toggles.
     expect(
-      within(screen.getByRole("table")).getByRole("button", {
+      within(screen.getByRole("table")).getByRole("checkbox", {
         name: /select all/i,
       }),
-    ).toBeInTheDocument();
+    ).toHaveAttribute("aria-checked", "mixed");
+  });
+
+  it("the header checkbox is disabled in a folder-only listing", async () => {
+    const user = userEvent.setup();
+    const { onToggleAll } = setup({
+      entries: [folderEntry("mods"), folderEntry("config")],
+    });
+    const selectAll = screen.getByRole("checkbox", { name: /select all/i });
+    expect(selectAll).toBeDisabled();
+    await user.click(selectAll);
+    expect(onToggleAll).not.toHaveBeenCalled();
+  });
+
+  it("the header checkbox reports a full selection as checked", () => {
+    setup({ allSelected: true });
+    expect(
+      screen.getByRole("checkbox", { name: /select all/i }),
+    ).toHaveAttribute("aria-checked", "true");
   });
 });

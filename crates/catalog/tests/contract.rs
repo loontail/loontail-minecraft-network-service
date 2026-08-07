@@ -329,6 +329,98 @@ async fn locale_fallback_to_default_then_any(pool: PgPool) {
     assert_eq!(client.get("title").and_then(Value::as_str), Some("Aurora"));
 }
 
+/// A repeated `?locale=` must be LAST-WINS, not a hard error. axum's `Query`
+/// (serde_urlencoded) reports `duplicate field` and answers with a PLAIN-TEXT 400 that
+/// bypasses the `{error:{code,message}}` envelope, so any URL builder or intermediary
+/// that appends the param twice would break every catalog read for that client.
+#[sqlx::test(migrations = "../../migrations")]
+async fn repeated_locale_takes_the_last_value(pool: PgPool) {
+    seed_published_client(&pool).await;
+    let token = seed_session_token(&pool).await;
+    let app = loontail_catalog::routes().with_state(state(pool));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/clients?locale=en&locale=ru")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a duplicated query key must not 400: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let body: Value = serde_json::from_slice(&bytes).expect("JSON body");
+    assert_eq!(
+        body.pointer("/clients/0/title").and_then(Value::as_str),
+        Some("Аврора"),
+        "the last locale wins"
+    );
+}
+
+/// GET through a router that nests the catalog under `/api`, exactly as the server does.
+async fn nested_get_json(pool: PgPool, uri: &str) -> Value {
+    let token = seed_session_token(&pool).await;
+    let app = axum::Router::new()
+        .nest("/api", loontail_catalog::routes())
+        .with_state(state(pool));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "{uri}");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// BEQ-18(c): `locale` comes from a `CatalogQuery` extractor reading `parts.uri`, not
+/// from `OriginalUri`. The live router serves these routes NESTED under `/api`, and
+/// nesting rewrites the request path — so pin that the query string still reaches the
+/// extractor there, or every launcher request would silently fall back to English.
+#[sqlx::test(migrations = "../../migrations")]
+async fn locale_survives_the_api_nesting(pool: PgPool) {
+    seed_published_client(&pool).await;
+
+    let body = nested_get_json(pool.clone(), "/api/clients?locale=ru").await;
+    assert_eq!(
+        body.pointer("/clients/0/title").and_then(Value::as_str),
+        Some("Аврора"),
+        "the nested route still sees ?locale=ru"
+    );
+    assert_eq!(
+        body.pointer("/clients/0/keywords/0/title")
+            .and_then(Value::as_str),
+        Some("Выживание"),
+        "and the batched keyword titles honour it"
+    );
+
+    let body = nested_get_json(pool.clone(), "/api/keywords?locale=ru").await;
+    assert_eq!(
+        body.pointer("/keywords/0/title").and_then(Value::as_str),
+        Some("Выживание"),
+        "the batched list_keywords path honours it too"
+    );
+
+    let body = nested_get_json(pool, "/api/clients").await;
+    assert_eq!(
+        body.pointer("/clients/0/title").and_then(Value::as_str),
+        Some("Aurora"),
+        "absent locale falls back to the default"
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn draft_client_hidden_from_public(pool: PgPool) {
     sqlx::query(

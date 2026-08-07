@@ -22,3 +22,6 @@ futures-util = { workspace = true }
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
+# A real WebSocket client for the /signaling and /relay socket tests; axum already
+# builds this exact version for its own `ws` support.
+tokio-tungstenite = "0.29"

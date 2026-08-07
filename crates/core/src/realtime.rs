@@ -11,7 +11,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::models::{JoinTicketDto, UserDto};
+use crate::models::{InvitePolicy, JoinTicketDto, UserDto};
 
 /// Events pushed to a client over its signaling WebSocket, serialized as
 /// `{ "type": "...", ... }`.
@@ -73,7 +73,7 @@ pub enum ServerEvent {
     },
     WorldPolicyChanged {
         world_session_id: Uuid,
-        invite_policy: String,
+        invite_policy: InvitePolicy,
     },
 }
 
@@ -219,6 +219,16 @@ impl RelayHub {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&relay_session_id)
             .map(|(_, peer)| peer)
+    }
+
+    /// Whether a first party is currently parked for this id. Lets a caller
+    /// (today: the relay socket tests) wait for the rendezvous slot to be taken
+    /// instead of sleeping, which would race the `take`/`park` window.
+    pub fn is_waiting(&self, relay_session_id: Uuid) -> bool {
+        self.waiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&relay_session_id)
     }
 
     pub fn active_pairings(&self) -> usize {

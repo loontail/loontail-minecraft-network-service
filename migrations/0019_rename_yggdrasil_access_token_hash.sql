@@ -1,0 +1,14 @@
+-- NB-1: `yggdrasil_tokens.access_token` has held the SHA-256 of the access token
+-- since SEC-5, but the column name (and migration 0004's comment) claimed plaintext.
+-- A schema that lies about a credential column is how an incident query silently
+-- returns zero rows, and it hid the one distinction that matters for a breach
+-- assessment: the sibling `client_token` genuinely IS plaintext, because the Mojang
+-- refresh contract requires it be echoed verbatim.
+--
+-- 0004's header comment still says both columns are plaintext. It is left untouched on
+-- purpose: `sqlx::migrate!` checksums every applied migration file, so editing an
+-- already-applied one makes the next boot refuse to migrate. This file is the
+-- correction of record.
+--
+-- Non-destructive: a pure column rename, no data touched.
+ALTER TABLE yggdrasil_tokens RENAME COLUMN access_token TO access_token_hash;

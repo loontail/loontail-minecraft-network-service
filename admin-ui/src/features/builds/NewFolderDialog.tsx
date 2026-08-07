@@ -13,8 +13,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { joinPath } from "@/features/builds/fileTree";
-import { useCreateFolder } from "@/features/bundles/api";
+import { joinPath, segmentError } from "@/features/builds/fileTree";
+import { useCreateFolder } from "@/features/builds/api";
 
 export function NewFolderDialog({
   slug,
@@ -30,6 +30,9 @@ export function NewFolderDialog({
   const [name, setName] = useState("");
   const createFolder = useCreateFolder();
 
+  const trimmed = name.trim();
+  const nameError = trimmed === "" ? null : segmentError(trimmed);
+
   // The dialog stays mounted and the parent opens it bypassing Radix onOpenChange,
   // so reset the name here on open or a previously typed name lingers.
   useEffect(() => {
@@ -40,8 +43,7 @@ export function NewFolderDialog({
 
   function submit(event: React.SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) {
+    if (!trimmed || nameError) {
       return;
     }
     createFolder.mutate(
@@ -71,8 +73,18 @@ export function NewFolderDialog({
               value={name}
               autoFocus
               placeholder="config"
+              aria-invalid={nameError !== null}
+              aria-describedby={nameError ? "folder-name-error" : undefined}
               onChange={(event) => setName(event.target.value)}
             />
+            {nameError ? (
+              <p
+                id="folder-name-error"
+                className="text-caption text-destructive"
+              >
+                {nameError}
+              </p>
+            ) : null}
           </div>
           <DialogFooter>
             <Button
@@ -83,7 +95,12 @@ export function NewFolderDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createFolder.isPending || !name.trim()}>
+            <Button
+              type="submit"
+              disabled={
+                createFolder.isPending || !trimmed || nameError !== null
+              }
+            >
               {createFolder.isPending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : null}

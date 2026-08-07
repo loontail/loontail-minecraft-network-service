@@ -9,7 +9,7 @@ use loontail_core::identity::authenticate_password;
 use loontail_core::AppState;
 
 use crate::cookies::{clear_session_cookies, read_cookie, set_session_cookies};
-use crate::dto::{Ack, LoginRequest, MeResponse};
+use crate::dto::{Ack, AdminMeResponse, LoginRequest};
 
 /// `POST /admin/auth/login` — verify credentials, require an admin account, mint
 /// a session, and set the session + CSRF cookies. Returns the admin identity.
@@ -36,7 +36,7 @@ pub async fn login(
         session.expires_at,
     );
 
-    Ok((headers, Json(MeResponse::from(&user))))
+    Ok((headers, Json(AdminMeResponse::from(&user))))
 }
 
 /// `POST /admin/auth/logout` — revoke the current session and clear cookies.
@@ -53,6 +53,6 @@ pub async fn logout(
 }
 
 /// `GET /admin/auth/me` — the authenticated admin identity.
-pub async fn me(admin: AdminUser) -> AppResult<Json<MeResponse>> {
-    Ok(Json(MeResponse::from(&admin.user)))
+pub async fn me(admin: AdminUser) -> AppResult<Json<AdminMeResponse>> {
+    Ok(Json(AdminMeResponse::from(&admin.user)))
 }

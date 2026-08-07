@@ -317,3 +317,43 @@ async fn delete_client_removes_media_dir(pool: PgPool) {
         "client media dir removed from disk after delete"
     );
 }
+
+/// CB-20: `png_dimensions` delegates to the workspace's tested PNG header parser
+/// instead of re-reading the IHDR offsets by hand. The inlined copy validated neither
+/// the 8-byte signature nor the IHDR length, so a hostile GIF whose bytes 12..16
+/// happened to spell "IHDR" had its "dimensions" recorded as real pixel sizes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn only_a_real_png_records_dimensions(pool: PgPool) {
+    let catalog_root = TempRoot::new();
+    let bundles_root = TempRoot::new();
+    let token = seed_admin_token(&pool).await;
+    let state = state_with_roots(pool.clone(), &catalog_root, &bundles_root);
+    let client_id = create_client(state.clone(), &token, "dims").await;
+
+    let (status, _, _) = upload(state.clone(), &token, client_id, &png_of_size(64), "poster").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A GIF that spells IHDR where a PNG's IHDR would be, with 4096x4096 in the width
+    // and height slots. `sniff_image` accepts it as a GIF; it must NOT get dimensions.
+    let mut liar = b"GIF89a".to_vec();
+    liar.resize(12, 0);
+    liar.extend_from_slice(b"IHDR");
+    liar.extend_from_slice(&4096u32.to_be_bytes());
+    liar.extend_from_slice(&4096u32.to_be_bytes());
+    liar.resize(64, 0);
+    let (status, _, _) = upload(state, &token, client_id, &liar, "background").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let dims: Vec<(String, Option<i32>, Option<i32>)> =
+        sqlx::query_as("SELECT role, width, height FROM catalog_media ORDER BY role")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        dims,
+        vec![
+            ("background".to_string(), None, None),
+            ("poster".to_string(), Some(1), Some(1)),
+        ]
+    );
+}

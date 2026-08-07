@@ -50,7 +50,6 @@ function setup(
   const onToggleAll = vi.fn();
   const onAction = vi.fn();
   const onOpenMenu = vi.fn();
-  const onToggleDownloadOnce = vi.fn();
   render(
     <FileGrid
       entries={ENTRIES}
@@ -61,11 +60,10 @@ function setup(
       someSelected={false}
       onAction={onAction}
       onOpenMenu={onOpenMenu}
-      onToggleDownloadOnce={onToggleDownloadOnce}
       {...overrides}
     />,
   );
-  return { onToggle, onToggleAll, onAction, onOpenMenu, onToggleDownloadOnce };
+  return { onToggle, onToggleAll, onAction, onOpenMenu };
 }
 
 describe("FileGrid", () => {
@@ -87,24 +85,58 @@ describe("FileGrid", () => {
   it("toggles via the corner checkbox without opening", async () => {
     const user = userEvent.setup();
     const { onToggle, onAction } = setup();
-    await user.click(screen.getByRole("button", { name: /select a\.jar/i }));
+    await user.click(screen.getByRole("checkbox", { name: /select a\.jar/i }));
     expect(onToggle).toHaveBeenCalledWith("a.jar", false);
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("exposes the card selection state to assistive tech", () => {
+    setup({ selectedKeys: new Set(["a.jar"]) });
+    expect(
+      screen.getByRole("checkbox", { name: /select a\.jar/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("checkbox", { name: /select b\.jar/i }),
+    ).toHaveAttribute("aria-checked", "false");
   });
 
   it("passes shiftKey through the corner checkbox for range selection", async () => {
     const user = userEvent.setup();
     const { onToggle } = setup();
     await user.keyboard("{Shift>}");
-    await user.click(screen.getByRole("button", { name: /select c\.jar/i }));
+    await user.click(screen.getByRole("checkbox", { name: /select c\.jar/i }));
     await user.keyboard("{/Shift}");
     expect(onToggle).toHaveBeenCalledWith("c.jar", true);
+  });
+
+  it("range-selects from the keyboard too (Shift+Enter on the corner checkbox)", async () => {
+    const user = userEvent.setup();
+    const { onToggle } = setup();
+    screen.getByRole("checkbox", { name: /select c\.jar/i }).focus();
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(onToggle).toHaveBeenCalledWith("c.jar", true);
+  });
+
+  it("offers select-all like the list view, with a mixed state", async () => {
+    const user = userEvent.setup();
+    const { onToggleAll } = setup({ someSelected: true });
+    const selectAll = screen.getByRole("checkbox", { name: /select all/i });
+    expect(selectAll).toHaveAttribute("aria-checked", "mixed");
+    await user.click(selectAll);
+    expect(onToggleAll).toHaveBeenCalledWith(true);
+  });
+
+  it("hides select-all in a folder-only listing, where it could never check", () => {
+    setup({ entries: [folderEntry("mods"), folderEntry("config")] });
+    expect(
+      screen.queryByRole("checkbox", { name: /select all/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("folders have no corner checkbox", () => {
     setup();
     expect(
-      screen.queryByRole("button", { name: /select mods/i }),
+      screen.queryByRole("checkbox", { name: /select mods/i }),
     ).not.toBeInTheDocument();
   });
 

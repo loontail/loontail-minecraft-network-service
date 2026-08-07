@@ -35,7 +35,8 @@ const UUID_UNDASHED = /^[0-9a-fA-F]{32}$/;
 
 const schema = z.object({
   username: z.string().trim().min(1, "Username is required"),
-  email: z.string().trim().min(1, "Email is required").email("Enter a valid email"),
+  // why: trim/min must run before the format check, so pipe rather than chain z.email().
+  email: z.string().trim().min(1, "Email is required").pipe(z.email("Enter a valid email")),
   password: z.string().min(8, "Use at least 8 characters"),
   minecraftUuid: z
     .string()

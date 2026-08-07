@@ -1,5 +1,6 @@
 import * as SelectPrimitive from "@radix-ui/react-select";
 import {
+  AlertTriangle,
   ArrowLeft,
   CheckIcon,
   Copy,
@@ -9,6 +10,7 @@ import {
   Package,
   Pencil,
   Plus,
+  RefreshCw,
   Server as ServerIcon,
   Star,
   Tags,
@@ -16,7 +18,7 @@ import {
 } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router";
 import { toast } from "sonner";
 
 import { EmptyState } from "@/components/shared/EmptyState";
@@ -42,26 +44,25 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { BuildFilesTab } from "@/features/builds/BuildFilesTab";
-import {
-  useBuildBySlug,
-  usePublishClient,
-  useUpdateClient,
-} from "@/features/builds/api";
-import { useVersions } from "@/features/builds/useVersions";
-import { useBuild } from "@/features/bundles/api";
+import { BuildMediaSection } from "@/features/builds/BuildMediaSection";
 import {
   useAttachKeyword,
   useAttachServer,
+  useBuildBySlug,
+  useBuildFiles,
   useCreateKeyword,
   useCreateServer,
   useDetachKeyword,
   useDetachServer,
   useKeywords,
+  usePublishBuild,
   useServers,
-} from "@/features/catalog/api";
-import { ClientMediaSection } from "@/features/catalog/components/ClientMediaSection";
+  useUpdateBuild,
+} from "@/features/builds/api";
+import { useVersions } from "@/features/builds/useVersions";
+import { errorMessage } from "@/shared/api/toast";
 import { cn } from "@/shared/lib/cn";
-import type { ClientAdmin } from "@/shared/types";
+import type { BuildAdmin } from "@/shared/types";
 
 type Tab = "details" | "media" | "files" | "servers-tags";
 
@@ -125,7 +126,7 @@ interface BuildFormState {
   forgeVersion: string;
 }
 
-function buildToForm(build: ClientAdmin): BuildFormState {
+function buildToForm(build: BuildAdmin): BuildFormState {
   return {
     slug: build.slug,
     title: build.title,
@@ -139,9 +140,24 @@ function buildToForm(build: ClientAdmin): BuildFormState {
   };
 }
 
-// A token over the persisted fields; a change means the stored copy diverged and the form must re-seed.
-function buildFormToken(build: ClientAdmin): string {
-  return JSON.stringify(buildToForm(build));
+// A value token over the editable fields, spelled as an explicit tuple so it never
+// depends on key order. Two equal tokens mean two equal forms.
+function formToken(form: BuildFormState): string {
+  return JSON.stringify([
+    form.slug,
+    form.title,
+    form.shortDescription,
+    form.description,
+    form.available,
+    form.minecraftVersion,
+    form.runtimeVersion,
+    form.fabricVersion,
+    form.forgeVersion,
+  ]);
+}
+
+function buildFormToken(build: BuildAdmin): string {
+  return formToken(buildToForm(build));
 }
 
 function nullable(value: string): string | null {
@@ -157,12 +173,12 @@ function withCurrent(options: string[], current: string): string[] {
   return [current, ...options];
 }
 
-function ManifestPanel({ build }: { build: ClientAdmin }) {
-  const bundleSlug = build.bundle?.slug ?? null;
+function ManifestPanel({ build }: { build: BuildAdmin }) {
+  const bundle = build.bundle;
   // Read live bundle state: the summary on `build.bundle` is not invalidated by file uploads.
-  const liveBundle = useBuild(bundleSlug ?? undefined);
+  const liveBundle = useBuildFiles(bundle?.slug);
 
-  if (!bundleSlug) {
+  if (!bundle) {
     return (
       <Card>
         <CardContent className="flex items-center gap-2 py-4 text-body text-text-mute">
@@ -173,9 +189,10 @@ function ManifestPanel({ build }: { build: ClientAdmin }) {
     );
   }
 
-  const status = liveBundle.data?.status ?? build.bundle?.status ?? "draft";
-  const filesCount = liveBundle.data?.filesCount ?? build.bundle?.filesCount ?? 0;
-  const manifestUrl = `${window.location.origin}/api/bundle-registry/builds/${bundleSlug}/manifest`;
+  const status = liveBundle.data?.status ?? bundle.status;
+  const filesCount = liveBundle.data?.filesCount ?? bundle.filesCount;
+  // The server owns the route prefix; only the origin is added for clipboard use.
+  const manifestUrl = new URL(bundle.manifestUrl, window.location.origin).href;
 
   async function copy() {
     await navigator.clipboard.writeText(manifestUrl);
@@ -211,21 +228,32 @@ function ManifestPanel({ build }: { build: ClientAdmin }) {
   );
 }
 
-function BuildDetailsTab({ build }: { build: ClientAdmin }) {
+function BuildDetailsTab({ build }: { build: BuildAdmin }) {
   const [form, setForm] = useState<BuildFormState>(() => buildToForm(build));
   const [javaCustom, setJavaCustom] = useState(false);
-  const updateClient = useUpdateClient();
+  const updateBuild = useUpdateBuild();
   const versions = useVersions();
 
-  // Re-seed on a value token, not `build.id`: the key={build.id} panel only remounts on identity change.
+  // The last server snapshot the form agreed with.
   const seededToken = useRef(buildFormToken(build));
+  // why: the save's own refetch (or another admin's edit) lands while the user keeps
+  // typing, and re-seeding then would discard those keystrokes. "Dirty" is therefore
+  // a comparison of values, never of edit counts: only a form still equal to the
+  // snapshot it was seeded from adopts a newer server value, so a form the user
+  // reverted — or one that already matches the server, e.g. right after a save —
+  // agrees again and keeps following the server.
   useEffect(() => {
     const token = buildFormToken(build);
-    if (token !== seededToken.current) {
+    const current = formToken(form);
+    if (current === token) {
+      seededToken.current = token;
+      return;
+    }
+    if (current === seededToken.current) {
       seededToken.current = token;
       setForm(buildToForm(build));
     }
-  }, [build]);
+  }, [build, form]);
 
   function field<K extends keyof BuildFormState>(
     key: K,
@@ -303,7 +331,7 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
     if (!form.slug.trim() || !form.title.trim()) {
       return;
     }
-    updateClient.mutate({
+    updateBuild.mutate({
       id: build.id,
       slug: form.slug.trim(),
       available: form.available,
@@ -523,12 +551,12 @@ function BuildDetailsTab({ build }: { build: ClientAdmin }) {
             <Button
               type="submit"
               disabled={
-                updateClient.isPending ||
+                updateBuild.isPending ||
                 !form.slug.trim() ||
                 !form.title.trim()
               }
             >
-              {updateClient.isPending ? (
+              {updateBuild.isPending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : null}
               Save changes
@@ -605,7 +633,7 @@ function AddExistingPicker<T extends { id: string }>({
   );
 }
 
-function KeywordsSection({ build }: { build: ClientAdmin }) {
+function KeywordsSection({ build }: { build: BuildAdmin }) {
   const allKeywords = useKeywords();
   const attach = useAttachKeyword();
   const detach = useDetachKeyword();
@@ -627,7 +655,7 @@ function KeywordsSection({ build }: { build: ClientAdmin }) {
       return;
     }
     attach.mutate(
-      { clientId: build.id, keywordId: pickId },
+      { buildId: build.id, keywordId: pickId },
       { onSuccess: () => setPickId("") },
     );
   }
@@ -644,7 +672,7 @@ function KeywordsSection({ build }: { build: ClientAdmin }) {
       },
       {
         onSuccess: (result) => {
-          attach.mutate({ clientId: build.id, keywordId: result.id });
+          attach.mutate({ buildId: build.id, keywordId: result.id });
           setSlug("");
           setTitle("");
           setCreating(false);
@@ -678,7 +706,7 @@ function KeywordsSection({ build }: { build: ClientAdmin }) {
                   disabled={pending}
                   onClick={() =>
                     detach.mutate({
-                      clientId: build.id,
+                      buildId: build.id,
                       keywordId: keyword.id,
                     })
                   }
@@ -743,7 +771,7 @@ function KeywordsSection({ build }: { build: ClientAdmin }) {
   );
 }
 
-function ServersSection({ build }: { build: ClientAdmin }) {
+function ServersSection({ build }: { build: BuildAdmin }) {
   const allServers = useServers();
   const attach = useAttachServer();
   const detach = useDetachServer();
@@ -766,7 +794,7 @@ function ServersSection({ build }: { build: ClientAdmin }) {
       return;
     }
     attach.mutate(
-      { clientId: build.id, serverId: pickId },
+      { buildId: build.id, serverId: pickId },
       { onSuccess: () => setPickId("") },
     );
   }
@@ -784,7 +812,7 @@ function ServersSection({ build }: { build: ClientAdmin }) {
       },
       {
         onSuccess: (result) => {
-          attach.mutate({ clientId: build.id, serverId: result.id });
+          attach.mutate({ buildId: build.id, serverId: result.id });
           setSlug("");
           setName("");
           setAddress("");
@@ -827,7 +855,7 @@ function ServersSection({ build }: { build: ClientAdmin }) {
                   disabled={pending}
                   onClick={() =>
                     detach.mutate({
-                      clientId: build.id,
+                      buildId: build.id,
                       serverId: server.id,
                     })
                   }
@@ -900,7 +928,7 @@ function ServersSection({ build }: { build: ClientAdmin }) {
   );
 }
 
-function ServersTagsTab({ build }: { build: ClientAdmin }) {
+function ServersTagsTab({ build }: { build: BuildAdmin }) {
   return (
     <div className="flex flex-col gap-4">
       <KeywordsSection build={build} />
@@ -909,43 +937,95 @@ function ServersTagsTab({ build }: { build: ClientAdmin }) {
   );
 }
 
+function BackToBuildsLink() {
+  return (
+    <Link
+      to="/builds"
+      className="inline-flex w-fit items-center gap-1.5 text-body text-text-mute hover:text-text-hi"
+    >
+      <ArrowLeft className="size-4" />
+      Builds
+    </Link>
+  );
+}
+
+function DetailSkeleton() {
+  return (
+    <div className="flex flex-col gap-6">
+      <BackToBuildsLink />
+      <div className="flex items-center justify-between gap-4">
+        <Skeleton className="h-9 w-64" />
+        <Skeleton className="h-9 w-24" />
+      </div>
+      <Skeleton className="h-20 w-full rounded-lg" />
+      <Skeleton className="h-9 w-80 rounded-md" />
+      <Skeleton className="h-96 w-full rounded-lg" />
+    </div>
+  );
+}
+
 export function BuildDetailPage() {
   const { slug } = useParams();
-  const { isLoading, build } = useBuildBySlug(slug);
-  const publish = usePublishClient();
+  const { isLoading, isFetching, isError, error, refetch, build } =
+    useBuildBySlug(slug);
+  const publish = usePublishBuild();
   const [tab, setTab] = useState<Tab>("details");
+  // why: an absence the list already settled on must stay absent — otherwise every
+  // background refetch (window focus) replaces "Build not found" with a full-page
+  // skeleton and flips back.
+  const [absenceSettled, setAbsenceSettled] = useState(false);
+
+  useEffect(() => {
+    if (!build && !isFetching && !isError) {
+      setAbsenceSettled(true);
+    }
+  }, [build, isFetching, isError]);
 
   if (isLoading) {
+    return <DetailSkeleton />;
+  }
+
+  // The load failed: say so instead of claiming the build is gone.
+  if (!build && isError) {
     return (
       <div className="flex flex-col gap-6">
-        <Link
-          to="/builds"
-          className="inline-flex w-fit items-center gap-1.5 text-body text-text-mute hover:text-text-hi"
-        >
-          <ArrowLeft className="size-4" />
-          Builds
-        </Link>
-        <div className="flex items-center justify-between gap-4">
-          <Skeleton className="h-9 w-64" />
-          <Skeleton className="h-9 w-24" />
-        </div>
-        <Skeleton className="h-20 w-full rounded-lg" />
-        <Skeleton className="h-9 w-80 rounded-md" />
-        <Skeleton className="h-96 w-full rounded-lg" />
+        <BackToBuildsLink />
+        <EmptyState
+          icon={AlertTriangle}
+          title="Couldn’t load builds"
+          description={errorMessage(
+            error,
+            "The build list could not be loaded.",
+          )}
+          action={
+            <Button
+              variant="outline"
+              onClick={() => void refetch()}
+              disabled={isFetching}
+            >
+              {isFetching ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
+              Retry
+            </Button>
+          }
+        />
       </div>
     );
   }
 
+  // why: right after a create, the cached list is stale-but-successful and the new
+  // slug is only in the in-flight refetch — showing "not found" then would read as
+  // a failed create. Only a settled list proves the build is really absent.
   if (!build) {
+    if (isFetching && !absenceSettled) {
+      return <DetailSkeleton />;
+    }
     return (
       <div className="flex flex-col gap-6">
-        <Link
-          to="/builds"
-          className="inline-flex w-fit items-center gap-1.5 text-body text-text-mute hover:text-text-hi"
-        >
-          <ArrowLeft className="size-4" />
-          Builds
-        </Link>
+        <BackToBuildsLink />
         <EmptyState
           icon={Package}
           title="Build not found"
@@ -963,13 +1043,7 @@ export function BuildDetailPage() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-4">
-        <Link
-          to="/builds"
-          className="inline-flex w-fit items-center gap-1.5 text-body text-text-mute hover:text-text-hi"
-        >
-          <ArrowLeft className="size-4" />
-          Builds
-        </Link>
+        <BackToBuildsLink />
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex items-center gap-3">
             <h1 className="text-h1 text-text-hi">{build.title}</h1>
@@ -1019,7 +1093,7 @@ export function BuildDetailPage() {
         >
           <Card>
             <CardContent>
-              <ClientMediaSection clientId={build.id} />
+              <BuildMediaSection buildId={build.id} />
             </CardContent>
           </Card>
         </div>

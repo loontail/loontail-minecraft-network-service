@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { RequireAuth } from "@/components/layout/RequireAuth";
@@ -9,6 +9,9 @@ import { LoginPage } from "@/pages/LoginPage";
 // Lazy so route-only deps (recharts, react-aria-components) stay out of the login chunk.
 const DashboardPage = lazy(() =>
   import("@/pages/DashboardPage").then((m) => ({ default: m.DashboardPage })),
+);
+const NetworkPage = lazy(() =>
+  import("@/pages/NetworkPage").then((m) => ({ default: m.NetworkPage })),
 );
 const UsersPage = lazy(() =>
   import("@/pages/UsersPage").then((m) => ({ default: m.UsersPage })),
@@ -24,9 +27,9 @@ const BuildDetailPage = lazy(() =>
     default: m.BuildDetailPage,
   })),
 );
-const LogsTrafficPage = lazy(() =>
-  import("@/pages/LogsTrafficPage").then((m) => ({
-    default: m.LogsTrafficPage,
+const RequestLogsPage = lazy(() =>
+  import("@/pages/RequestLogsPage").then((m) => ({
+    default: m.RequestLogsPage,
   })),
 );
 
@@ -50,6 +53,14 @@ export function App() {
           element={
             <Suspense fallback={<RouteFallback />}>
               <DashboardPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="network"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <NetworkPage />
             </Suspense>
           }
         />
@@ -86,10 +97,10 @@ export function App() {
           }
         />
         <Route
-          path="logs"
+          path="request-logs"
           element={
             <Suspense fallback={<RouteFallback />}>
-              <LogsTrafficPage />
+              <RequestLogsPage />
             </Suspense>
           }
         />

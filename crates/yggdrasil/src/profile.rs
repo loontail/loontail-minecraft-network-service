@@ -41,25 +41,31 @@ pub struct ProfileIdentity {
     pub username: String,
 }
 
-struct SkinRow {
-    variant: String,
+/// A user's registered textures: the skin's model variant (when a skin row exists)
+/// and whether a cape row exists.
+#[derive(Default)]
+struct UserTextures {
+    skin_variant: Option<String>,
+    has_cape: bool,
 }
 
-async fn load_skin(pool: &PgPool, user_id: Uuid) -> AppResult<Option<SkinRow>> {
-    let row = sqlx::query_as::<_, (String,)>("SELECT variant FROM skins WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.map(|(variant,)| SkinRow { variant }))
-}
-
-async fn has_cape(pool: &PgPool, user_id: Uuid) -> AppResult<bool> {
-    Ok(
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM capes WHERE user_id = $1)")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?,
+async fn load_textures(pool: &PgPool, user_id: Uuid) -> AppResult<UserTextures> {
+    let rows = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT kind, variant FROM user_textures WHERE user_id = $1",
     )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut textures = UserTextures::default();
+    for (kind, variant) in rows {
+        match kind.as_str() {
+            "skin" => textures.skin_variant = Some(variant.unwrap_or_default()),
+            "cape" => textures.has_cape = true,
+            _ => {}
+        }
+    }
+    Ok(textures)
 }
 
 /// The server-relative texture URL, derived from the authoritative `profile_uuid`:
@@ -69,11 +75,36 @@ fn texture_url(profile_uuid: &str, kind: &str) -> String {
     format!("/textures/{profile_uuid}/{kind}")
 }
 
+/// `true` when the URL carries a scheme + authority. Only such a URL is fetchable
+/// by authlib; a path-only value makes the client fall back to Steve/Alex.
+fn is_absolute(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// The client-facing texture URL for a profile. A `public_base` with no origin
+/// yields a path-only URL that no client can fetch, so shout about it once per
+/// process — this is static misconfiguration, not a per-request condition.
+fn texture_public_url(public_base: &str, profile_uuid: &str, kind: &str) -> String {
+    let url = absolutize(public_base, &texture_url(profile_uuid, kind));
+    if !is_absolute(&url) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::error!(
+                public_url = public_base,
+                "YGGDRASIL_PUBLIC_URL has no scheme and host, so profile texture URLs are \
+                 server-relative and IN-GAME SKINS AND CAPES WILL NOT LOAD. Set it to the \
+                 absolute public base, e.g. https://<host>/api/yggdrasil"
+            );
+        });
+    }
+    url
+}
+
 /// Absolutize a stored (server-relative) texture URL against the public base URL,
 /// so the value the client receives points at a fully-qualified address. A URL
 /// that is already absolute is returned unchanged.
 fn absolutize(public_base: &str, url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
+    if is_absolute(url) {
         return url.to_string();
     }
     let base = public_base.trim_end_matches('/');
@@ -102,17 +133,19 @@ pub async fn build_profile(
     identity: &ProfileIdentity,
     signing: Option<&SigningKey>,
 ) -> Result<GameProfile, YggError> {
-    let skin = load_skin(pool, identity.user_id).await?;
-    let cape = has_cape(pool, identity.user_id).await?;
+    let UserTextures {
+        skin_variant,
+        has_cape,
+    } = load_textures(pool, identity.user_id).await?;
 
     let mut properties = Vec::new();
-    if skin.is_some() || cape {
-        let skin_input = skin.map(|s| SkinInput {
-            url: absolutize(public_base, &texture_url(&identity.profile_uuid, "skin")),
-            variant: parse_variant(&s.variant),
+    if skin_variant.is_some() || has_cape {
+        let skin_input = skin_variant.map(|variant| SkinInput {
+            url: texture_public_url(public_base, &identity.profile_uuid, "skin"),
+            variant: parse_variant(&variant),
         });
-        let cape_input = cape.then(|| CapeInput {
-            url: absolutize(public_base, &texture_url(&identity.profile_uuid, "cape")),
+        let cape_input = has_cape.then(|| CapeInput {
+            url: texture_public_url(public_base, &identity.profile_uuid, "cape"),
         });
 
         let value = build_textures_value(TexturesPayloadInput {
@@ -165,6 +198,26 @@ mod tests {
             absolutize("https://cdn.example.com", "https://other.com/x.png"),
             "https://other.com/x.png"
         );
+    }
+
+    /// CON-01: a path-only public base cannot produce a fetchable texture URL, and
+    /// the guard that flags it must recognise the difference.
+    #[test]
+    fn path_only_public_base_yields_a_non_absolute_texture_url() {
+        assert!(!is_absolute(&texture_public_url(
+            "/api/yggdrasil",
+            "abc",
+            "skin"
+        )));
+        assert_eq!(
+            texture_public_url("https://cms.loontail.dev/api/yggdrasil", "abc", "skin"),
+            "https://cms.loontail.dev/api/yggdrasil/textures/abc/skin"
+        );
+        assert!(is_absolute(&texture_public_url(
+            "https://cms.loontail.dev/api/yggdrasil",
+            "abc",
+            "cape"
+        )));
     }
 
     #[test]

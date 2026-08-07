@@ -91,6 +91,14 @@ impl From<AppError> for YggError {
     }
 }
 
+/// So a local query can end in `?` instead of the five-token
+/// `.map_err(|e| YggError::from(AppError::from(e)))` chain every caller was copying.
+impl From<sqlx::Error> for YggError {
+    fn from(err: sqlx::Error) -> Self {
+        AppError::from(err).into()
+    }
+}
+
 impl From<crate::crypto::CryptoError> for YggError {
     fn from(err: crate::crypto::CryptoError) -> Self {
         tracing::error!(error = %err, "yggdrasil crypto error");

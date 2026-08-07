@@ -1,13 +1,11 @@
 // Admin DTOs; field names are the camelCase wire contract, do not rename.
 
-export interface MeResponse {
+export interface AdminMe {
   id: string;
   username: string;
   email: string | null;
   isAdmin: boolean;
 }
-
-export type AdminMe = MeResponse;
 
 export interface LoginRequest {
   username: string;
@@ -53,13 +51,6 @@ export interface CreateUserRequest {
   isAdmin?: boolean;
 }
 
-export interface UpdateUserRequest {
-  username?: string;
-  email?: string;
-  isAdmin?: boolean;
-  confirmed?: boolean;
-}
-
 export interface ResetPasswordRequest {
   password: string;
 }
@@ -70,11 +61,6 @@ export interface AnalyticsOverview {
   openWorlds: number;
   activeRelays: number;
   totalUsers: number;
-}
-
-export interface TimeseriesQuery {
-  metric?: string;
-  window?: string;
 }
 
 export interface TimeseriesPoint {

@@ -22,6 +22,12 @@ pub struct Bundle {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The `Bundle` columns, in field order. why: `Bundle` is BOTH a `bundles` row and
+/// the JSON the admin SPA parses, so `SELECT *` would publish any newly-added column
+/// onto that contract with no compile error. Kept in step with the struct by the
+/// `FromRow` decode, which fails loudly if a named column is missing.
+pub(crate) const BUNDLE_COLS: &str = "id, slug, name, description, version, status,      files_count, total_size, processing_error, last_generated_at, created_at, updated_at";
+
 /// A `bundle_artifacts` row — one per tracked file or directory. The manifest is
 /// generated from these.
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -38,6 +44,10 @@ pub struct BundleArtifact {
     pub download_once: bool,
     pub file_modified_at: Option<DateTime<Utc>>,
 }
+
+/// The `BundleArtifact` columns, in field order. Explicit for the same reason as
+/// [`BUNDLE_COLS`].
+pub(crate) const BUNDLE_ARTIFACT_COLS: &str = "id, bundle_id, relative_path, name,      category, size, sha256, is_dir, download_once, file_modified_at";
 
 /// A bundle plus its ordered artifact rows (the admin detail view).
 #[derive(Debug, Clone, Serialize)]

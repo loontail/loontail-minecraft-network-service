@@ -25,7 +25,11 @@ use loontail_yggdrasil::account_routes;
 /// requires is never actually dialed. The `/api/auth/*` handlers never touch the
 /// Yggdrasil signing key, so `init_crypto` is intentionally NOT called.
 fn app(pool: PgPool) -> Router {
-    std::env::set_var("DATABASE_URL", "postgres://unused");
+    // why: only a placeholder when the var is absent — clobbering a real DATABASE_URL
+    // trips sqlx::test's "DATABASE_URL changed at runtime" assertion mid-run.
+    if std::env::var_os("DATABASE_URL").is_none() {
+        std::env::set_var("DATABASE_URL", "postgres://unused");
+    }
     let config = Config::from_env().unwrap();
     let state = AppState::new(pool, config);
     account_routes().with_state(state)

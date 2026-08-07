@@ -1,5 +1,5 @@
-//! Admin domain: cookie-session REST for user management, API tokens, and live
-//! analytics, plus the embedded React SPA, mounted at `/admin`.
+//! Admin domain: cookie-session REST for user management and live analytics, plus
+//! the embedded React SPA, mounted at `/admin`.
 //!
 //! Auth model: login requires `is_admin` and sets an httpOnly session cookie plus
 //! a readable CSRF cookie. Mutations need the `AdminUser` extractor and pass the
@@ -10,7 +10,7 @@ pub mod analytics;
 pub mod auth;
 pub mod cookies;
 pub mod dto;
-pub mod requests;
+pub mod request_logs;
 pub mod spa;
 pub mod startup;
 pub mod users;
@@ -44,10 +44,13 @@ pub fn routes() -> Router<AppState> {
         .route("/users/{id}/revoke-tokens", post(users::revoke_tokens))
         .route("/analytics/overview", get(analytics::overview))
         .route("/analytics/timeseries", get(analytics::timeseries))
-        .route("/logs/tail", get(requests::tail))
-        .route("/analytics/requests", get(requests::list))
-        .route("/analytics/requests/summary", get(requests::summary))
-        .route("/analytics/requests/timeseries", get(requests::timeseries));
+        .route("/logs/tail", get(request_logs::tail))
+        .route("/analytics/requests", get(request_logs::list))
+        .route("/analytics/requests/summary", get(request_logs::summary))
+        .route(
+            "/analytics/requests/timeseries",
+            get(request_logs::timeseries),
+        );
 
     // An explicit `/` route is needed because in axum 0.8 a fallback alone does
     // not match the bare `/admin/` under a nest. The navigation guard serves the

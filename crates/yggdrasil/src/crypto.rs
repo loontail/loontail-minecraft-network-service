@@ -12,6 +12,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::rand_core::OsRng;
 use rsa::{Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey};
 use sha1::{Digest, Sha1};
 
@@ -118,8 +119,7 @@ pub fn load_or_generate_key(path: impl AsRef<Path>) -> Result<SigningKey, Crypto
         return SigningKey::from_private(private_key);
     }
 
-    let mut rng = rand::thread_rng();
-    let private_key = RsaPrivateKey::new(&mut rng, KEY_BITS).map_err(CryptoError::Generate)?;
+    let private_key = RsaPrivateKey::new(&mut OsRng, KEY_BITS).map_err(CryptoError::Generate)?;
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -250,8 +250,7 @@ mod tests {
     // A small fixed 2048-bit test key keeps unit tests fast; the golden-vector
     // integration test uses the committed openssl fixture for the algorithm proof.
     fn test_key() -> SigningKey {
-        let mut rng = rand::thread_rng();
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
         SigningKey::from_private(private_key).unwrap()
     }
 

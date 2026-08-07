@@ -4,37 +4,41 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+import { devProxy } from "./devProxy.ts";
+
 // The admin SPA is served by the `admin` crate under `/admin`, so all asset URLs
-// must be prefixed accordingly. During `vite dev` the dev server proxies `/admin`
-// API calls to the Rust backend.
+// must be prefixed accordingly. During `vite dev` the dev server proxies the
+// backend prefixes in `devProxy` to the Rust server.
 export default defineConfig({
   base: "/admin/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   build: {
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        // Isolate recharts (the largest dependency, used only by the lazily
-        // loaded Dashboard/Logs pages) into its own chunk.
-        manualChunks: {
-          recharts: ["recharts"],
+        codeSplitting: {
+          // Isolate recharts (the largest dependency, used only by the lazily
+          // loaded Dashboard/Logs pages) into its own chunk.
+          groups: [
+            {
+              name: "recharts",
+              test: /node_modules[\\/](recharts|recharts-scale|react-smooth|victory-vendor|d3-[a-z]+|internmap)[\\/]/,
+              // why: this defaults to true, which would drag shared deps
+              // (React, clsx) into the chart chunk and make the entry load all
+              // 380 kB of it on every route.
+              includeDependenciesRecursively: false,
+            },
+          ],
         },
       },
     },
   },
   server: {
-    proxy: {
-      "/admin/auth": "http://localhost:8080",
-      "/admin/users": "http://localhost:8080",
-      "/admin/catalog": "http://localhost:8080",
-      "/admin/bundles": "http://localhost:8080",
-      "/admin/api-tokens": "http://localhost:8080",
-      "/admin/analytics": "http://localhost:8080",
-    },
+    proxy: devProxy,
   },
   test: {
     globals: true,

@@ -80,6 +80,8 @@ export function SegmentedControl<T extends string>({
   const isTabs = mode === "tabs";
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: tablist/radiogroup own the arrow-key roving-tabindex handler by spec.
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is a ternary the linter cannot resolve; aria-label is valid for both tablist and radiogroup.
     <div
       role={isTabs ? "tablist" : "radiogroup"}
       aria-label={ariaLabel}
@@ -93,6 +95,7 @@ export function SegmentedControl<T extends string>({
         const Icon = item.icon;
         const active = item.value === value;
         return (
+          // biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is a ternary the linter cannot resolve; aria-selected is only set for role=tab and aria-checked only for role=radio.
           <button
             key={item.value}
             ref={(el) => {

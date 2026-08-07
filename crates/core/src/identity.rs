@@ -8,10 +8,10 @@
 //! identity); a random undashed UUID is assigned only when `minecraft_uuid IS
 //! NULL`. `normalized_username` is UNIQUE.
 
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt, SaltString};
 use argon2::Argon2;
 use loontail_yggdrasil_protocol::undash_uuid;
+use rand::Rng;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -21,7 +21,15 @@ use crate::models::{escape_like_pattern, is_valid_email, normalize_username, Use
 /// Hash a password with Argon2id (default params); the returned PHC string embeds
 /// the algorithm, params, and a per-password random salt.
 pub fn hash_password(plain: &str) -> AppResult<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    // why (not `SaltString::generate`): that helper wants an `OsRng` from the
+    // `rand_core` 0.6 that argon2 re-exports, whose `getrandom` feature only gets
+    // enabled here by workspace-wide feature unification — so `cargo build -p
+    // loontail-core` failed to compile. Drawing the salt from `rand`, the CSPRNG
+    // every other secret in this crate uses, removes that hidden coupling.
+    let mut salt_bytes = [0u8; Salt::RECOMMENDED_LENGTH];
+    rand::rng().fill_bytes(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("salt encode failed: {e}")))?;
     let hash = Argon2::default()
         .hash_password(plain.as_bytes(), &salt)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("password hash failed: {e}")))?;
@@ -90,6 +98,17 @@ fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.constraint() == Some(constraint))
 }
 
+/// The identity a bootstrap call asserts. A struct rather than five positional
+/// `&str`/`Option<&str>` arguments, which let a swapped pair compile.
+#[derive(Debug, Clone, Copy)]
+pub struct BootstrapIdentity<'a> {
+    pub minecraft_uuid: &'a str,
+    pub username: &'a str,
+    pub account_type: Option<&'a str>,
+    pub xuid: Option<&'a str>,
+    pub client_id: Option<&'a str>,
+}
+
 /// The mod bootstrap path (origin `mod`), guaranteeing the reconciliation invariant:
 /// 1. look up by `minecraft_uuid`; if found, refresh username + `profile_uuid`;
 /// 2. else look up by `profile_uuid = undash(minecraft_uuid)` and bind this
@@ -97,14 +116,10 @@ fn is_unique_violation(err: &sqlx::Error, constraint: &str) -> bool {
 /// 3. else insert a fresh `mod` user.
 pub async fn find_or_create_from_bootstrap(
     pool: &PgPool,
-    minecraft_uuid: &str,
-    username: &str,
-    account_type: Option<&str>,
-    xuid: Option<&str>,
-    client_id: Option<&str>,
+    ident: BootstrapIdentity<'_>,
 ) -> AppResult<User> {
-    let minecraft_uuid = minecraft_uuid.trim();
-    let username = username.trim();
+    let minecraft_uuid = ident.minecraft_uuid.trim();
+    let username = ident.username.trim();
     if minecraft_uuid.is_empty() {
         return Err(AppError::BadRequest("minecraftUuid is required".into()));
     }
@@ -116,29 +131,28 @@ pub async fn find_or_create_from_bootstrap(
     let normalized = normalize_username(username);
 
     if let Some(existing) = find_by_minecraft_uuid(pool, minecraft_uuid).await? {
-        return update_bootstrap_row(
+        // Already keyed on this minecraft_uuid: only the profile_uuid needs (re)binding.
+        return refresh_bootstrap_row(
             pool,
             existing.id,
-            username,
+            ident,
             &normalized,
-            &profile_uuid,
-            account_type,
-            xuid,
-            client_id,
+            None,
+            Some(&profile_uuid),
         )
         .await;
     }
 
     if let Some(existing) = find_by_profile_uuid(pool, &profile_uuid).await? {
-        return bind_minecraft_uuid(
+        // A credential-first account whose profile_uuid already matches: bind the
+        // minecraft_uuid onto it instead of minting a second identity.
+        return refresh_bootstrap_row(
             pool,
             existing.id,
-            minecraft_uuid,
-            username,
+            ident,
             &normalized,
-            account_type,
-            xuid,
-            client_id,
+            Some(minecraft_uuid),
+            None,
         )
         .await;
     }
@@ -155,9 +169,9 @@ pub async fn find_or_create_from_bootstrap(
     .bind(minecraft_uuid)
     .bind(username)
     .bind(&normalized)
-    .bind(account_type)
-    .bind(xuid)
-    .bind(client_id)
+    .bind(ident.account_type)
+    .bind(ident.xuid)
+    .bind(ident.client_id)
     .bind(&profile_uuid)
     .fetch_one(pool)
     .await
@@ -166,64 +180,28 @@ pub async fn find_or_create_from_bootstrap(
     Ok(row)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn update_bootstrap_row(
+/// Refresh an existing row from a bootstrap. `minecraft_uuid`/`profile_uuid` are
+/// COALESCE-bound, so the caller passes `Some` for whichever of the two this branch is
+/// binding and `None` for the other; everything else is refreshed the same way for
+/// both branches, which is why they are one function.
+async fn refresh_bootstrap_row(
     pool: &PgPool,
     id: Uuid,
-    username: &str,
+    ident: BootstrapIdentity<'_>,
     normalized: &str,
-    profile_uuid: &str,
-    account_type: Option<&str>,
-    xuid: Option<&str>,
-    client_id: Option<&str>,
+    minecraft_uuid: Option<&str>,
+    profile_uuid: Option<&str>,
 ) -> AppResult<User> {
     sqlx::query_as::<_, User>(
         r#"
         UPDATE users SET
-            username            = $2,
-            normalized_username = $3,
-            profile_uuid        = $4,
-            account_type        = COALESCE($5, account_type),
-            xuid                = COALESCE($6, xuid),
-            client_id           = COALESCE($7, client_id),
-            last_seen_at        = now(),
-            updated_at          = now()
-        WHERE id = $1
-        RETURNING *
-        "#,
-    )
-    .bind(id)
-    .bind(username)
-    .bind(normalized)
-    .bind(profile_uuid)
-    .bind(account_type)
-    .bind(xuid)
-    .bind(client_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| map_username_conflict(e, normalized))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn bind_minecraft_uuid(
-    pool: &PgPool,
-    id: Uuid,
-    minecraft_uuid: &str,
-    username: &str,
-    normalized: &str,
-    account_type: Option<&str>,
-    xuid: Option<&str>,
-    client_id: Option<&str>,
-) -> AppResult<User> {
-    sqlx::query_as::<_, User>(
-        r#"
-        UPDATE users SET
-            minecraft_uuid      = $2,
-            username            = $3,
-            normalized_username = $4,
-            account_type        = COALESCE($5, account_type),
-            xuid                = COALESCE($6, xuid),
-            client_id           = COALESCE($7, client_id),
+            minecraft_uuid      = COALESCE($2, minecraft_uuid),
+            profile_uuid        = COALESCE($3, profile_uuid),
+            username            = $4,
+            normalized_username = $5,
+            account_type        = COALESCE($6, account_type),
+            xuid                = COALESCE($7, xuid),
+            client_id           = COALESCE($8, client_id),
             last_seen_at        = now(),
             updated_at          = now()
         WHERE id = $1
@@ -232,11 +210,12 @@ async fn bind_minecraft_uuid(
     )
     .bind(id)
     .bind(minecraft_uuid)
-    .bind(username)
+    .bind(profile_uuid)
+    .bind(ident.username.trim())
     .bind(normalized)
-    .bind(account_type)
-    .bind(xuid)
-    .bind(client_id)
+    .bind(ident.account_type)
+    .bind(ident.xuid)
+    .bind(ident.client_id)
     .fetch_one(pool)
     .await
     .map_err(|e| map_username_conflict(e, normalized))
@@ -404,7 +383,11 @@ pub async fn register_user(
     .map_err(|e| map_create_conflict(e, &normalized, email))
 }
 
-pub async fn get_user(pool: &PgPool, id: Uuid) -> AppResult<User> {
+/// One user by id, 404 when absent. Named `load_` (not `get_`) because it is a
+/// database round-trip: Rust reserves `get_*` for cheap in-memory accessors, and this
+/// module documents a pool-deadlock hazard for round-trips taken inside a held
+/// transaction.
+pub async fn load_user(pool: &PgPool, id: Uuid) -> AppResult<User> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
         .fetch_optional(pool)
@@ -421,7 +404,7 @@ async fn find_by_minecraft_uuid(pool: &PgPool, minecraft_uuid: &str) -> AppResul
     )
 }
 
-async fn find_by_profile_uuid(pool: &PgPool, profile_uuid: &str) -> AppResult<Option<User>> {
+pub async fn find_by_profile_uuid(pool: &PgPool, profile_uuid: &str) -> AppResult<Option<User>> {
     Ok(
         sqlx::query_as::<_, User>("SELECT * FROM users WHERE profile_uuid = $1")
             .bind(profile_uuid)
@@ -564,9 +547,7 @@ pub async fn set_password(pool: &PgPool, id: Uuid, new: &str) -> AppResult<()> {
             .execute(pool)
             .await?
             .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("user not found".into()));
-    }
+    crate::error::found(affected, "user")?;
     Ok(())
 }
 

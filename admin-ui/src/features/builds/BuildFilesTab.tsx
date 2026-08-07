@@ -15,7 +15,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useUpdateClient } from "@/features/builds/api";
 import {
   type FileMenuAction,
   FileContextMenu,
@@ -32,7 +31,6 @@ import {
   parentPath,
   type TreeEntry,
 } from "@/features/builds/fileTree";
-import type { MoveRequest } from "@/features/builds/dndHooks";
 import { downloadFile } from "@/features/builds/download";
 import { MoveDialog } from "@/features/builds/MoveDialog";
 import { NewFolderDialog } from "@/features/builds/NewFolderDialog";
@@ -43,7 +41,7 @@ import {
   type ViewMode,
 } from "@/features/builds/FileManagerToolbar";
 import {
-  useBuild,
+  useBuildFiles,
   useBulkDelete,
   useDeleteFile,
   useInvalidateBuild,
@@ -51,13 +49,19 @@ import {
   useRegenerateManifest,
   useRehashFile,
   useToggleDownloadOnce,
+  useUpdateBuild,
   useUploadArchive,
   useUploadFile,
   useValidateBuild,
-} from "@/features/bundles/api";
+} from "@/features/builds/api";
+import { ApiError } from "@/shared/api/client";
+import {
+  toastBatchUpload,
+  uploadSequentially,
+} from "@/shared/lib/batchUpload";
 import { cn } from "@/shared/lib/cn";
 import { formatBytes, formatDateTime } from "@/shared/lib/format";
-import type { Bundle, ClientAdmin } from "@/shared/types";
+import type { Bundle, BuildAdmin } from "@/shared/types";
 
 function StatusBadge({ status }: { status: string }) {
   if (status === "ready") {
@@ -113,11 +117,11 @@ function FooterStatus({ build }: { build: Bundle }) {
 
 // why: re-saving with bundleSlug:null makes the backend re-provision the owned
 // bundle, after which the bundle read succeeds and the file manager loads.
-function NoBundleState({ build }: { build: ClientAdmin }) {
-  const updateClient = useUpdateClient();
+function NoBundleState({ build }: { build: BuildAdmin }) {
+  const updateBuild = useUpdateBuild();
 
   function heal() {
-    updateClient.mutate({
+    updateBuild.mutate({
       id: build.id,
       slug: build.slug,
       available: build.available,
@@ -145,8 +149,8 @@ function NoBundleState({ build }: { build: ClientAdmin }) {
           title="No file storage yet"
           description="This build has no bundle to store files in. Set one up to start uploading mods, configs, and resource packs."
           action={
-            <Button onClick={heal} disabled={updateClient.isPending}>
-              {updateClient.isPending ? (
+            <Button onClick={heal} disabled={updateBuild.isPending}>
+              {updateBuild.isPending ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : null}
               Set up file storage
@@ -158,9 +162,9 @@ function NoBundleState({ build }: { build: ClientAdmin }) {
   );
 }
 
-export function BuildFilesTab({ build }: { build: ClientAdmin }) {
+export function BuildFilesTab({ build }: { build: BuildAdmin }) {
   const bundleSlug = build.bundle?.slug ?? null;
-  const query = useBuild(bundleSlug ?? undefined);
+  const query = useBuildFiles(bundleSlug ?? undefined);
 
   const [currentPath, setCurrentPath] = useState("");
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -241,8 +245,9 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     setSelectedKeys(new Set());
   }
 
-  // Upload sequentially so N files don't fire N parallel POSTs that each trigger a
-  // manifest regen and race on the same bundle; invalidate once at the end.
+  // Upload sequentially (see uploadSequentially) so N files don't fire N parallel
+  // POSTs that each trigger a manifest regen and race on the same bundle; the
+  // `silent` per-call toast is replaced by one summary toast and one invalidation.
   async function uploadFiles(files: FileList | File[], dir = currentPath) {
     const list = Array.from(files);
     if (list.length === 0) {
@@ -254,37 +259,17 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
       return;
     }
     setBatchUploading(true);
-    let ok = 0;
-    let failed = 0;
-    for (const file of list) {
-      try {
-        await uploadFile.mutateAsync({
-          slug,
-          file,
-          targetPath: joinPath(dir, file.name),
-          silent: true,
-        });
-        ok += 1;
-      } catch {
-        failed += 1;
-      }
-    }
+    const outcome = await uploadSequentially(list, (file) =>
+      uploadFile.mutateAsync({
+        slug,
+        file,
+        targetPath: joinPath(dir, file.name),
+        silent: true,
+      }),
+    );
     setBatchUploading(false);
     invalidateBuild(slug);
-    if (failed === 0) {
-      toast.success(`Uploaded ${ok} file${ok === 1 ? "" : "s"}`);
-    } else if (ok === 0) {
-      toast.error(`Failed to upload ${failed} file${failed === 1 ? "" : "s"}`);
-    } else {
-      toast.warning(`Uploaded ${ok}, failed ${failed}`);
-    }
-  }
-
-  function onMove(req: MoveRequest) {
-    moveFiles.mutate(
-      { slug, ids: req.ids, targetDir: req.targetDir },
-      { onSuccess: () => setSelectedKeys(new Set()) },
-    );
+    toastBatchUpload(outcome, "file");
   }
 
   // Selection is artifact-only: folders carry no id, so they are never selectable.
@@ -438,14 +423,20 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     });
   }
 
+  // why: browsers throttle/block a burst of synthetic anchor clicks, so files after
+  // the first few silently never download. Stagger them instead.
   function downloadSelection() {
-    let skipped = 0;
-    for (const node of selectedEntries) {
-      if (node.isDir) {
-        skipped += 1;
-        continue;
+    const files = selectedEntries.filter((node) => !node.isDir);
+    const skipped = selectedEntries.length - files.length;
+    files.forEach((node, index) => {
+      if (index === 0) {
+        downloadFile(slug, node.relativePath);
+        return;
       }
-      downloadFile(slug, node.relativePath);
+      setTimeout(() => downloadFile(slug, node.relativePath), index * 300);
+    });
+    if (files.length > 1) {
+      toast.message(`Downloading ${files.length} files…`);
     }
     if (skipped > 0) {
       toast.info(
@@ -454,14 +445,15 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
     }
   }
 
-  // Order matters: the error branch must come before the loading branch.
   if (bundleSlug === null) {
     return <NoBundleState build={build} />;
   }
 
+  // why: react-query leaves `data` undefined on error, so the `!data` test in the
+  // loading branch below would swallow the error card — this branch must stay above it.
   if (query.isError) {
     const notFound =
-      query.error instanceof Error && /404|not\s*found/i.test(query.error.message);
+      query.error instanceof ApiError && query.error.status === 404;
     return (
       <Card>
         <CardContent className="py-12">
@@ -529,7 +521,6 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
         <FileBreadcrumbs
           currentPath={currentPath}
           onNavigate={navigate}
-          onMoveToRoot={(ids) => onMove({ ids, targetDir: "" })}
           onUploadToRoot={(files) => uploadFiles(files, "")}
         />
 
@@ -548,6 +539,7 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
 
         {/* Wraps the table/grid body only; the FileBreadcrumbs Root DropZone owns
             root drops, so the two drop regions stay disjoint. */}
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: file-drop target; HTML drag-and-drop has no interactive ARIA role, and upload is also reachable via the Upload button. */}
         <div
           className={cn(
             "rounded-lg outline-none transition-shadow",
@@ -582,7 +574,6 @@ export function BuildFilesTab({ build }: { build: ClientAdmin }) {
               someSelected={someSelected}
               onAction={onNameAction}
               onOpenMenu={openMenu}
-              onToggleDownloadOnce={onToggleDownloadOnceEntry}
             />
           ) : (
             <FileList

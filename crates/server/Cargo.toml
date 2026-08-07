@@ -1,14 +1,10 @@
 [package]
-name = "loontail-server"
+name = "loontail-launcher-api"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Loontail launcher API — binary that composes the domains and serves HTTP/WS"
-
-[[bin]]
-name = "loontail-launcher-api"
-path = "src/main.rs"
 
 [dependencies]
 loontail-core = { workspace = true }

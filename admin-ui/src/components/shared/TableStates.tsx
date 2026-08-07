@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { TableCell, TableRow } from "@/components/ui/table";
@@ -32,11 +33,13 @@ export function TableStateRow({
   icon: Icon,
   title,
   description,
+  action,
 }: {
   columns: number;
   icon: LucideIcon;
   title: string;
   description: string;
+  action?: ReactNode;
 }) {
   return (
     <TableRow className="hover:bg-transparent">
@@ -45,6 +48,7 @@ export function TableStateRow({
           <Icon className="size-8 text-text-faint" />
           <p className="text-body-med text-text-hi">{title}</p>
           <p className="text-caption">{description}</p>
+          {action ? <div className="mt-2">{action}</div> : null}
         </div>
       </TableCell>
     </TableRow>

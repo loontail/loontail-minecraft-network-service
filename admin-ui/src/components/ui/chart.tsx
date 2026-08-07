@@ -116,7 +116,9 @@ function ChartTooltipContent({
   color,
   nameKey,
   labelKey,
-}: React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
+  // why: recharts injects payload/active/label/coordinate when it renders this
+  // via Tooltip's `content` prop, so callers only pass the presentational props.
+}: Partial<RechartsPrimitive.TooltipContentProps> &
   React.ComponentProps<"div"> & {
     hideLabel?: boolean;
     hideIndicator?: boolean;

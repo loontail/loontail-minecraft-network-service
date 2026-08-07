@@ -10,8 +10,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use loontail_core::config::{
-    AdminConfig, BundlesConfig, CatalogConfig, Config, RateLimitConfig, RequestLogConfig,
-    TexturesConfig, YggdrasilConfig,
+    AdminConfig, BundlesConfig, CatalogConfig, Config, EventRetentionConfig, RateLimitConfig,
+    RequestLogConfig, TexturesConfig, YggdrasilConfig,
 };
 use loontail_core::identity::{admin_create_user, AdminCreateUser};
 use loontail_core::AppState;
@@ -27,6 +27,10 @@ use uuid::Uuid;
 const PUBLIC_URL: &str = "/api/yggdrasil";
 
 fn test_config() -> Config {
+    config_with_public_url(PUBLIC_URL)
+}
+
+fn config_with_public_url(public_url: &str) -> Config {
     Config {
         http_host: "127.0.0.1".into(),
         http_port: 0,
@@ -47,12 +51,13 @@ fn test_config() -> Config {
             window: Duration::from_secs(60),
         },
         request_log: RequestLogConfig { retention_days: 7 },
+        event_retention: EventRetentionConfig { retention_days: 30 },
         yggdrasil: YggdrasilConfig {
-            public_url: PUBLIC_URL.into(),
+            public_url: public_url.into(),
             key_path: "tests/test-key.pem".into(),
             token_ttl: Duration::from_secs(900),
             max_tokens_per_user: 10,
-            skin_domains: vec![".loontail.com".into(), "localhost".into()],
+            skin_domains: vec![".loontail.dev".into(), "localhost".into()],
         },
         textures: TexturesConfig {
             storage_root: "data/textures".into(),
@@ -74,7 +79,10 @@ fn test_config() -> Config {
 }
 
 fn app(pool: PgPool) -> axum::Router {
-    let config = test_config();
+    app_with_config(pool, test_config())
+}
+
+fn app_with_config(pool: PgPool, config: Config) -> axum::Router {
     init_crypto(&config).expect("init crypto from test key");
     let state = AppState::new(pool, config);
     routes().with_state(state)
@@ -232,9 +240,9 @@ async fn access_token_is_hashed_at_rest(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "authenticate ok: {body}");
     let access = body["accessToken"].as_str().unwrap().to_string();
 
-    // The stored access_token column is NOT the plaintext...
+    // The stored access_token_hash column is NOT the plaintext...
     let plaintext_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM yggdrasil_tokens WHERE access_token = $1")
+        sqlx::query_scalar("SELECT count(*) FROM yggdrasil_tokens WHERE access_token_hash = $1")
             .bind(&access)
             .fetch_one(&pool)
             .await
@@ -244,7 +252,7 @@ async fn access_token_is_hashed_at_rest(pool: PgPool) {
     // ...it is the SHA-256 hash of the plaintext.
     let hash = loontail_core::auth::hash_token(&access);
     let hashed_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM yggdrasil_tokens WHERE access_token = $1")
+        sqlx::query_scalar("SELECT count(*) FROM yggdrasil_tokens WHERE access_token_hash = $1")
             .bind(&hash)
             .fetch_one(&pool)
             .await
@@ -267,8 +275,8 @@ async fn join_then_has_joined_returns_signed_profile(pool: PgPool) {
 
     // Give bob a skin so the profile carries a signed textures property.
     sqlx::query(
-        "INSERT INTO skins (user_id, profile_uuid, username, file_path, file_url, file_size, variant)
-         VALUES ($1, $2, 'bob', 'skins/bob.png', '/textures/skins/bob.png', 1234, 'SLIM')",
+        "INSERT INTO user_textures (user_id, kind, profile_uuid, username, file_path, file_url, file_size, variant)
+         VALUES ($1, 'skin', $2, 'bob', 'skins/bob.png', '/textures/skins/bob.png', 1234, 'SLIM')",
     )
     .bind(uid)
     .bind(&profile_uuid)
@@ -366,8 +374,8 @@ async fn join_then_has_joined_returns_signed_profile(pool: PgPool) {
 async fn profile_by_uuid_signed_and_unsigned(pool: PgPool) {
     let (uid, profile_uuid) = seed_user(&pool, "carol", "pw").await;
     sqlx::query(
-        "INSERT INTO skins (user_id, profile_uuid, username, file_path, file_url, file_size, variant)
-         VALUES ($1, $2, 'carol', 'skins/carol.png', '/textures/skins/carol.png', 10, 'CLASSIC')",
+        "INSERT INTO user_textures (user_id, kind, profile_uuid, username, file_path, file_url, file_size, variant)
+         VALUES ($1, 'skin', $2, 'carol', 'skins/carol.png', '/textures/skins/carol.png', 10, 'CLASSIC')",
     )
     .bind(uid)
     .bind(&profile_uuid)
@@ -440,4 +448,73 @@ async fn meta_exposes_spki_public_key(pool: PgPool) {
     assert!(spki.starts_with("-----BEGIN PUBLIC KEY-----"));
     assert!(meta["skinDomains"].is_array());
     assert_eq!(meta["meta"]["serverName"].as_str(), Some("Loontail"));
+}
+
+/// CON-01 regression: with an absolute `YGGDRASIL_PUBLIC_URL`, the signed textures
+/// payload carries a fetchable `https://` URL. Under a path-only public URL the same
+/// field is a bare path that authlib cannot resolve, so skins fall back to Steve.
+#[sqlx::test(migrations = "../../migrations")]
+async fn absolute_public_url_yields_fetchable_texture_url(pool: PgPool) {
+    let (uid, profile_uuid) = seed_user(&pool, "dave", "pw").await;
+    sqlx::query(
+        "INSERT INTO user_textures (user_id, kind, profile_uuid, username, file_path, file_url, file_size, variant)
+         VALUES ($1, 'skin', $2, 'dave', 'skins/dave.png', '/textures/skins/dave.png', 10, 'CLASSIC')",
+    )
+    .bind(uid)
+    .bind(&profile_uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let config = config_with_public_url("https://cms.loontail.dev/api/yggdrasil");
+    let app = app_with_config(pool, config);
+
+    let (status, bytes) = get_status_body(
+        &app,
+        &format!("/sessionserver/session/minecraft/profile/{profile_uuid}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let profile: GameProfile = serde_json::from_slice(&bytes).unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(profile.properties[0].value.as_bytes())
+        .unwrap();
+    let value: Value = serde_json::from_slice(&decoded).unwrap();
+    let url = value["textures"]["SKIN"]["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("https://"),
+        "texture URL must be absolute for the game client to fetch it, got {url}"
+    );
+    assert_eq!(
+        url,
+        format!("https://cms.loontail.dev/api/yggdrasil/textures/{profile_uuid}/skin")
+    );
+}
+
+/// CON-02 regression: the meta document advertises the configured skin domains, so a
+/// deployment that lists its own host has its textures accepted by the client.
+#[sqlx::test(migrations = "../../migrations")]
+async fn meta_advertises_the_configured_skin_domains(pool: PgPool) {
+    let mut config = config_with_public_url("https://cms.loontail.dev/api/yggdrasil");
+    config.yggdrasil.skin_domains = vec![
+        "cms.loontail.dev".into(),
+        ".loontail.dev".into(),
+        "localhost".into(),
+    ];
+    let app = app_with_config(pool, config);
+
+    let (status, bytes) = get_status_body(&app, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    let meta: Value = serde_json::from_slice(&bytes).unwrap();
+    let domains: Vec<&str> = meta["skinDomains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    assert!(
+        domains.contains(&"cms.loontail.dev"),
+        "the texture host must be whitelisted, got {domains:?}"
+    );
+    assert!(domains.contains(&".loontail.dev"));
 }

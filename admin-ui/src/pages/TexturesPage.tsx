@@ -29,26 +29,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  type TextureKind,
-  type TextureRow,
   useDeleteTexture,
   useOrphans,
   usePurgeMissing,
   useTextures,
 } from "@/features/textures/api";
 import { errorMessage } from "@/shared/api/toast";
-import { formatDate, shortUuid } from "@/shared/lib/format";
+import type { TextureKind, TextureRow } from "@/shared/types";
+import { formatBytes, formatDate, shortUuid } from "@/shared/lib/format";
 import { useDebounced } from "@/shared/lib/useDebounced";
-
-function formatBytes(bytes: number): string {
-  if (!bytes) {
-    return "—";
-  }
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  return `${(bytes / 1024).toFixed(1)} KB`;
-}
 
 // The texture URL is revision-stable, so cache-bust with the row's `updatedAt`.
 function TexturePreview({ row, kind }: { row: TextureRow; kind: TextureKind }) {

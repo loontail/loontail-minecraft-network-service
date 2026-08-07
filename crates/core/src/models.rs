@@ -3,51 +3,116 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-/// Serialized to JSON / stored in Postgres as camelCase strings: `offline`,
-/// `online`, `inWorld`, `joinable`.
+/// `presence.status`. Serialized to JSON / stored in Postgres as camelCase strings:
+/// `offline`, `online`, `inWorld`, `joinable`. Those four literals are the wire
+/// contract the mod decodes and builds its i18n keys from — renaming one is a break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum UserStatus {
+pub enum PresenceStatus {
     Offline,
     Online,
     InWorld,
     Joinable,
 }
 
-impl UserStatus {
+impl PresenceStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            UserStatus::Offline => "offline",
-            UserStatus::Online => "online",
-            UserStatus::InWorld => "inWorld",
-            UserStatus::Joinable => "joinable",
+            PresenceStatus::Offline => "offline",
+            PresenceStatus::Online => "online",
+            PresenceStatus::InWorld => "inWorld",
+            PresenceStatus::Joinable => "joinable",
         }
     }
 
-    pub fn from_db(value: &str) -> UserStatus {
+    pub fn from_db(value: &str) -> PresenceStatus {
         match value {
-            "online" => UserStatus::Online,
-            "inWorld" => UserStatus::InWorld,
-            "joinable" => UserStatus::Joinable,
-            _ => UserStatus::Offline,
+            "online" => PresenceStatus::Online,
+            "inWorld" => PresenceStatus::InWorld,
+            "joinable" => PresenceStatus::Joinable,
+            _ => PresenceStatus::Offline,
         }
     }
 
     /// Statuses a client may set explicitly; `offline` is derived from heartbeat
     /// timeout, never set directly.
-    pub fn from_client(value: &str) -> Option<UserStatus> {
+    pub fn from_client(value: &str) -> Option<PresenceStatus> {
         match value {
-            "online" => Some(UserStatus::Online),
-            "inWorld" => Some(UserStatus::InWorld),
-            "joinable" => Some(UserStatus::Joinable),
+            "online" => Some(PresenceStatus::Online),
+            "inWorld" => Some(PresenceStatus::InWorld),
+            "joinable" => Some(PresenceStatus::Joinable),
             _ => None,
         }
     }
 
     /// True when the user is in their local world and may accept guests.
     pub fn is_in_world(self) -> bool {
-        matches!(self, UserStatus::InWorld | UserStatus::Joinable)
+        matches!(self, PresenceStatus::InWorld | PresenceStatus::Joinable)
     }
+}
+
+/// `world_sessions.status`. Stored and serialized as `open` / `closed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum WorldStatus {
+    Open,
+    Closed,
+}
+
+impl WorldStatus {
+    /// Parse a client-supplied value. Returns the same 400 the hand-written ladder
+    /// used to, so the error envelope is unchanged; serde's own rejection would
+    /// bypass it with a plain-text 422.
+    pub fn parse(value: &str) -> crate::error::AppResult<WorldStatus> {
+        match value {
+            "open" => Ok(WorldStatus::Open),
+            "closed" => Ok(WorldStatus::Closed),
+            _ => Err(crate::error::AppError::BadRequest(
+                "status must be open or closed".into(),
+            )),
+        }
+    }
+}
+
+/// `world_sessions.invite_policy` — who may invite a guest into the world. Under
+/// `FriendsOfFriends` a guest the host trusts may also invite; this is the
+/// friend-of-friend authorisation gate, so it must be compared as a type rather than
+/// as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum InvitePolicy {
+    HostOnly,
+    FriendsOfFriends,
+}
+
+impl InvitePolicy {
+    /// See [`WorldStatus::parse`] for why this is not serde's job.
+    pub fn parse(value: &str) -> crate::error::AppResult<InvitePolicy> {
+        match value {
+            "host_only" => Ok(InvitePolicy::HostOnly),
+            "friends_of_friends" => Ok(InvitePolicy::FriendsOfFriends),
+            _ => Err(crate::error::AppError::BadRequest(
+                "invitePolicy must be host_only or friends_of_friends".into(),
+            )),
+        }
+    }
+}
+
+/// The lifecycle state shared by `friend_requests`, `world_invites` and
+/// `join_requests`. `PendingApproval` occurs only on a world invite raised by a guest
+/// under [`InvitePolicy::FriendsOfFriends`], awaiting the host's approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum RequestStatus {
+    Pending,
+    PendingApproval,
+    Accepted,
+    Declined,
+    Revoked,
+    Expired,
 }
 
 /// A row from the `users` table. Mirrors every column even where a field is not yet
@@ -62,8 +127,6 @@ pub struct User {
     pub account_type: Option<String>,
     pub xuid: Option<String>,
     pub client_id: Option<String>,
-    pub avatar_url: Option<String>,
-    pub skin_hash: Option<String>,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -84,8 +147,6 @@ pub struct UserDto {
     pub id: Uuid,
     pub minecraft_uuid: Option<String>,
     pub username: String,
-    pub avatar_url: Option<String>,
-    pub skin_hash: Option<String>,
 }
 
 impl From<User> for UserDto {
@@ -94,8 +155,6 @@ impl From<User> for UserDto {
             id: user.id,
             minecraft_uuid: user.minecraft_uuid,
             username: user.username,
-            avatar_url: user.avatar_url,
-            skin_hash: user.skin_hash,
         }
     }
 }
@@ -106,8 +165,6 @@ impl From<&User> for UserDto {
             id: user.id,
             minecraft_uuid: user.minecraft_uuid.clone(),
             username: user.username.clone(),
-            avatar_url: user.avatar_url.clone(),
-            skin_hash: user.skin_hash.clone(),
         }
     }
 }

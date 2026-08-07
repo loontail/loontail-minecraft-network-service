@@ -1,8 +1,5 @@
-// Catalog DTOs. `id` is a UUID as an undashed 32-char hex string; media URLs stay server-relative.
-
-export interface ClientList {
-  clients: Client[];
-}
+// Catalog DTOs. On reads `id` is a UUID as an undashed 32-char hex string; media
+// URLs stay server-relative.
 
 export interface KeywordList {
   keywords: Keyword[];
@@ -29,7 +26,7 @@ export interface Server {
   address: string;
 }
 
-/// The owned bundle inlined onto a client's `bundle` field on reads.
+// The owned bundle inlined onto a build's `bundle` field on reads.
 export interface BundleSummary {
   slug: string;
   version: string | null;
@@ -38,7 +35,7 @@ export interface BundleSummary {
   manifestUrl: string;
 }
 
-export interface Client {
+export interface Build {
   id: string;
   slug: string;
   title: string;
@@ -59,13 +56,13 @@ export interface Client {
   bundle: BundleSummary | null;
 }
 
-/// A client plus its admin-only `published` state; includes drafts the public reads hide.
-export interface ClientAdmin extends Client {
+// A build plus its admin-only `published` state; includes drafts the public reads hide.
+export interface BuildAdmin extends Build {
   published: boolean;
 }
 
-export interface ClientAdminList {
-  clients: ClientAdmin[];
+export interface BuildAdminList {
+  clients: BuildAdmin[];
 }
 
 export type MediaRole = "poster" | "background" | "titleImage" | "screenshot";
@@ -88,14 +85,14 @@ export interface UploadMediaResult {
   url: string;
 }
 
-export interface ClientLocaleInput {
+export interface BuildLocaleInput {
   locale: string;
   title: string;
   description?: string | null;
   shortDescription?: string | null;
 }
 
-export interface UpsertClient {
+export interface UpsertBuild {
   slug: string;
   available?: boolean;
   minecraftVersion?: string | null;
@@ -104,7 +101,7 @@ export interface UpsertClient {
   runtimeVersion?: string | null;
   bundleSlug?: string | null;
   sortOrder?: number;
-  locales?: ClientLocaleInput[];
+  locales?: BuildLocaleInput[];
 }
 
 export interface KeywordLocaleInput {
@@ -123,21 +120,9 @@ export interface UpsertServer {
   address: string;
 }
 
-export interface AttachMedia {
-  role: string;
-  url: string;
-  ext?: string | null;
-  name?: string | null;
-  hash?: string | null;
-  mime?: string | null;
-  width?: number | null;
-  height?: number | null;
-  size?: number | null;
-  formats?: unknown;
-  sortOrder?: number;
-}
-
-/// Create also returns the auto-provisioned owned bundle's slug.
+// Create also returns the auto-provisioned owned bundle's slug.
+// why: this `id` is the raw dashed 36-char UUID, not the undashed hex the reads
+// return — never compare it against an id read from a list, re-fetch instead.
 export interface CatalogMutationResult {
   id: string;
   published?: boolean;

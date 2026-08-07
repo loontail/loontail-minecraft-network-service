@@ -3,7 +3,9 @@
 //! (heartbeat/status/friends), world-session open/patch/close, and a join
 //! happy path. Each test runs against an isolated Postgres via `#[sqlx::test]`
 //! and drives the `Router<AppState>` through `tower::ServiceExt::oneshot` — no
-//! real socket is opened.
+//! real socket is opened. The socket-level suite lives in `websockets.rs`.
+
+mod support;
 
 use std::time::Duration;
 
@@ -11,160 +13,15 @@ use axum::body::Body;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use loontail_core::config::Config;
-use loontail_core::AppState;
-
-/// Build the network router with state wired to the injected test pool. The pool
-/// comes from `#[sqlx::test]`, so the `DATABASE_URL` placeholder is never used.
-fn app(pool: PgPool) -> Router {
-    std::env::set_var("DATABASE_URL", "postgres://unused");
-    let mut config = Config::from_env().unwrap();
-    // A generous heartbeat window so freshly-seeded presence rows read as live
-    // across the whole test, independent of wall-clock timing.
-    config.heartbeat_timeout = std::time::Duration::from_secs(3600);
-    let state = AppState::new(pool, config);
-    loontail_network::routes().with_state(state)
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-}
-
-/// A seeded network user: its issued session bearer token plus the user id, so
-/// tests can reference its identity without a second round-trip.
-struct TestUser {
-    token: String,
-    id: String,
-}
-
-/// Mint a session for an account directly via the core functions. The test app
-/// builds only `loontail_network::routes()` (no `/api/auth`), so sessions cannot
-/// be obtained over HTTP — we register a Yggdrasil account (no minecraft_uuid,
-/// random profile_uuid) and issue a session against the pool.
-async fn mint_session(pool: &PgPool, username: &str) -> (uuid::Uuid, String) {
-    let email = format!("{username}@test.invalid");
-    let user = loontail_core::identity::register_user(pool, username, &email, "test-password")
-        .await
-        .expect("register account");
-    let session = loontail_core::auth::issue_session(pool, user.id, Duration::from_secs(3600))
-        .await
-        .expect("issue session");
-    (user.id, session.token)
-}
-
-/// POST an authenticated `/users/bootstrap` for `user`, binding the live
-/// Minecraft identity + presence. Returns the raw response.
-async fn post_bootstrap(
-    app: &Router,
-    token: &str,
-    minecraft_uuid: &str,
-    username: &str,
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/users/bootstrap")
-                .header("content-type", "application/json")
-                .header(AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::from(
-                    json!({
-                        "minecraftUuid": minecraft_uuid,
-                        "username": username,
-                        "minecraftVersion": "1.21.4",
-                        "loader": "fabric"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-
-/// Register an account, issue its session, then run the now-authenticated
-/// `/users/bootstrap` to bind the live Minecraft identity + mark presence online.
-/// Asserts the `{ user }` response shape and returns the session + user id for
-/// follow-up authenticated calls.
-async fn seed_user(pool: &PgPool, app: &Router, minecraft_uuid: &str, username: &str) -> TestUser {
-    let (id, token) = mint_session(pool, username).await;
-
-    let resp = post_bootstrap(app, &token, minecraft_uuid, username).await;
-    assert_eq!(resp.status(), StatusCode::OK, "bootstrap should succeed");
-    let body = body_json(resp).await;
-    assert!(
-        body.get("token").is_none(),
-        "bootstrap no longer issues a token"
-    );
-    let user = &body["user"];
-    assert_eq!(user["username"], username);
-    assert_eq!(user["minecraftUuid"], minecraft_uuid);
-    assert_eq!(user["id"].as_str().expect("user id"), id.to_string());
-    TestUser {
-        token,
-        id: id.to_string(),
-    }
-}
-
-/// Issue an authenticated request as `user`, returning the raw response.
-async fn authed(
-    app: &Router,
-    user: &TestUser,
-    method: &str,
-    uri: &str,
-    body: Option<Value>,
-) -> axum::response::Response {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(AUTHORIZATION, format!("Bearer {}", user.token));
-    let body = match body {
-        Some(value) => {
-            builder = builder.header("content-type", "application/json");
-            Body::from(value.to_string())
-        }
-        None => Body::empty(),
-    };
-    app.clone()
-        .oneshot(builder.body(body).unwrap())
-        .await
-        .unwrap()
-}
-
-/// Make `a` and `b` friends via the request/accept flow.
-async fn befriend(app: &Router, a: &TestUser, b: &TestUser) {
-    let req = body_json(
-        authed(
-            app,
-            a,
-            "POST",
-            "/friends/requests",
-            Some(json!({ "toUserId": b.id })),
-        )
-        .await,
-    )
-    .await;
-    let request_id = req["id"].as_str().unwrap();
-    let resp = authed(
-        app,
-        b,
-        "POST",
-        &format!("/friends/requests/{request_id}/accept"),
-        None,
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "friend accept should succeed"
-    );
-}
+use support::{
+    app, authed, befriend, body_json, mint_session, post_bootstrap, seed_user, TestUser,
+};
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn bootstrap_binds_identity_and_me_returns_user_and_presence(pool: PgPool) {
@@ -656,6 +513,72 @@ async fn world_session_open_is_idempotent_patch_and_close(pool: PgPool) {
     );
 }
 
+/// CB-6: `status`/`invitePolicy` are now the `WorldStatus`/`InvitePolicy` enums, but the
+/// PATCH body is still parsed by hand — letting serde reject an unknown variant would
+/// answer with a plain-text 422 and escape the `{error:{code,message}}` envelope every
+/// other failure uses. Pin both the 400 and the envelope, and pin the wire spellings
+/// the enums serialize to.
+#[sqlx::test(migrations = "../../migrations")]
+async fn world_patch_rejects_unknown_status_and_policy_in_the_error_envelope(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "77777777-7777-7777-7777-777777777791",
+        "enumhost",
+    )
+    .await;
+    let world_id = body_json(authed(&app, &host, "POST", "/world-sessions", Some(json!({}))).await)
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (field, value, expected) in [
+        ("status", "bogus", "status must be open or closed"),
+        (
+            "invitePolicy",
+            "everyone",
+            "invitePolicy must be host_only or friends_of_friends",
+        ),
+    ] {
+        let resp = authed(
+            &app,
+            &host,
+            "PATCH",
+            &format!("/world-sessions/{world_id}"),
+            Some(json!({ field: value })),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{field}={value} must be a 400"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["message"], expected, "{field} message");
+        assert!(
+            body["error"]["code"].is_string(),
+            "{field} rejection must use the error envelope"
+        );
+    }
+
+    // The accepted spellings round-trip unchanged through the enums.
+    let patched = body_json(
+        authed(
+            &app,
+            &host,
+            "PATCH",
+            &format!("/world-sessions/{world_id}"),
+            Some(json!({ "status": "open", "invitePolicy": "host_only" })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(patched["status"], "open");
+    assert_eq!(patched["invitePolicy"], "host_only");
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn join_ticket_happy_path_for_joinable_friend(pool: PgPool) {
     let app = app(pool.clone());
@@ -723,6 +646,19 @@ async fn join_ticket_happy_path_for_joinable_friend(pool: PgPool) {
     assert_eq!(ticket["hostUserId"], host.id);
     assert!(ticket["relaySessionId"].as_str().is_some());
 
+    // TQ-02: the two fields the mod's authoritative compatibility gate reads
+    // (LoontailNetworkClient.requestConnect -> checkCompat). They come from the
+    // host's presence row via a LEFT JOIN, so a regression in that clause turns
+    // "join a friend" into a permanent refusal toast with nothing else failing.
+    assert_eq!(
+        ticket["hostMinecraftVersion"], "1.21.4",
+        "the gate reads the host's reported Minecraft version off the ticket"
+    );
+    assert_eq!(
+        ticket["hostLoader"], "fabric",
+        "the gate reads the host's reported mod loader off the ticket"
+    );
+
     // A pending relay session was created for this guest+host pairing.
     let relay_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM relay_sessions WHERE world_session_id = $1::uuid \
@@ -764,6 +700,88 @@ async fn join_ticket_happy_path_for_joinable_friend(pool: PgPool) {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// TQ-02: the compat-gate fields come from a LEFT JOIN onto the host's presence
+/// row, so a host that never reported a loader must yield `hostLoader: null` —
+/// the mod turns that into `Loader.UNKNOWN` and fails the join closed. Pinning
+/// the NULL deliberately, because the alternative (a stale value, or the join
+/// silently dropping the ticket) would be a far worse failure.
+#[sqlx::test(migrations = "../../migrations")]
+async fn join_ticket_reports_null_host_loader_when_the_host_never_reported_one(pool: PgPool) {
+    let app = app(pool.clone());
+
+    // The host bootstraps WITHOUT `loader`, so presence.loader stays NULL.
+    let (host_id, host_token) = mint_session(&pool, "nlhost").await;
+    let host = TestUser {
+        token: host_token,
+        id: host_id.to_string(),
+    };
+    let resp = authed(
+        &app,
+        &host,
+        "POST",
+        "/users/bootstrap",
+        Some(json!({
+            "minecraftUuid": "77777777-7777-7777-7777-777777777771",
+            "username": "nlhost",
+            "minecraftVersion": "1.21.4"
+        })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let loader: Option<String> =
+        sqlx::query_scalar("SELECT loader FROM presence WHERE user_id = $1")
+            .bind(host_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        loader.is_none(),
+        "a bootstrap without `loader` must leave presence.loader NULL"
+    );
+
+    let guest = seed_user(
+        &pool,
+        &app,
+        "77777777-7777-7777-7777-777777777772",
+        "nlguest",
+    )
+    .await;
+
+    befriend(&app, &host, &guest).await;
+
+    let world =
+        body_json(authed(&app, &host, "POST", "/world-sessions", Some(json!({}))).await).await;
+    let world_id = world["id"].as_str().unwrap().to_string();
+    authed(
+        &app,
+        &host,
+        "POST",
+        "/presence/status",
+        Some(json!({ "status": "joinable", "currentWorldSessionId": world_id })),
+    )
+    .await;
+
+    let resp = authed(
+        &app,
+        &guest,
+        "POST",
+        &format!("/world-sessions/{world_id}/join-ticket"),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ticket = body_json(resp).await;
+    assert_eq!(
+        ticket["hostMinecraftVersion"], "1.21.4",
+        "the version was reported, so it is still carried"
+    );
+    assert!(
+        ticket["hostLoader"].is_null(),
+        "an unreported host loader must reach the gate as null, not be omitted or faked"
+    );
 }
 
 /// BUG-1: a credential-only friend (registered, never bootstrapped → NULL
@@ -1208,4 +1226,691 @@ async fn join_ticket_rejected_when_world_at_capacity(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(relays, 0);
+}
+
+/// Open a world for `host` and mark them `inWorld` in it, returning the world id.
+async fn open_world_in_world(app: &Router, host: &TestUser) -> String {
+    let world =
+        body_json(authed(app, host, "POST", "/world-sessions", Some(json!({}))).await).await;
+    let world_id = world["id"].as_str().unwrap().to_string();
+    authed(
+        app,
+        host,
+        "POST",
+        "/presence/status",
+        Some(json!({ "status": "inWorld", "currentWorldSessionId": world_id })),
+    )
+    .await;
+    world_id
+}
+
+/// Statuses of two concurrently issued POSTs, sorted so the pair reads
+/// `[winner, loser]`.
+async fn race_two_posts(app: &Router, user: &TestUser, uri: &str) -> Vec<StatusCode> {
+    let (a, b) = tokio::join!(
+        authed(app, user, "POST", uri, None),
+        authed(app, user, "POST", uri, None),
+    );
+    let mut statuses = vec![a.status(), b.status()];
+    statuses.sort_by_key(|s| s.as_u16());
+    statuses
+}
+
+async fn count_rows(pool: &PgPool, table: &str) -> i64 {
+    sqlx::query_scalar(AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// BE-02: two simultaneous accepts of the same invite must mint exactly one ticket
+/// and one relay session — otherwise a scripted guest can occupy the whole world.
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_invite_accepts_issue_one_ticket(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff1",
+        "racehost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff2",
+        "raceguest",
+    )
+    .await;
+    befriend(&app, &host, &guest).await;
+    let world_id = open_world_in_world(&app, &host).await;
+
+    let invite = body_json(
+        authed(
+            &app,
+            &host,
+            "POST",
+            &format!("/world-sessions/{world_id}/invites"),
+            Some(json!({ "inviteeUserId": guest.id })),
+        )
+        .await,
+    )
+    .await;
+    let invite_id = invite["id"].as_str().unwrap().to_string();
+
+    let statuses = race_two_posts(&app, &guest, &format!("/invites/{invite_id}/accept")).await;
+    assert_eq!(
+        statuses,
+        vec![StatusCode::OK, StatusCode::CONFLICT],
+        "exactly one accept wins, the other is a clean 409"
+    );
+
+    assert_eq!(count_rows(&pool, "join_tickets").await, 1);
+    assert_eq!(count_rows(&pool, "relay_sessions").await, 1);
+}
+
+/// One accept = one pooled connection. The BE-02 transaction spans the whole
+/// admission, so every read inside it must run on the transaction: a helper that
+/// reaches back for `state.pool` makes the request need TWO connections, and then
+/// `max_connections` simultaneous accepts each hold one while waiting for another —
+/// all of them fail with `PoolTimedOut` -> 500 and starve every other DB-backed
+/// route for the acquire timeout.
+///
+/// Pinned against a deliberately tiny pool (2 connections, 4 concurrent accepts of
+/// distinct invites) because the 2-request race tests cannot exceed any real pool.
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_accepts_do_not_exhaust_a_small_pool(
+    pool_opts: PgPoolOptions,
+    connect_opts: PgConnectOptions,
+) {
+    let seed_pool = pool_opts
+        .connect_with(connect_opts.clone())
+        .await
+        .expect("seed pool");
+    let seed_app = app(seed_pool.clone());
+
+    let host = seed_user(
+        &seed_pool,
+        &seed_app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeee00",
+        "poolhost",
+    )
+    .await;
+    let world_id = open_world_in_world(&seed_app, &host).await;
+
+    let mut guests = Vec::new();
+    let mut invite_ids = Vec::new();
+    for n in 1..=4 {
+        let guest = seed_user(
+            &seed_pool,
+            &seed_app,
+            &format!("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee0{n}"),
+            &format!("poolguest{n}"),
+        )
+        .await;
+        befriend(&seed_app, &host, &guest).await;
+        let invite = body_json(
+            authed(
+                &seed_app,
+                &host,
+                "POST",
+                &format!("/world-sessions/{world_id}/invites"),
+                Some(json!({ "inviteeUserId": guest.id })),
+            )
+            .await,
+        )
+        .await;
+        invite_ids.push(invite["id"].as_str().expect("invite id").to_string());
+        guests.push(guest);
+    }
+
+    let tight_app = app(tight_pool(connect_opts).await);
+    let uris: Vec<String> = invite_ids
+        .iter()
+        .map(|id| format!("/invites/{id}/accept"))
+        .collect();
+    let accept = |index: usize| authed(&tight_app, &guests[index], "POST", &uris[index], None);
+    let (a, b, c, d) = tokio::join!(accept(0), accept(1), accept(2), accept(3));
+
+    assert_all_ok([a, b, c, d]);
+    assert_eq!(count_rows(&seed_pool, "join_tickets").await, 4);
+}
+
+/// [`concurrent_accepts_do_not_exhaust_a_small_pool`] for the join-request path, which
+/// carries the identical transaction shape (and one more in-tx read,
+/// `is_friend_of_active_member`).
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_join_request_accepts_do_not_exhaust_a_small_pool(
+    pool_opts: PgPoolOptions,
+    connect_opts: PgConnectOptions,
+) {
+    let seed_pool = pool_opts
+        .connect_with(connect_opts.clone())
+        .await
+        .expect("seed pool");
+    let seed_app = app(seed_pool.clone());
+
+    let host = seed_user(
+        &seed_pool,
+        &seed_app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeee10",
+        "jrpoolhost",
+    )
+    .await;
+    let world_id = open_world_in_world(&seed_app, &host).await;
+
+    let mut request_ids = Vec::new();
+    for n in 1..=4 {
+        let guest = seed_user(
+            &seed_pool,
+            &seed_app,
+            &format!("eeeeeeee-eeee-eeee-eeee-eeeeeeeeee1{n}"),
+            &format!("jrpoolguest{n}"),
+        )
+        .await;
+        befriend(&seed_app, &host, &guest).await;
+        let request = body_json(
+            authed(
+                &seed_app,
+                &guest,
+                "POST",
+                &format!("/world-sessions/{world_id}/join-requests"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        request_ids.push(request["id"].as_str().expect("request id").to_string());
+    }
+
+    let tight_app = app(tight_pool(connect_opts).await);
+    let uris: Vec<String> = request_ids
+        .iter()
+        .map(|id| format!("/join-requests/{id}/accept"))
+        .collect();
+    let accept = |index: usize| authed(&tight_app, &host, "POST", &uris[index], None);
+    let (a, b, c, d) = tokio::join!(accept(0), accept(1), accept(2), accept(3));
+
+    assert_all_ok([a, b, c, d]);
+    assert_eq!(count_rows(&seed_pool, "join_tickets").await, 4);
+}
+
+/// A pool smaller than the concurrency the test drives — the whole point. The short
+/// acquire timeout keeps a regression a fast 500 rather than a multi-minute hang.
+async fn tight_pool(connect_opts: PgConnectOptions) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(3))
+        .connect_with(connect_opts)
+        .await
+        .expect("tight pool")
+}
+
+fn assert_all_ok(responses: [axum::response::Response; 4]) {
+    for (index, resp) in responses.into_iter().enumerate() {
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "accept {index} must complete without needing a second pooled connection"
+        );
+    }
+}
+
+/// BE-02: the host double-clicking Accept on a join request must not mint two
+/// tickets, two relay rows and two guest prompts.
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_join_request_accepts_issue_one_ticket(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff3",
+        "racejrhost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff4",
+        "racejrguest",
+    )
+    .await;
+    befriend(&app, &host, &guest).await;
+    let world_id = open_world_in_world(&app, &host).await;
+
+    let request = body_json(
+        authed(
+            &app,
+            &guest,
+            "POST",
+            &format!("/world-sessions/{world_id}/join-requests"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    let request_id = request["id"].as_str().unwrap().to_string();
+
+    let statuses =
+        race_two_posts(&app, &host, &format!("/join-requests/{request_id}/accept")).await;
+    assert_eq!(
+        statuses,
+        vec![StatusCode::OK, StatusCode::CONFLICT],
+        "exactly one accept wins, the other is a clean 409"
+    );
+
+    assert_eq!(count_rows(&pool, "join_tickets").await, 1);
+    assert_eq!(count_rows(&pool, "relay_sessions").await, 1);
+}
+
+/// BE-02: approving a friend-of-friend invite twice at once must release it — and
+/// push `WorldInvite` to the invitee — exactly once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn concurrent_invite_approves_emit_one_event(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff5",
+        "racefofhost",
+    )
+    .await;
+    let member = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff6",
+        "racefofmember",
+    )
+    .await;
+    let invitee = seed_user(
+        &pool,
+        &app,
+        "ffffffff-ffff-ffff-ffff-fffffffffff7",
+        "racefofinvitee",
+    )
+    .await;
+    befriend(&app, &host, &member).await;
+    befriend(&app, &member, &invitee).await;
+
+    let world_id = open_world_in_world(&app, &host).await;
+    authed(
+        &app,
+        &host,
+        "PATCH",
+        &format!("/world-sessions/{world_id}"),
+        Some(json!({ "invitePolicy": "friends_of_friends" })),
+    )
+    .await;
+
+    let invite = body_json(
+        authed(
+            &app,
+            &member,
+            "POST",
+            &format!("/world-sessions/{world_id}/invites"),
+            Some(json!({ "inviteeUserId": invitee.id })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        invite["status"], "pending_approval",
+        "a friend-of-friend invite waits for the host"
+    );
+    let invite_id = invite["id"].as_str().unwrap().to_string();
+
+    let statuses = race_two_posts(&app, &host, &format!("/invites/{invite_id}/approve")).await;
+    assert_eq!(
+        statuses,
+        vec![StatusCode::OK, StatusCode::CONFLICT],
+        "the second approval must 409 instead of re-pushing the invite"
+    );
+}
+
+/// Every field of the `UserDto` shape a participant object must carry. The invite and
+/// join-request lists were rebuilt on JOINs (BEQ-13 / COND-15); the old per-row
+/// `SELECT * FROM users` assembly meant a dropped column would not have failed any
+/// existing test, so assert each field explicitly.
+fn assert_user_dto(actual: &Value, expected_id: &str, expected_username: &str, label: &str) {
+    assert_eq!(actual["id"], expected_id, "{label}.id");
+    assert_eq!(actual["username"], expected_username, "{label}.username");
+    assert!(
+        actual.get("minecraftUuid").is_some(),
+        "{label}.minecraftUuid must be present (null is fine)"
+    );
+    assert_eq!(
+        actual.as_object().unwrap().len(),
+        3,
+        "{label} carries exactly the three UserDto fields"
+    );
+}
+
+/// BEQ-13 / COND-15: the invite lists are one JOIN now instead of 1 + 3N user reads.
+/// Contract lock over a 2-row list: every participant object still carries all five
+/// UserDto fields on all three sides.
+#[sqlx::test(migrations = "../../migrations")]
+async fn invite_lists_carry_full_participants_for_every_row(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee1",
+        "dtohost",
+    )
+    .await;
+    let a = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee2",
+        "dtoguesta",
+    )
+    .await;
+    let b = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee3",
+        "dtoguestb",
+    )
+    .await;
+    befriend(&app, &host, &a).await;
+    befriend(&app, &host, &b).await;
+    let world_id = open_world_in_world(&app, &host).await;
+
+    for guest in [&a, &b] {
+        let resp = authed(
+            &app,
+            &host,
+            "POST",
+            &format!("/world-sessions/{world_id}/invites"),
+            Some(json!({ "inviteeUserId": guest.id })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Outgoing (the host's own two invites) is the 2-row list.
+    let outgoing = body_json(authed(&app, &host, "GET", "/invites/outgoing", None).await).await;
+    let rows = outgoing.as_array().expect("array");
+    assert_eq!(rows.len(), 2, "both invites listed");
+    for row in rows {
+        assert_user_dto(&row["inviter"], &host.id, "dtohost", "inviter");
+        assert_user_dto(&row["host"], &host.id, "dtohost", "host");
+        let invitee_id = row["invitee"]["id"].as_str().unwrap();
+        let expected = if invitee_id == a.id {
+            "dtoguesta"
+        } else {
+            "dtoguestb"
+        };
+        assert_user_dto(&row["invitee"], invitee_id, expected, "invitee");
+        assert_eq!(row["requiresHostApproval"], false);
+    }
+
+    // The single-row incoming view for one guest keeps the same shape.
+    let incoming = body_json(authed(&app, &a, "GET", "/invites/incoming", None).await).await;
+    let rows = incoming.as_array().expect("array");
+    assert_eq!(rows.len(), 1);
+    assert_user_dto(&rows[0]["invitee"], &a.id, "dtoguesta", "incoming.invitee");
+    assert_user_dto(&rows[0]["host"], &host.id, "dtohost", "incoming.host");
+}
+
+/// BEQ-13 / COND-15: same contract lock for the join-request list, where `incoming`
+/// previously re-fetched the identical host row once per element.
+#[sqlx::test(migrations = "../../migrations")]
+async fn join_request_list_carries_full_participants(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee4",
+        "jrdtohost",
+    )
+    .await;
+    let a = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee5",
+        "jrdtoa",
+    )
+    .await;
+    let b = seed_user(
+        &pool,
+        &app,
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee6",
+        "jrdtob",
+    )
+    .await;
+    befriend(&app, &host, &a).await;
+    befriend(&app, &host, &b).await;
+    let world_id = open_world_in_world(&app, &host).await;
+
+    for guest in [&a, &b] {
+        let resp = authed(
+            &app,
+            guest,
+            "POST",
+            &format!("/world-sessions/{world_id}/join-requests"),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let incoming =
+        body_json(authed(&app, &host, "GET", "/join-requests/incoming", None).await).await;
+    let rows = incoming.as_array().expect("array");
+    assert_eq!(rows.len(), 2, "both requests listed");
+    for row in rows {
+        assert_user_dto(&row["host"], &host.id, "jrdtohost", "host");
+        let requester_id = row["requester"]["id"].as_str().unwrap();
+        let expected = if requester_id == a.id {
+            "jrdtoa"
+        } else {
+            "jrdtob"
+        };
+        assert_user_dto(&row["requester"], requester_id, expected, "requester");
+        assert_eq!(row["status"], "pending");
+    }
+}
+
+/// BE-07: `join_requests` had no pending-uniqueness, so a friend could loop this
+/// endpoint, inserting a row and firing a signaling push at the host every time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn duplicate_pending_join_request_is_409(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd1",
+        "duphost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd2",
+        "dupguest",
+    )
+    .await;
+    befriend(&app, &host, &guest).await;
+    let world_id = open_world_in_world(&app, &host).await;
+    let uri = format!("/world-sessions/{world_id}/join-requests");
+
+    let first = authed(&app, &guest, "POST", &uri, None).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = authed(&app, &guest, "POST", &uri, None).await;
+    assert_eq!(
+        second.status(),
+        StatusCode::CONFLICT,
+        "a second pending request for the same world must be refused"
+    );
+
+    assert_eq!(
+        count_rows(&pool, "join_requests").await,
+        1,
+        "no extra row, so no extra host prompt"
+    );
+}
+
+/// The pending slot must stay reclaimable: once the first request lapses a new one is
+/// allowed, or the partial unique index would block the pair forever behind a row no
+/// list ever shows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn expired_pending_join_request_allows_a_new_one(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd3",
+        "exphost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "dddddddd-dddd-dddd-dddd-ddddddddddd4",
+        "expguest",
+    )
+    .await;
+    befriend(&app, &host, &guest).await;
+    let world_id = open_world_in_world(&app, &host).await;
+    let uri = format!("/world-sessions/{world_id}/join-requests");
+
+    assert_eq!(
+        authed(&app, &guest, "POST", &uri, None).await.status(),
+        StatusCode::OK
+    );
+    // Backdate the pending row past its TTL, as the clock would.
+    sqlx::query("UPDATE join_requests SET expires_at = now() - interval '1 minute'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        authed(&app, &guest, "POST", &uri, None).await.status(),
+        StatusCode::OK,
+        "the lapsed request is expired first, freeing the unique slot"
+    );
+
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM join_requests ORDER BY created_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(statuses, vec!["expired".to_string(), "pending".to_string()]);
+}
+
+/// BE-07: nothing used to reclaim lapsed join/invite rows, spent tickets or
+/// `user_events` — they grew for the life of the deployment. One cleanup pass must
+/// expire the lapsed rows and delete history past the retention window.
+#[sqlx::test(migrations = "../../migrations")]
+async fn cleanup_expires_lapsed_rows_and_deletes_aged_history(pool: PgPool) {
+    let app = app(pool.clone());
+    let host = seed_user(
+        &pool,
+        &app,
+        "cccccccc-cccc-cccc-cccc-ccccccccccc1",
+        "cleanhost",
+    )
+    .await;
+    let guest = seed_user(
+        &pool,
+        &app,
+        "cccccccc-cccc-cccc-cccc-ccccccccccc2",
+        "cleanguest",
+    )
+    .await;
+    befriend(&app, &host, &guest).await;
+    let world_id = open_world_in_world(&app, &host).await;
+
+    // A pending join request and a pending invite, both then lapsed.
+    authed(
+        &app,
+        &guest,
+        "POST",
+        &format!("/world-sessions/{world_id}/join-requests"),
+        None,
+    )
+    .await;
+    authed(
+        &app,
+        &host,
+        "POST",
+        &format!("/world-sessions/{world_id}/invites"),
+        Some(json!({ "inviteeUserId": guest.id })),
+    )
+    .await;
+    sqlx::query("UPDATE join_requests SET expires_at = now() - interval '1 hour'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE world_invites SET expires_at = now() - interval '1 hour'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Aged terminal history, a consumed ticket, and an aged analytics event — all past
+    // the retention window.
+    sqlx::query(
+        "INSERT INTO join_requests \
+             (requester_user_id, host_user_id, world_session_id, status, expires_at, updated_at) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'declined', now(), now() - interval '40 days')",
+    )
+    .bind(&guest.id)
+    .bind(&host.id)
+    .bind(&world_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO join_tickets \
+             (user_id, world_session_id, token_hash, expires_at, consumed_at, created_at) \
+         VALUES ($1::uuid, $2::uuid, 'aged-hash', now(), now(), now() - interval '40 days')",
+    )
+    .bind(&guest.id)
+    .bind(&world_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO user_events (user_id, event_type, created_at) \
+         VALUES ($1::uuid, 'aged', now() - interval '40 days')",
+    )
+    .bind(&guest.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let events_before = count_rows(&pool, "user_events").await;
+
+    let counts = loontail_network::cleanup::cleanup_stale_join_state(&pool, 30)
+        .await
+        .expect("cleanup");
+
+    assert_eq!(counts.expired_join_requests, 1, "lapsed request expired");
+    assert_eq!(counts.expired_invites, 1, "lapsed invite expired");
+    assert_eq!(
+        counts.deleted_join_tickets, 1,
+        "spent aged ticket reclaimed"
+    );
+    assert_eq!(
+        counts.deleted_terminal_join_requests, 1,
+        "aged terminal request deleted"
+    );
+    assert_eq!(counts.deleted_user_events, 1, "aged event deleted");
+
+    // The rows this pass just expired are inside the window, so they survive it.
+    assert_eq!(count_rows(&pool, "join_requests").await, 1);
+    assert_eq!(count_rows(&pool, "world_invites").await, 1);
+    assert_eq!(count_rows(&pool, "join_tickets").await, 0);
+    assert_eq!(
+        count_rows(&pool, "user_events").await,
+        events_before - 1,
+        "only the aged event went"
+    );
+
+    // Idempotent: a second pass has nothing left to do.
+    let again = loontail_network::cleanup::cleanup_stale_join_state(&pool, 30)
+        .await
+        .expect("cleanup");
+    assert_eq!(again.total(), 0);
 }

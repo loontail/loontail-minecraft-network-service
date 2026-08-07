@@ -200,6 +200,7 @@
   }
 }
 
+/* biome-ignore-start lint/complexity/noImportantStyles: the reduced-motion backstop must win over every component-level animation/transition. */
 /* Reduced-motion backstop. */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -211,6 +212,7 @@
     scroll-behavior: auto !important;
   }
 }
+/* biome-ignore-end lint/complexity/noImportantStyles: end reduced-motion backstop. */
 
 /* Forced-colors / Windows High Contrast: restore a solid focus indicator. */
 @media (forced-colors: active) {

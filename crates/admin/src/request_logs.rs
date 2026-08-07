@@ -1,0 +1,282 @@
+//! Admin request observability: a live in-memory tail, paginated persisted rows,
+//! a rollup summary, and a bucketed timeseries off `request_logs`.
+//!
+//! The window/bucket allowlist is shared with [`crate::analytics::resolve_window`]
+//! so user text is never formatted into SQL; only the fixed literals are.
+
+use axum::extract::{Query, State};
+use axum::Json;
+use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
+
+use loontail_core::auth::AdminUser;
+use loontail_core::error::AppResult;
+use loontail_core::AppState;
+
+use crate::analytics::resolve_window;
+use crate::dto::{
+    PageMeta, RequestLogEntry, RequestLogPageResponse, RequestLogQuery, RequestLogTailQuery,
+    RequestLogTailResponse, RequestSummaryResponse, RequestTimeseriesPoint, RequestTimeseriesQuery,
+    RequestTimeseriesResponse, RequestWindowQuery, StatusClassCount, TopPath,
+};
+
+const PAGE_SIZE: i64 = 50;
+const TAIL_MAX: i64 = 500;
+const TAIL_DEFAULT: i64 = 100;
+
+/// `GET /admin/logs/tail?limit=` — newest-first snapshot of the in-memory ring.
+pub async fn tail(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Query(query): Query<RequestLogTailQuery>,
+) -> AppResult<Json<RequestLogTailResponse>> {
+    let limit = query.limit.unwrap_or(TAIL_DEFAULT).clamp(1, TAIL_MAX) as usize;
+
+    let entries = state
+        .request_log
+        .recent(limit)
+        .into_iter()
+        .map(|log| RequestLogEntry {
+            id: None,
+            ts: log.ts,
+            method: log.method,
+            path: log.path,
+            status: log.status,
+            latency_ms: log.latency_ms,
+            user_id: log.user_id,
+            auth_kind: log.auth_kind,
+            ip: log.ip,
+            user_agent: log.user_agent,
+            bytes_out: log.bytes_out,
+        })
+        .collect();
+
+    Ok(Json(RequestLogTailResponse { entries }))
+}
+
+/// The optional-filter predicate shared by the count and the page query, so the two
+/// can never drift apart. Binds, in order: `since`, `until`, `method`, `path LIKE`,
+/// `status`. A macro rather than a `const` so `concat!` can splice it into static
+/// SQL — sqlx only accepts `&'static str` without an `AssertSqlSafe` escape hatch.
+macro_rules! request_filter {
+    () => {
+        "WHERE ($1::timestamptz IS NULL OR ts >= $1) \
+           AND ($2::timestamptz IS NULL OR ts <= $2) \
+           AND ($3::text IS NULL OR method = $3) \
+           AND ($4::text IS NULL OR path LIKE $4) \
+           AND ($5::int2 IS NULL OR status = $5) "
+    };
+}
+
+const REQUEST_COUNT_SQL: &str = concat!("SELECT count(*) FROM request_logs ", request_filter!());
+
+const REQUEST_PAGE_SQL: &str = concat!(
+    "SELECT id, ts, method, path, status, latency_ms, user_id, auth_kind, ip, user_agent, \
+     bytes_out FROM request_logs ",
+    request_filter!(),
+    "ORDER BY ts DESC, id DESC LIMIT $6 OFFSET $7"
+);
+
+/// `GET /admin/analytics/requests` — paginated rows with optional bound filters;
+/// `path` is a prefix `LIKE`.
+pub async fn list(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Query(query): Query<RequestLogQuery>,
+) -> AppResult<Json<RequestLogPageResponse>> {
+    let page = query.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * PAGE_SIZE;
+
+    // why: each optional filter is applied as `($n IS NULL OR <col> ...)`, so
+    // absent filters are no-ops and nothing is ever string-interpolated.
+    let path_like = query.path.as_ref().map(|p| format!("{p}%"));
+
+    let total: i64 = sqlx::query_scalar(REQUEST_COUNT_SQL)
+        .bind(query.since)
+        .bind(query.until)
+        .bind(&query.method)
+        .bind(&path_like)
+        .bind(query.status)
+        .fetch_one(&state.pool)
+        .await?;
+
+    let data = sqlx::query_as::<_, RequestLogEntry>(REQUEST_PAGE_SQL)
+        .bind(query.since)
+        .bind(query.until)
+        .bind(&query.method)
+        .bind(&path_like)
+        .bind(query.status)
+        .bind(PAGE_SIZE)
+        .bind(offset)
+        .fetch_all(&state.pool)
+        .await?;
+
+    let page_count = ((total + PAGE_SIZE - 1) / PAGE_SIZE).max(1);
+
+    Ok(Json(RequestLogPageResponse {
+        data,
+        meta: PageMeta {
+            page,
+            page_size: PAGE_SIZE,
+            total,
+            page_count,
+        },
+    }))
+}
+
+/// `GET /admin/analytics/requests/summary?window=` — error rate is the share of
+/// status >= 500.
+pub async fn summary(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Query(query): Query<RequestWindowQuery>,
+) -> AppResult<Json<RequestSummaryResponse>> {
+    let (interval_literal, _bucket_unit, window_label) =
+        resolve_window(query.window.as_deref().unwrap_or_default());
+
+    // The interval literal comes from the fixed allowlist above, never user text.
+    let totals_sql = format!(
+        r#"
+        SELECT
+            count(*) AS total,
+            count(*) FILTER (WHERE status >= 500) AS errors,
+            coalesce(avg(latency_ms), 0)::float8 AS avg_latency
+        FROM request_logs
+        WHERE ts > now() - interval '{interval_literal}'
+        "#
+    );
+    let (total, errors, avg_latency): (i64, i64, f64) = sqlx::query_as(AssertSqlSafe(totals_sql))
+        .fetch_one(&state.pool)
+        .await?;
+
+    let error_rate = if total > 0 {
+        errors as f64 / total as f64
+    } else {
+        0.0
+    };
+
+    let status_mix_sql = format!(
+        r#"
+        SELECT
+            CASE
+                WHEN status >= 500 THEN '5xx'
+                WHEN status >= 400 THEN '4xx'
+                WHEN status >= 300 THEN '3xx'
+                ELSE '2xx'
+            END AS status_class,
+            count(*) AS count
+        FROM request_logs
+        WHERE ts > now() - interval '{interval_literal}'
+        GROUP BY status_class
+        ORDER BY status_class
+        "#
+    );
+    let status_mix = sqlx::query_as::<_, (String, i64)>(AssertSqlSafe(status_mix_sql))
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .map(|(status_class, count)| StatusClassCount {
+            status_class,
+            count,
+        })
+        .collect();
+
+    let top_paths_sql = format!(
+        r#"
+        SELECT path, count(*) AS count, coalesce(avg(latency_ms), 0)::float8 AS avg_latency
+        FROM request_logs
+        WHERE ts > now() - interval '{interval_literal}'
+        GROUP BY path
+        ORDER BY count DESC, path ASC
+        LIMIT 10
+        "#
+    );
+    let top_paths = sqlx::query_as::<_, (String, i64, f64)>(AssertSqlSafe(top_paths_sql))
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .map(|(path, count, avg_latency_ms)| TopPath {
+            path,
+            count,
+            avg_latency_ms,
+        })
+        .collect();
+
+    Ok(Json(RequestSummaryResponse {
+        window: window_label,
+        total_requests: total,
+        error_rate,
+        avg_latency_ms: avg_latency,
+        status_mix,
+        top_paths,
+    }))
+}
+
+/// `requests` counts rows, `errors` counts status >= 500, `latency` averages it.
+fn resolve_metric(metric: &str) -> &'static str {
+    match metric {
+        "errors" => "errors",
+        "latency" => "latency",
+        _ => "requests",
+    }
+}
+
+/// `GET /admin/analytics/requests/timeseries?window=&metric=` — bucketed series;
+/// the metric resolves to a fixed aggregate expression, never user text.
+pub async fn timeseries(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Query(query): Query<RequestTimeseriesQuery>,
+) -> AppResult<Json<RequestTimeseriesResponse>> {
+    let (interval_literal, bucket_unit, window_label) =
+        resolve_window(query.window.as_deref().unwrap_or_default());
+    let metric = resolve_metric(query.metric.as_deref().unwrap_or_default());
+
+    let value_expr = match metric {
+        "errors" => "count(*) FILTER (WHERE status >= 500)::float8",
+        "latency" => "coalesce(avg(latency_ms), 0)::float8",
+        // requests
+        _ => "count(*)::float8",
+    };
+
+    // `bucket_unit`, `interval_literal`, and `value_expr` all come from fixed
+    // allowlists above — no user input reaches the SQL string.
+    let sql = format!(
+        r#"
+        SELECT date_trunc('{bucket_unit}', ts) AS bucket, {value_expr} AS value
+        FROM request_logs
+        WHERE ts > now() - interval '{interval_literal}'
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        "#
+    );
+
+    let rows = sqlx::query_as::<_, (DateTime<Utc>, f64)>(AssertSqlSafe(sql))
+        .fetch_all(&state.pool)
+        .await?;
+
+    let series = rows
+        .into_iter()
+        .map(|(bucket, value)| RequestTimeseriesPoint { bucket, value })
+        .collect();
+
+    Ok(Json(RequestTimeseriesResponse {
+        window: window_label,
+        metric: metric.to_string(),
+        series,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_metric;
+
+    #[test]
+    fn metric_allowlist_defaults_to_requests() {
+        assert_eq!(resolve_metric("requests"), "requests");
+        assert_eq!(resolve_metric("errors"), "errors");
+        assert_eq!(resolve_metric("latency"), "latency");
+        assert_eq!(resolve_metric("garbage"), "requests");
+        assert_eq!(resolve_metric(""), "requests");
+    }
+}

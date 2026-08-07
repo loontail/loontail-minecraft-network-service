@@ -1,15 +1,17 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BuildFilesTab } from "@/features/builds/BuildFilesTab";
 import * as downloadModule from "@/features/builds/download";
 import type {
+  BuildAdmin,
   BundleArtifact,
   BundleWithArtifacts,
-  ClientAdmin,
 } from "@/shared/types";
-import { renderWithProviders } from "@/test/renderWithProviders";
+import {
+  renderWithProviders,
+  setupUser,
+} from "@/test/renderWithProviders";
 
 function artifact(
   relativePath: string,
@@ -53,10 +55,10 @@ const BUILD: BundleWithArtifacts = {
   ],
 };
 
-/// A ClientAdmin with a verified owned bundle (drives `useBuild(bundle.slug)`).
-function clientAdmin(overrides: Partial<ClientAdmin> = {}): ClientAdmin {
+// A BuildAdmin with a verified owned bundle (drives `useBuildFiles(bundle.slug)`).
+function buildAdmin(overrides: Partial<BuildAdmin> = {}): BuildAdmin {
   return {
-    id: "client-1",
+    id: "build-1",
     slug: "atm9-overlay",
     title: "ATM9 Overlay",
     description: "",
@@ -94,15 +96,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 const fetchCalls: { url: string; init?: RequestInit }[] = [];
 
-/// The build returned by the GET endpoint, mutable so a test can simulate the folder
-/// disappearing after a delete (the query refetches on invalidation).
+// The build returned by the GET endpoint, mutable so a test can simulate the folder
+// disappearing after a delete (the query refetches on invalidation).
 let currentBuild: BundleWithArtifacts = BUILD;
 let getStatus = 200;
+let getErrorMessage = "bundle missing";
 
 function mockApi(build: BundleWithArtifacts = BUILD) {
   fetchCalls.length = 0;
   currentBuild = build;
   getStatus = 200;
+  getErrorMessage = "bundle missing";
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -129,7 +133,7 @@ function mockApi(build: BundleWithArtifacts = BUILD) {
         if (getStatus !== 200) {
           return Promise.resolve(
             jsonResponse(
-              { error: { code: "not_found", message: "404 not found" } },
+              { error: { code: "not_found", message: getErrorMessage } },
               getStatus,
             ),
           );
@@ -141,13 +145,13 @@ function mockApi(build: BundleWithArtifacts = BUILD) {
   );
 }
 
-/// The file collection renders as a native ARIA table (shadcn Table, list view is
-/// the default).
+// The file collection renders as a native ARIA table (shadcn Table, list view is
+// the default).
 function table(): HTMLElement {
   return screen.getByRole("table", { name: /build files/i });
 }
 
-/// Await the table once the build query resolves out of the loading skeleton.
+// Await the table once the build query resolves out of the loading skeleton.
 function findTable(): Promise<HTMLElement> {
   return screen.findByRole("table", { name: /build files/i });
 }
@@ -163,7 +167,7 @@ describe("BuildFilesTab", () => {
   });
 
   it("shows the heal CTA when the build has no bundle", () => {
-    renderWithProviders(<BuildFilesTab build={clientAdmin({ bundle: null })} />);
+    renderWithProviders(<BuildFilesTab build={buildAdmin({ bundle: null })} />);
     expect(
       screen.getByRole("button", { name: /set up file storage/i }),
     ).toBeInTheDocument();
@@ -171,16 +175,30 @@ describe("BuildFilesTab", () => {
 
   it("shows a retryable error when the bundle no longer exists (404)", async () => {
     getStatus = 404;
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
     expect(
       await screen.findByText(/bundle that no longer exists/i),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
+  // The status, not the wording, decides which copy renders: a server fault whose
+  // message happens to say "not found" must not claim the bundle is gone.
+  it("keeps the generic copy for a 500 whose message contains “not found”", async () => {
+    getStatus = 500;
+    getErrorMessage = "artifact not found during manifest regen";
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
+    expect(
+      await screen.findByText(/could not be loaded/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/bundle that no longer exists/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the file table with folders and the New menu", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     const rows = within(await findTable())
       .getAllByRole("row")
@@ -188,7 +206,6 @@ describe("BuildFilesTab", () => {
     expect(rows.some((t) => t?.includes("mods"))).toBe(true);
     expect(rows.some((t) => t?.includes("config"))).toBe(true);
 
-    // The "New" menu fans out into folder/file/zip actions.
     await user.click(screen.getByRole("button", { name: /^new$/i }));
     expect(
       await screen.findByRole("menuitem", { name: /new folder/i }),
@@ -202,16 +219,15 @@ describe("BuildFilesTab", () => {
   });
 
   it("renders the footer status row", async () => {
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
     await waitFor(() => expect(screen.getByText("Ready")).toBeInTheDocument());
     expect(screen.getByText(/generated/i)).toBeInTheDocument();
     expect(screen.getByText("4.0 KB")).toBeInTheDocument();
   });
 
   it("toggles between list and grid views", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
-    // Default is the list view → a table is present.
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
     await findTable();
 
     await user.click(screen.getByRole("button", { name: /grid view/i }));
@@ -226,30 +242,28 @@ describe("BuildFilesTab", () => {
       screen.getByRole("button", { name: /actions for mods/i }),
     ).toBeInTheDocument();
 
-    // Back to list → table returns.
     await user.click(screen.getByRole("button", { name: /list view/i }));
     expect(table()).toBeInTheDocument();
   });
 
   it("navigates into a folder on a single click of its name", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     // Single click on the folder NAME button navigates in (no double-click).
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
 
-    // After navigating, the table shows the folder's file and a Root breadcrumb.
     expect(within(table()).getByText("a.jar")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^root$/i })).toBeInTheDocument();
   });
 
   it("selects a file on a single click of its name (no download)", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     const downloadSpy = vi
       .spyOn(downloadModule, "downloadFile")
       .mockImplementation(() => undefined);
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
@@ -262,24 +276,24 @@ describe("BuildFilesTab", () => {
   });
 
   it("selects an entry via its row checkbox", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
 
     await user.click(
-      within(table()).getByRole("button", { name: /select a\.jar/i }),
+      within(table()).getByRole("checkbox", { name: /select a\.jar/i }),
     );
     expect(await screen.findByText(/1 selected/i)).toBeInTheDocument();
   });
 
   it("downloads a file from the context menu", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     const downloadSpy = vi
       .spyOn(downloadModule, "downloadFile")
       .mockImplementation(() => undefined);
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
@@ -294,16 +308,45 @@ describe("BuildFilesTab", () => {
     expect(downloadSpy).toHaveBeenCalledWith("atm9-overlay", "mods/a.jar");
   });
 
+  it("staggers a multi-file download instead of firing every anchor at once", async () => {
+    // A flat build so several files live in the same folder and can be selected together.
+    const flat: BundleWithArtifacts = {
+      ...BUILD,
+      artifacts: [
+        artifact("a.jar", false),
+        artifact("b.jar", false),
+        artifact("c.jar", false),
+      ],
+    };
+    mockApi(flat);
+    const user = setupUser();
+    const downloadSpy = vi
+      .spyOn(downloadModule, "downloadFile")
+      .mockImplementation(() => undefined);
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
+
+    await findTable();
+    await user.click(within(table()).getByRole("checkbox", { name: /select all/i }));
+    expect(await screen.findByText(/3 selected/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^download$/i }));
+
+    // Browsers throttle a burst of synthetic clicks, so only the first fires now.
+    expect(downloadSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(downloadSpy).toHaveBeenCalledTimes(3), {
+      timeout: 3000,
+    });
+  });
+
   it("bulk-deletes the entries selected in the table", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
 
-    // Select the file via its checkbox.
     await user.click(
-      within(table()).getByRole("button", { name: /select a\.jar/i }),
+      within(table()).getByRole("checkbox", { name: /select a\.jar/i }),
     );
     expect(await screen.findByText(/1 selected/i)).toBeInTheDocument();
 
@@ -323,18 +366,17 @@ describe("BuildFilesTab", () => {
   });
 
   it("moves a selected entry via the Move dialog", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
 
     await user.click(
-      within(table()).getByRole("button", { name: /select a\.jar/i }),
+      within(table()).getByRole("checkbox", { name: /select a\.jar/i }),
     );
     await user.click(await screen.findByRole("button", { name: /^move$/i }));
     const dialog = await screen.findByRole("dialog");
-    // Pick "config" as the destination, then confirm.
     await user.click(within(dialog).getByRole("button", { name: /^config$/i }));
     await user.click(within(dialog).getByRole("button", { name: /move here/i }));
 
@@ -344,21 +386,21 @@ describe("BuildFilesTab", () => {
   });
 
   it("selects all artifact-backed children via the header checkbox", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^mods$/i }));
 
     // Header "Select all" picks only artifact-backed children — there is one file
     // in "mods", so the counter reads "1 selected" (never lies).
-    await user.click(within(table()).getByRole("button", { name: /select all/i }));
+    await user.click(within(table()).getByRole("checkbox", { name: /select all/i }));
     expect(await screen.findByText(/1 selected/i)).toBeInTheDocument();
   });
 
   it("uploads OS files dropped via the hidden upload input", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
     await findTable();
 
     await user.click(screen.getByRole("button", { name: /^new$/i }));
@@ -385,8 +427,8 @@ describe("BuildFilesTab", () => {
   });
 
   it("keyboard: Enter on a folder name navigates in", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     const modsName = screen.getByRole("button", { name: /^mods$/i });
@@ -398,8 +440,8 @@ describe("BuildFilesTab", () => {
   });
 
   it("clamps the current folder back to root when it disappears", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<BuildFilesTab build={clientAdmin()} />);
+    const user = setupUser();
+    renderWithProviders(<BuildFilesTab build={buildAdmin()} />);
 
     await findTable();
     await user.click(screen.getByRole("button", { name: /^config$/i }));

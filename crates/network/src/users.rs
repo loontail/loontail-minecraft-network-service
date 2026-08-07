@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use loontail_core::auth::AuthUser;
 use loontail_core::error::{AppError, AppResult};
-use loontail_core::models::{escape_like_pattern, normalize_username, User, UserDto, UserStatus};
+use loontail_core::models::{
+    escape_like_pattern, normalize_username, PresenceStatus, User, UserDto,
+};
 use loontail_core::AppState;
 use loontail_core::Metrics;
 
@@ -110,15 +112,18 @@ fn map_bootstrap_conflict(err: sqlx::Error) -> AppError {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MeResponse {
+pub struct NetworkMeResponse {
     pub user: UserDto,
-    pub status: UserStatus,
+    pub status: PresenceStatus,
 }
 
 /// `GET /me` — the authenticated user plus their effective status.
-pub async fn me(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<MeResponse>> {
+pub async fn me(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<NetworkMeResponse>> {
     let status = presence::effective_status_for(&state, auth.id()).await?;
-    Ok(Json(MeResponse {
+    Ok(Json(NetworkMeResponse {
         user: UserDto::from(&auth.user),
         status,
     }))
@@ -144,8 +149,6 @@ struct SearchRow {
     id: uuid::Uuid,
     minecraft_uuid: Option<String>,
     username: String,
-    avatar_url: Option<String>,
-    skin_hash: Option<String>,
     is_friend: bool,
     has_incoming_request: bool,
     has_outgoing_request: bool,
@@ -176,8 +179,6 @@ pub async fn search(
             u.id,
             u.minecraft_uuid,
             u.username,
-            u.avatar_url,
-            u.skin_hash,
             EXISTS (
                 SELECT 1 FROM friendships f
                 WHERE (f.user_a_id = LEAST($1, u.id) AND f.user_b_id = GREATEST($1, u.id))
@@ -210,8 +211,6 @@ pub async fn search(
                 id: row.id,
                 minecraft_uuid: row.minecraft_uuid,
                 username: row.username,
-                avatar_url: row.avatar_url,
-                skin_hash: row.skin_hash,
             },
             is_friend: row.is_friend,
             has_incoming_request: row.has_incoming_request,

@@ -19,7 +19,11 @@ const STORAGE_PUBLIC_PREFIX: &str = "/bundle-registry";
 
 /// Build an `AppState` whose bundle storage root points at a fresh tempdir.
 fn test_state(pool: PgPool, storage_root: &Path) -> AppState {
-    std::env::set_var("DATABASE_URL", "postgres://unused");
+    // why: only a placeholder when the var is absent — clobbering a real DATABASE_URL
+    // trips sqlx::test's "DATABASE_URL changed at runtime" assertion mid-run.
+    if std::env::var_os("DATABASE_URL").is_none() {
+        std::env::set_var("DATABASE_URL", "postgres://unused");
+    }
     let mut config = Config::from_env().expect("config");
     config.bundles.storage_root = storage_root.to_string_lossy().into_owned();
     config.bundles.public_url = STORAGE_PUBLIC_PREFIX.to_string();
@@ -689,6 +693,79 @@ async fn slug_path_traversal_is_blocked(pool: PgPool) {
     );
 }
 
+/// CB-3 regression: the traversal guard is now structural — every admin route that
+/// takes `{slug}` resolves it through the `ResolvedBundle`/`ResolvedEntry` extractor,
+/// which runs `validate_slug` before any filesystem join. A percent-encoded traversal
+/// slug must be a 400 on EVERY such route, not just the ones that remembered the call.
+#[sqlx::test(migrations = "../../migrations")]
+async fn admin_slug_routes_reject_a_traversal_slug(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+
+    std::fs::create_dir_all(tmp.path().join("builds")).unwrap();
+    std::fs::write(tmp.path().join("secret.txt"), b"top-secret").unwrap();
+
+    let traversal = "..%2F..%2Fsecret";
+    let entry_id = uuid::Uuid::new_v4();
+    let routes: &[(&str, String)] = &[
+        ("GET", format!("/builds/{traversal}")),
+        ("PUT", format!("/builds/{traversal}")),
+        ("DELETE", format!("/builds/{traversal}")),
+        ("POST", format!("/builds/{traversal}/regenerate")),
+        ("POST", format!("/builds/{traversal}/validate")),
+        ("POST", format!("/builds/{traversal}/folders")),
+        ("POST", format!("/builds/{traversal}/files/bulk-delete")),
+        ("POST", format!("/builds/{traversal}/files/move")),
+        ("DELETE", format!("/builds/{traversal}/files/{entry_id}")),
+        ("PUT", format!("/builds/{traversal}/files/{entry_id}")),
+        (
+            "POST",
+            format!("/builds/{traversal}/files/{entry_id}/rename"),
+        ),
+        ("POST", format!("/builds/{traversal}/files/{entry_id}/move")),
+        (
+            "POST",
+            format!("/builds/{traversal}/files/{entry_id}/rehash"),
+        ),
+    ];
+
+    for (method, uri) in routes {
+        let app = loontail_bundles::admin_routes().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(*method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "relativePath": "x",
+                            "ids": [entry_id],
+                            "targetDir": "",
+                            "newRelativePath": "x",
+                            "downloadOnce": true,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{method} {uri} must reject a traversal slug"
+        );
+    }
+
+    assert!(
+        tmp.path().join("secret.txt").exists(),
+        "the file above the builds root must be untouched"
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn admin_routes_require_admin(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
@@ -989,4 +1066,516 @@ async fn rename_still_works_after_refactor(pool: PgPool) {
     assert!(plugins.iter().any(|e| e["path"] == "plugins/alpha.jar"));
     assert!(plugins.iter().any(|e| e["path"] == "plugins/sub/beta.jar"));
     assert!(json.get("mods").is_none(), "old category group is gone");
+}
+
+/// DELETE an admin route, returning the response status.
+async fn admin_delete(state: &AppState, token: &str, uri: &str) -> StatusCode {
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.status()
+}
+
+/// `true` when an artifact row exists at `relative_path` for this build.
+async fn artifact_row_exists(pool: &PgPool, slug: &str, relative_path: &str) -> bool {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+         WHERE b.slug = $1 AND a.relative_path = $2",
+    )
+    .bind(slug)
+    .bind(relative_path)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    count > 0
+}
+
+/// Regression (BE-01): `_` is a LIKE wildcard, so deleting `mod_config` must not
+/// take the sibling `mod-config` subtree with it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn folder_delete_does_not_touch_underscore_sibling(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "like-underscore";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[
+        ("mod_config/a.cfg", b"a"),
+        ("mod-config/b.cfg", b"b"),
+        ("mods/keep.jar", b"keep"),
+    ]);
+    assert_eq!(
+        upload_zip(&state, &token, slug, &zip).await,
+        StatusCode::OK,
+        "upload archive"
+    );
+
+    let id = artifact_id(&pool, slug, "mod_config").await;
+    assert_eq!(
+        admin_delete(&state, &token, &format!("/builds/{slug}/files/{id}")).await,
+        StatusCode::OK
+    );
+
+    assert!(!artifact_row_exists(&pool, slug, "mod_config/a.cfg").await);
+    assert!(
+        artifact_row_exists(&pool, slug, "mod-config/b.cfg").await,
+        "sibling folder differing only at the `_` position must survive"
+    );
+
+    let json = read_manifest(tmp.path(), slug);
+    let group = json["mod-config"].as_array().unwrap();
+    assert!(group.iter().any(|e| e["path"] == "mod-config/b.cfg"));
+    assert!(json.get("mod_config").is_none());
+}
+
+/// Regression (BE-01): a folder literally named `%` yields the pattern `%/%`, which
+/// unescaped matches every nested path in the bundle.
+#[sqlx::test(migrations = "../../migrations")]
+async fn folder_named_percent_deletes_only_itself(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "like-percent";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[("%/inside.txt", b"x"), ("mods/a.jar", b"a")]);
+    assert_eq!(
+        upload_zip(&state, &token, slug, &zip).await,
+        StatusCode::OK,
+        "upload archive"
+    );
+
+    let id = artifact_id(&pool, slug, "%").await;
+    assert_eq!(
+        admin_delete(&state, &token, &format!("/builds/{slug}/files/{id}")).await,
+        StatusCode::OK
+    );
+
+    assert!(!artifact_row_exists(&pool, slug, "%/inside.txt").await);
+    assert!(
+        artifact_row_exists(&pool, slug, "mods/a.jar").await,
+        "an unrelated subtree must survive deleting the `%` folder"
+    );
+}
+
+/// Regression (BE-01): the destination-free check also used an unescaped prefix, so
+/// moving into `mod_config` phantom-collided with the existing `mod-config`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn move_into_dir_differing_by_one_char_is_not_409(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "like-move";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[("mod-config/b.cfg", b"b"), ("stuff/c.cfg", b"c")]);
+    assert_eq!(
+        upload_zip(&state, &token, slug, &zip).await,
+        StatusCode::OK,
+        "upload archive"
+    );
+
+    let id = artifact_id(&pool, slug, "stuff").await;
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/{id}/rename"),
+        serde_json::json!({ "newRelativePath": "mod_config" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "destination is genuinely free");
+    assert!(artifact_row_exists(&pool, slug, "mod_config/c.cfg").await);
+    assert!(artifact_row_exists(&pool, slug, "mod-config/b.cfg").await);
+}
+
+/// Every artifact row for this build, path-ordered.
+async fn artifact_paths(pool: &PgPool, slug: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT a.relative_path FROM bundle_artifacts a JOIN bundles b ON b.id = a.bundle_id \
+         WHERE b.slug = $1 ORDER BY a.relative_path",
+    )
+    .bind(slug)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn bundle_row_count(pool: &PgPool, slug: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM bundles WHERE slug = $1")
+        .bind(slug)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// BEQ-14: `bulk_delete` used to `continue` past an id belonging to another build after
+/// already deleting the earlier ids — a silent partial delete. Every id is resolved up
+/// front now, so a FOREIGN id is a clean 404 and NOTHING is removed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn bulk_delete_with_a_foreign_id_is_404_and_removes_nothing(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+
+    create_build(&state, &token, "bulk-a").await;
+    let zip = build_zip(&[("mods/a.jar", b"a"), ("mods/b.jar", b"b")]);
+    assert_eq!(
+        upload_zip(&state, &token, "bulk-a", &zip).await,
+        StatusCode::OK
+    );
+
+    create_build(&state, &token, "bulk-b").await;
+    let other_zip = build_zip(&[("mods/c.jar", b"c")]);
+    assert_eq!(
+        upload_zip(&state, &token, "bulk-b", &other_zip).await,
+        StatusCode::OK
+    );
+
+    let mine = artifact_id(&pool, "bulk-a", "mods/a.jar").await;
+    let foreign = artifact_id(&pool, "bulk-b", "mods/c.jar").await;
+    let before = artifact_paths(&pool, "bulk-a").await;
+
+    // The valid id comes FIRST, so the old loop would have deleted it before hitting the
+    // foreign one.
+    let status = admin_post_json(
+        &state,
+        &token,
+        "/builds/bulk-a/files/bulk-delete",
+        serde_json::json!({ "ids": [mine, foreign] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign id aborts the batch"
+    );
+
+    assert_eq!(
+        artifact_paths(&pool, "bulk-a").await,
+        before,
+        "no row removed by the aborted batch"
+    );
+    let file = tmp
+        .path()
+        .join("builds")
+        .join("bulk-a")
+        .join("files")
+        .join("mods")
+        .join("a.jar");
+    assert!(file.exists(), "no file unlinked by the aborted batch");
+}
+
+/// A STALE id (already deleted by someone else) is not a foreign id: it must be skipped
+/// so the valid entries in the same batch still go. Two admins with the Files tab open on
+/// one build would otherwise lose every deletion to a single stale selection.
+#[sqlx::test(migrations = "../../migrations")]
+async fn bulk_delete_skips_an_already_deleted_id_and_removes_the_rest(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "bulk-stale";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[("mods/a.jar", b"a"), ("configs/x.cfg", b"x")]);
+    assert_eq!(upload_zip(&state, &token, slug, &zip).await, StatusCode::OK);
+
+    let stale = artifact_id(&pool, slug, "mods/a.jar").await;
+    let valid = artifact_id(&pool, slug, "configs/x.cfg").await;
+
+    // Admin A deletes it; admin B's list is now stale.
+    assert_eq!(
+        admin_delete(&state, &token, &format!("/builds/{slug}/files/{stale}")).await,
+        StatusCode::OK
+    );
+
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/bulk-delete"),
+        serde_json::json!({ "ids": [stale, valid] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a vanished id is already-deleted, not an error"
+    );
+    assert!(
+        !artifact_paths(&pool, slug)
+            .await
+            .contains(&"configs/x.cfg".to_string()),
+        "the valid entry in the batch was still removed"
+    );
+}
+
+/// A well-formed bulk delete still removes every named entry (and a folder's
+/// descendants) from both the DB and the disk.
+#[sqlx::test(migrations = "../../migrations")]
+async fn bulk_delete_removes_every_named_entry(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "bulk-ok";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[
+        ("mods/a.jar", b"a"),
+        ("configs/x.cfg", b"x"),
+        ("configs/y.cfg", b"y"),
+    ]);
+    assert_eq!(upload_zip(&state, &token, slug, &zip).await, StatusCode::OK);
+
+    let jar = artifact_id(&pool, slug, "mods/a.jar").await;
+    let configs = artifact_id(&pool, slug, "configs").await;
+    let status = admin_post_json(
+        &state,
+        &token,
+        &format!("/builds/{slug}/files/bulk-delete"),
+        serde_json::json!({ "ids": [jar, configs] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        artifact_paths(&pool, slug).await,
+        vec!["mods".to_string()],
+        "only the surviving parent folder row remains"
+    );
+    let files = tmp.path().join("builds").join(slug).join("files");
+    assert!(!files.join("mods").join("a.jar").exists());
+    assert!(!files.join("configs").exists(), "folder subtree unlinked");
+}
+
+/// BEQ-14: deleting a build drops the authoritative rows FIRST and the on-disk tree
+/// after, so no state can survive pointing at an erased tree.
+#[sqlx::test(migrations = "../../migrations")]
+async fn delete_build_removes_rows_and_dir(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "goodbye";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[("mods/a.jar", b"a")]);
+    assert_eq!(upload_zip(&state, &token, slug, &zip).await, StatusCode::OK);
+    let dir = tmp.path().join("builds").join(slug);
+    assert!(dir.exists());
+
+    assert_eq!(
+        admin_delete(&state, &token, &format!("/builds/{slug}")).await,
+        StatusCode::OK
+    );
+
+    assert_eq!(bundle_row_count(&pool, slug).await, 0, "bundle row gone");
+    assert!(
+        artifact_paths(&pool, slug).await.is_empty(),
+        "artifacts cascade-deleted"
+    );
+    assert!(!dir.exists(), "on-disk tree gone");
+}
+
+/// BEQ-14: deleting a folder removes the folder row, every descendant row, and the
+/// subtree on disk.
+#[sqlx::test(migrations = "../../migrations")]
+async fn delete_folder_removes_descendants_rows_and_dir(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "folder-delete";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[
+        ("mods/deep/a.jar", b"a"),
+        ("mods/b.jar", b"b"),
+        ("keep/c.cfg", b"c"),
+    ]);
+    assert_eq!(upload_zip(&state, &token, slug, &zip).await, StatusCode::OK);
+
+    let mods = artifact_id(&pool, slug, "mods").await;
+    assert_eq!(
+        admin_delete(&state, &token, &format!("/builds/{slug}/files/{mods}")).await,
+        StatusCode::OK
+    );
+
+    assert_eq!(
+        artifact_paths(&pool, slug).await,
+        vec!["keep".to_string(), "keep/c.cfg".to_string()],
+        "the whole mods subtree is gone, the sibling untouched"
+    );
+    let files = tmp.path().join("builds").join(slug).join("files");
+    assert!(!files.join("mods").exists());
+    assert!(files.join("keep").join("c.cfg").exists());
+}
+
+/// BE-04 pins the shape `validate` returns now that its whole filesystem half runs on a
+/// blocking thread: rows whose file is gone are `missing`, on-disk files no row tracks
+/// are `orphaned`, and directories are ignored on both sides.
+#[sqlx::test(migrations = "../../migrations")]
+async fn validate_reports_missing_and_orphaned(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "validate-build";
+
+    create_build(&state, &token, slug).await;
+    let zip = build_zip(&[("mods/a.jar", b"a"), ("mods/b.jar", b"b")]);
+    assert_eq!(upload_zip(&state, &token, slug, &zip).await, StatusCode::OK);
+
+    let files = tmp.path().join("builds").join(slug).join("files");
+    // Erase a tracked file behind the registry's back, and drop in an untracked one.
+    std::fs::remove_file(files.join("mods").join("a.jar")).unwrap();
+    std::fs::write(files.join("mods").join("stray.jar"), b"stray").unwrap();
+
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/builds/{slug}/validate"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let missing = body["missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 1, "exactly the erased file: {body}");
+    assert_eq!(missing[0]["relativePath"], "mods/a.jar");
+    assert_eq!(missing[0]["name"], "a.jar");
+    assert!(missing[0]["id"].is_string());
+
+    let orphaned = body["orphaned"].as_array().unwrap();
+    assert_eq!(orphaned.len(), 1, "exactly the untracked file: {body}");
+    assert_eq!(orphaned[0]["relativePath"], "mods/stray.jar");
+}
+
+/// A build with no upload at all has no `files/` dir to scan; validate must report two
+/// empty lists rather than erroring.
+#[sqlx::test(migrations = "../../migrations")]
+async fn validate_on_an_empty_build_reports_nothing(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "empty-validate";
+    create_build(&state, &token, slug).await;
+
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/builds/{slug}/validate"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(body["missing"].as_array().unwrap().is_empty());
+    assert!(body["orphaned"].as_array().unwrap().is_empty());
+}
+
+/// CB-11: the staged upload file is owned by a `TempUpload` guard rather than by seven
+/// hand-written `remove_file` arms. Every failure path must leave no `.zip.tmp` behind —
+/// a leaked one holds up to `MAX_UPLOAD_BYTES` (10 GiB) of the storage volume.
+#[sqlx::test(migrations = "../../migrations")]
+async fn failed_uploads_leave_no_staged_temp_file(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = test_state(pool.clone(), tmp.path());
+    let token = seed_admin_token(&pool).await;
+    let slug = "leaky";
+    create_build(&state, &token, slug).await;
+
+    let build_dir = tmp.path().join("builds").join(slug);
+    let staged = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&build_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.to_string_lossy().ends_with(".zip.tmp"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // (1) A multipart body with no `archive` field: rejected after the temp path exists.
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/builds/{slug}/upload"))
+                .header(
+                    "content-type",
+                    "multipart/form-data; boundary=----boundaryBUNDLE",
+                )
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    "------boundaryBUNDLE\r\n\
+                     Content-Disposition: form-data; name=\"notarchive\"\r\n\r\n\
+                     x\r\n------boundaryBUNDLE--\r\n",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "no archive field");
+    assert!(staged().is_empty(), "staged temp leaked: {:?}", staged());
+
+    // (2) An `archive` field that is not a ZIP: ingest fails, status flips to failed.
+    let status = upload_zip(&state, &token, slug, b"this is not a zip at all").await;
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "{status}"
+    );
+    assert!(staged().is_empty(), "staged temp leaked: {:?}", staged());
+
+    // (3) A single-file upload with no `file` field.
+    let app = loontail_bundles::admin_routes().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/builds/{slug}/files"))
+                .header(
+                    "content-type",
+                    "multipart/form-data; boundary=----boundaryBUNDLE",
+                )
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    "------boundaryBUNDLE\r\n\
+                     Content-Disposition: form-data; name=\"targetPath\"\r\n\r\n\
+                     mods/x.jar\r\n------boundaryBUNDLE--\r\n",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "no file field");
+    assert!(staged().is_empty(), "staged temp leaked: {:?}", staged());
 }

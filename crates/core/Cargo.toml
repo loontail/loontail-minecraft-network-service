@@ -26,4 +26,3 @@ loontail-yggdrasil-protocol = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-tower = { workspace = true, features = ["util"] }

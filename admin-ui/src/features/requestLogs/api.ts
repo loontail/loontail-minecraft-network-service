@@ -2,65 +2,53 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api, queryString } from "@/shared/api/client";
 import type {
-  LogsTailResponse,
-  RequestLogsQuery,
-  RequestLogsResponse,
+  RequestLogSummary,
+  RequestLogTailResponse,
+  RequestLogTimeseries,
   RequestMetric,
-  RequestsSummary,
-  RequestsTimeseriesResponse,
-  TrafficWindow,
+  TimeRange,
 } from "@/shared/types";
 
 export const requestLogsKeys = {
   all: ["requestLogs"] as const,
   tail: (limit: number) => [...requestLogsKeys.all, "tail", limit] as const,
-  requests: (query: RequestLogsQuery) =>
-    [...requestLogsKeys.all, "requests", query] as const,
-  summary: (window: TrafficWindow) =>
-    [...requestLogsKeys.all, "summary", window] as const,
-  timeseries: (window: TrafficWindow, metric: RequestMetric) =>
-    [...requestLogsKeys.all, "timeseries", window, metric] as const,
+  summary: (range: TimeRange) =>
+    [...requestLogsKeys.all, "summary", range] as const,
+  timeseries: (range: TimeRange, metric: RequestMetric) =>
+    [...requestLogsKeys.all, "timeseries", range, metric] as const,
 };
 
-export function useLogsTail(limit = 100) {
+export function useRequestLogTail(limit = 100) {
   return useQuery({
     queryKey: requestLogsKeys.tail(limit),
     queryFn: () =>
-      api.get<LogsTailResponse>(`/admin/logs/tail${queryString({ limit })}`),
+      api.get<RequestLogTailResponse>(
+        `/admin/logs/tail${queryString({ limit })}`,
+      ),
     refetchInterval: 5_000,
   });
 }
 
-export function useRequestLogs(query: RequestLogsQuery) {
+export function useRequestLogSummary(range: TimeRange) {
   return useQuery({
-    queryKey: requestLogsKeys.requests(query),
+    queryKey: requestLogsKeys.summary(range),
     queryFn: () =>
-      api.get<RequestLogsResponse>(
-        `/admin/analytics/requests${queryString({ ...query })}`,
-      ),
-  });
-}
-
-export function useRequestsSummary(window: TrafficWindow) {
-  return useQuery({
-    queryKey: requestLogsKeys.summary(window),
-    queryFn: () =>
-      api.get<RequestsSummary>(
-        `/admin/analytics/requests/summary${queryString({ window })}`,
+      api.get<RequestLogSummary>(
+        `/admin/analytics/requests/summary${queryString({ window: range })}`,
       ),
     refetchInterval: 30_000,
   });
 }
 
-export function useRequestsTimeseries(
-  window: TrafficWindow,
+export function useRequestLogTimeseries(
+  range: TimeRange,
   metric: RequestMetric,
 ) {
   return useQuery({
-    queryKey: requestLogsKeys.timeseries(window, metric),
+    queryKey: requestLogsKeys.timeseries(range, metric),
     queryFn: () =>
-      api.get<RequestsTimeseriesResponse>(
-        `/admin/analytics/requests/timeseries${queryString({ window, metric })}`,
+      api.get<RequestLogTimeseries>(
+        `/admin/analytics/requests/timeseries${queryString({ window: range, metric })}`,
       ),
   });
 }

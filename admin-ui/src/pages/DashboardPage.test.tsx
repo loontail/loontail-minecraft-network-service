@@ -1,8 +1,8 @@
 import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AnalyticsOverview, TimeseriesResponse } from "@/shared/types";
 import { DashboardPage } from "@/pages/DashboardPage";
+import type { AnalyticsOverview } from "@/shared/types";
 import { renderWithProviders } from "@/test/renderWithProviders";
 
 const OVERVIEW: AnalyticsOverview = {
@@ -13,76 +13,48 @@ const OVERVIEW: AnalyticsOverview = {
   totalUsers: 142,
 };
 
-const EMPTY_SERIES: TimeseriesResponse = {
-  metric: "bootstraps",
-  window: "24h",
-  series: [],
-};
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
-}
+const originalFetch = globalThis.fetch;
 
 function mockApi() {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/admin/analytics/overview")) {
-        return Promise.resolve(jsonResponse(OVERVIEW));
-      }
-      if (url.includes("/admin/analytics/timeseries")) {
-        return Promise.resolve(jsonResponse(EMPTY_SERIES));
-      }
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    }),
-  );
+  globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/admin/analytics/overview")) {
+      return Promise.resolve(
+        new Response(JSON.stringify(OVERVIEW), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    }
+    return Promise.reject(new Error(`unexpected fetch: ${url}`));
+  }) as typeof fetch;
 }
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
 });
 
 describe("DashboardPage", () => {
-  it("renders the heading and all five stat cards from overview data", async () => {
+  it("renders the heading and the playing-now widget", async () => {
     mockApi();
     renderWithProviders(<DashboardPage />);
 
     expect(
       screen.getByRole("heading", { name: /dashboard/i }),
     ).toBeInTheDocument();
-
     expect(screen.getByText(/playing now/i)).toBeInTheDocument();
-    expect(screen.getByText(/online in network/i)).toBeInTheDocument();
-    expect(screen.getByText(/open worlds/i)).toBeInTheDocument();
-    expect(screen.getByText(/active relays/i)).toBeInTheDocument();
-    expect(screen.getByText(/total users/i)).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByText("142")).toBeInTheDocument();
-    });
-    expect(screen.getByText("7")).toBeInTheDocument();
-    expect(screen.getByText("21")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
-  });
-
-  it("shows the empty chart state when the series has no data", async () => {
-    mockApi();
-    renderWithProviders(<DashboardPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText(/no activity yet/i)).toBeInTheDocument();
+      expect(screen.getByText("7")).toBeInTheDocument();
     });
   });
 
-  it("exposes the window selector with 24h selected by default", async () => {
+  it("links to the network page", () => {
     mockApi();
     renderWithProviders(<DashboardPage />);
 
-    const selected = await screen.findByRole("radio", { checked: true });
-    expect(selected).toHaveTextContent("24h");
+    const link = screen.getByRole("link", { name: /view network/i });
+    expect(link).toHaveAttribute("href", "/network");
   });
 });

@@ -7,7 +7,7 @@ export const authKeys = {
   me: ["auth", "me"] as const,
 };
 
-/// A 401/403 resolves to `null` instead of throwing, so route gating can branch on it.
+// A 401/403 resolves to `null` instead of throwing, so route gating can branch on it.
 export function useSession() {
   return useQuery({
     queryKey: authKeys.me,

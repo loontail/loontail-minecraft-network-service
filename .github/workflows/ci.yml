@@ -6,9 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # Must match the rustc inside the release image (Dockerfile `FROM rust:...`),
+  # otherwise fmt/clippy pass here and fail during the image build. The
+  # "Assert toolchain" step below fails the run if the two drift apart.
+  RUST_TOOLCHAIN: "1.95.0"
 
 jobs:
   backend:
@@ -17,7 +26,8 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # postgres:16
+        image: postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: loontail
           POSTGRES_PASSWORD: loontail
@@ -35,27 +45,45 @@ jobs:
       DATABASE_URL: postgres://loontail:loontail@localhost:5432/loontail_test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Assert toolchain matches the release image
+        run: |
+          set -euo pipefail
+          tag_version="$(grep -oE '^FROM rust:[0-9]+\.[0-9]+' Dockerfile | head -1 | cut -d: -f2)"
+          case "$RUST_TOOLCHAIN" in
+            "$tag_version" | "$tag_version".*) ;;
+            *)
+              echo "::error::Dockerfile builds on rust:${tag_version} but CI uses ${RUST_TOOLCHAIN}. Update both."
+              exit 1
+              ;;
+          esac
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # branch 1.95.0 (dtolnay/rust-toolchain publishes branches, not tags).
+        # Pinning to a SHA makes `github.action_ref` a SHA, so `toolchain:` must
+        # be passed explicitly — the action has no rust-toolchain.toml fallback.
+        uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   admin-ui:
     name: admin-ui (build / test)
@@ -65,10 +93,12 @@ jobs:
         working-directory: admin-ui
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -88,17 +118,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build image (multi-stage, embeds the admin SPA)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ./Dockerfile
           push: false
           tags: loontail-launcher-api:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # scope=ci keeps this cache disjoint from the production build's
+          # scope=deploy, so a poisoned CI layer can never be reused by a
+          # release build (and vice versa).
+          cache-from: type=gha,scope=ci
+          cache-to: type=gha,mode=max,scope=ci

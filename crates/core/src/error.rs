@@ -107,3 +107,25 @@ pub fn is_unique_violation(err: &sqlx::Error) -> bool {
 pub fn is_foreign_key_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.is_foreign_key_violation())
 }
+
+/// `.map_err(slug_conflict("client"))?` — the one spelling of "a duplicate slug is a
+/// 409, anything else is the underlying error". Written five times by hand in the
+/// catalog admin, which is how the fifth copy drifted into a different message shape.
+pub fn slug_conflict(entity: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
+    move |err| {
+        if is_unique_violation(&err) {
+            AppError::Conflict(format!("{entity} slug already exists"))
+        } else {
+            err.into()
+        }
+    }
+}
+
+/// `found(affected, "keyword")?` — a write that matched no row is a 404, not a silent
+/// success. Replaces ten hand-written `if affected == 0` blocks.
+pub fn found(affected: u64, what: &'static str) -> AppResult<()> {
+    if affected == 0 {
+        return Err(AppError::NotFound(format!("{what} not found")));
+    }
+    Ok(())
+}

@@ -1,7 +1,7 @@
 mod infra;
 mod ip;
 mod ratelimit;
-mod reqlog;
+mod request_log_capture;
 
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use loontail_core::auth::{cleanup_expired_sessions, cleanup_expired_yggdrasil};
 use loontail_core::db;
 use loontail_core::request_log::delete_request_logs_older_than;
 use loontail_core::{AppState, Config};
+use loontail_network::cleanup::cleanup_stale_join_state;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         http = %format!("{}:{}", config.http_host, config.http_port),
         "starting loontail-launcher-api"
     );
+    warn_on_relative_yggdrasil_public_url(&config);
 
     // Load/generate the signing key before serving so signed-texture handlers never 500.
     loontail_yggdrasil::init_crypto(&config)?;
@@ -83,18 +85,21 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_router(state: AppState) -> Router {
     let cors = build_cors(&state.config.cors_allowed_origins);
-    let limiter =
-        ratelimit::RateLimiter::from_config(&state.config.rate_limit, state.config.trusted_proxy);
 
     // Grouping the `/api` subtree avoids overlapping top-level `/api` nests, which
     // axum rejects. Yggdrasil nests under the suffix after `/api` so its meta and
     // sub-paths resolve under that prefix.
     let ygg_suffix = yggdrasil_api_suffix(&state.config.yggdrasil.public_url);
+    let limiter = ratelimit::RateLimiter::from_config(
+        &state.config.rate_limit,
+        state.config.trusted_proxy,
+        &yggdrasil_mount_prefix(&ygg_suffix),
+    );
     let api = Router::new()
         .merge(loontail_catalog::routes())
         .nest("/auth", loontail_yggdrasil::account_routes())
         // Textures are canonically mounted top-level at `/textures` (below), but the
-        // launcher's `@loontail/yggdrasil-client` derives its texture base from the
+        // launcher's vendored Yggdrasil client derives its texture base from the
         // Yggdrasil `apiRoot` and calls `<ygg_suffix>/textures/*`. A second mount
         // inside the yggdrasil subtree keeps already-shipped launchers working;
         // lookup responses stay server-relative `/textures/...` so the PNG bytes
@@ -133,7 +138,7 @@ fn build_router(state: AppState) -> Router {
         // reads the matched-route template from extensions and shares `AppState`.
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            reqlog::capture,
+            request_log_capture::capture,
         ))
         .with_state(state)
         // The limiter self-filters to unauthenticated credential paths by URI; it
@@ -221,12 +226,45 @@ fn yggdrasil_api_suffix(public_url: &str) -> String {
     }
 }
 
+/// `true` when signed profiles built against `public_url` will carry absolute (thus
+/// fetchable) texture URLs — i.e. the configured value has a scheme and host.
+fn texture_urls_will_be_absolute(public_url: &str) -> bool {
+    loontail_core::config::parse_public_url(public_url)
+        .0
+        .is_some()
+}
+
+/// CON-01: a `YGGDRASIL_PUBLIC_URL` with no scheme+host makes every signed profile
+/// carry a server-relative texture URL that no game client can fetch. This is not
+/// fatal — the test suite and local `docker compose up` run on the path-only default
+/// on purpose — but it must never fail silently in a real deployment.
+fn warn_on_relative_yggdrasil_public_url(config: &Config) {
+    let public_url = &config.yggdrasil.public_url;
+    if !texture_urls_will_be_absolute(public_url) {
+        tracing::error!(
+            %public_url,
+            "YGGDRASIL_PUBLIC_URL is not an absolute URL — signed profiles will advertise \
+             server-relative texture URLs and IN-GAME SKINS AND CAPES WILL NOT LOAD. Set it \
+             to https://<public-host>/api/yggdrasil (and list that host in \
+             YGGDRASIL_SKIN_DOMAINS)."
+        );
+    }
+}
+
+/// The absolute path the Yggdrasil router is served at, from the very `api_suffix`
+/// passed to `.nest` inside the `/api` subtree. Everything that must match the mount
+/// (the rate limiter's credential paths) derives it here so the two cannot diverge.
+fn yggdrasil_mount_prefix(api_suffix: &str) -> String {
+    format!("/api{api_suffix}")
+}
+
 /// Spawn hourly background cleanup of expired Yggdrasil token pairs, admin
-/// sessions, and aged request logs. Failures are logged and retried on the next
-/// tick — they never abort the loop.
+/// sessions, aged request logs, and stale join/invite/event rows. Failures are logged
+/// and retried on the next tick — they never abort the loop.
 fn spawn_cleanup_tasks(state: AppState) {
     let pool = state.pool.clone();
     let retention_days = state.config.request_log.retention_days;
+    let event_retention_days = state.config.event_retention.retention_days;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(3600));
         loop {
@@ -245,6 +283,13 @@ fn spawn_cleanup_tasks(state: AppState) {
                 Ok(n) if n > 0 => tracing::debug!(removed = n, "cleaned aged request logs"),
                 Ok(_) => {}
                 Err(err) => tracing::warn!(error = %err, "request-log cleanup failed"),
+            }
+            match cleanup_stale_join_state(&pool, event_retention_days).await {
+                Ok(counts) if counts.total() > 0 => {
+                    tracing::debug!(?counts, "cleaned stale join/invite/event rows");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(error = %err, "join-state cleanup failed"),
             }
         }
     });
@@ -294,7 +339,9 @@ fn build_cors(allowed_origins: &[String]) -> CorsLayer {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,loontail_server=debug,loontail_network=debug,loontail_core=debug")
+        EnvFilter::new(
+            "info,loontail_launcher_api=debug,loontail_network=debug,loontail_core=debug",
+        )
     });
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -304,7 +351,19 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::yggdrasil_api_suffix;
+    use super::{texture_urls_will_be_absolute, yggdrasil_api_suffix, yggdrasil_mount_prefix};
+
+    /// CON-01: the committed default is exactly the shape that breaks in-game skins,
+    /// so startup must be able to detect it.
+    #[test]
+    fn relative_public_url_is_detected_as_unfetchable() {
+        assert!(!texture_urls_will_be_absolute("/api/yggdrasil"));
+        assert!(!texture_urls_will_be_absolute(""));
+        assert!(texture_urls_will_be_absolute(
+            "https://cms.loontail.dev/api/yggdrasil"
+        ));
+        assert!(texture_urls_will_be_absolute("http://localhost:8080"));
+    }
 
     #[test]
     fn yggdrasil_suffix_from_default_path() {
@@ -328,5 +387,28 @@ mod tests {
     #[test]
     fn yggdrasil_suffix_preserves_nested_path() {
         assert_eq!(yggdrasil_api_suffix("/api/auth/ygg"), "/auth/ygg");
+    }
+
+    /// BE-03: the limiter's prefix is the mount, for every supported public-URL shape.
+    #[test]
+    fn mount_prefix_tracks_the_configured_public_url() {
+        for public_url in [
+            "/api/yggdrasil",
+            "https://auth.loontail.dev/api/yggdrasil",
+            "/api/mojang",
+            "/api/auth/ygg",
+            "https://x",
+        ] {
+            let suffix = yggdrasil_api_suffix(public_url);
+            assert_eq!(
+                yggdrasil_mount_prefix(&suffix),
+                format!("/api{suffix}"),
+                "{public_url}"
+            );
+        }
+        assert_eq!(
+            yggdrasil_mount_prefix(&yggdrasil_api_suffix("/api/mojang")),
+            "/api/mojang"
+        );
     }
 }

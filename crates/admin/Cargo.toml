@@ -20,7 +20,6 @@ rust-embed = { workspace = true, features = ["debug-embed", "interpolate-folder-
 mime_guess = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 tower = { workspace = true }
 http-body-util = "0.1"
 

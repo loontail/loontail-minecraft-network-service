@@ -6,9 +6,8 @@
 mod admin;
 mod dto;
 mod public;
-mod query;
 mod repo;
-mod store;
+mod storage;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -52,10 +51,7 @@ pub fn admin_routes() -> Router<AppState> {
         )
         .route("/clients/{id}/publish", post(admin::publish_client))
         .route("/clients/{id}/unpublish", post(admin::unpublish_client))
-        .route(
-            "/clients/{id}/media",
-            post(admin::attach_media).get(admin::list_media),
-        )
+        .route("/clients/{id}/media", get(admin::list_media))
         .route(
             "/clients/{id}/media/upload",
             post(admin::upload_media).layer(DefaultBodyLimit::max(MEDIA_UPLOAD_BODY_LIMIT)),
@@ -154,5 +150,5 @@ fn content_type_for(path: &str) -> &'static str {
 /// Create the catalog-media storage root at startup so uploads never race directory
 /// creation.
 pub async fn init(config: &Config) -> std::io::Result<()> {
-    store::ensure_dir(&config.catalog.storage_root).await
+    storage::ensure_dir(&config.catalog.storage_root).await
 }

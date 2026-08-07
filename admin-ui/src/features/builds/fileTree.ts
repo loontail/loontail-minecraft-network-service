@@ -4,12 +4,26 @@ export interface TreeEntry {
   relativePath: string;
   name: string;
   isDir: boolean;
-  /// null for folders implied only by a descendant file (no explicit dir row).
+  // null for folders implied only by a descendant file (no explicit dir row).
   artifact: BundleArtifact | null;
 }
 
 export function joinPath(base: string, segment: string): string {
   return base === "" ? segment : `${base}/${segment}`;
+}
+
+// why: the name dialogs edit ONE segment, but they hand the result to joinPath and
+// the backend accepts any relative path — so "mods/foo.jar" in the rename box is a
+// silent move out of the current folder, reported as "Renamed". Reject separators
+// client-side; the server has no rule that would.
+export function segmentError(name: string): string | null {
+  if (name.includes("/") || name.includes("\\")) {
+    return "Name can’t contain “/” or “\\”.";
+  }
+  if (name === "." || name === "..") {
+    return "Name can’t be “.” or “..”.";
+  }
+  return null;
 }
 
 export function parentPath(relativePath: string): string {
@@ -21,8 +35,8 @@ function segments(path: string): string[] {
   return path.split("/").filter((part) => part !== "");
 }
 
-/// Immediate children of `currentPath`. Explicit dir rows win over folders only
-/// implied by a deeper file, which are synthesized so navigation never dead-ends.
+// Immediate children of `currentPath`. Explicit dir rows win over folders only
+// implied by a deeper file, which are synthesized so navigation never dead-ends.
 export function childrenOf(
   artifacts: BundleArtifact[],
   currentPath: string,
@@ -78,7 +92,7 @@ export function childrenOf(
 }
 
 export interface FileTreeNode {
-  /// Stable react-aria / drag-and-drop key === the node's relativePath.
+  // Stable react-aria / drag-and-drop key === the node's relativePath.
   id: string;
   relativePath: string;
   name: string;

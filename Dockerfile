@@ -4,7 +4,10 @@
 # Build the React/Vite admin SPA first. Its output (admin-ui/dist) is embedded
 # into the Rust binary at compile time via rust-embed, so the real UI must exist
 # before the Rust build runs.
-FROM node:24-alpine AS admin-ui
+# Digest-pinned so "rebuild commit X" reproduces the image. Refresh with
+# `docker buildx imagetools inspect node:24-alpine`; Dependabot's docker
+# ecosystem bumps it under review.
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS admin-ui
 
 WORKDIR /app/admin-ui
 
@@ -17,8 +20,10 @@ COPY admin-ui/ ./
 RUN npm run build
 
 # --- Rust build stage ----------------------------------------------------
-# rust:1.95 ships edition-2024 support required by a transitive dependency.
-FROM rust:1.95-slim-bookworm AS builder
+# Pinned to the multi-arch OCI index digest so the builder toolchain cannot drift
+# under the floating tag. `rust-version = "1.94"` (sqlx 0.9) is the real floor;
+# refresh the digest with `docker buildx imagetools inspect rust:1.95-slim-bookworm`.
+FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
 
 WORKDIR /app
 
@@ -43,7 +48,7 @@ RUN set -eux; \
     done; \
     mkdir -p crates/server/src; \
     echo "fn main() {}" > crates/server/src/main.rs; \
-    cargo build --release --workspace; \
+    cargo build --locked --release --workspace; \
     rm -rf crates/*/src
 
 # Build the real sources. The admin SPA build output is copied in so rust-embed
@@ -52,10 +57,13 @@ COPY migrations ./migrations
 COPY crates ./crates
 COPY --from=admin-ui /app/admin-ui/dist ./admin-ui/dist
 RUN find crates -name '*.rs' -exec touch {} + \
-    && cargo build --release --bin loontail-launcher-api
+    && cargo build --locked --release --bin loontail-launcher-api
 
 # --- Runtime stage -------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+# Digest-pinned like the builder: the runtime CA trust store must not change
+# under a rebuild of the same commit. `apt-get` below still picks up security
+# updates for the packages it installs.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

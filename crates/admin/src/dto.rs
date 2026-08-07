@@ -13,16 +13,16 @@ pub struct LoginRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MeResponse {
+pub struct AdminMeResponse {
     pub id: Uuid,
     pub username: String,
     pub email: Option<String>,
     pub is_admin: bool,
 }
 
-impl From<&User> for MeResponse {
+impl From<&User> for AdminMeResponse {
     fn from(user: &User) -> Self {
-        MeResponse {
+        AdminMeResponse {
             id: user.id,
             username: user.username.clone(),
             email: user.email.clone(),
@@ -163,7 +163,7 @@ pub struct TimeseriesResponse {
 }
 
 /// A request-log row. `authKind` is `"session" | "admin" | "anon"`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestLogEntry {
     /// Present only on persisted rows; omitted for the live ring tail.

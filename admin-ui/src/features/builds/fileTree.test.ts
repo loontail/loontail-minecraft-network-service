@@ -7,6 +7,7 @@ import {
   type FileTreeNode,
   joinPath,
   parentPath,
+  segmentError,
 } from "@/features/builds/fileTree";
 import type { BundleArtifact } from "@/shared/types";
 
@@ -198,5 +199,24 @@ describe("joinPath / parentPath", () => {
     expect(parentPath("a.jar")).toBe("");
     expect(parentPath("mods/a.jar")).toBe("mods");
     expect(parentPath("mods/sub/a.jar")).toBe("mods/sub");
+  });
+});
+
+describe("segmentError", () => {
+  it("accepts a plain single-segment name", () => {
+    expect(segmentError("foo.jar")).toBeNull();
+    expect(segmentError("my config")).toBeNull();
+    expect(segmentError("a.b.c")).toBeNull();
+  });
+
+  it("rejects a name that would relocate the entry", () => {
+    expect(segmentError("mods/foo.jar")).toMatch(/can’t contain/);
+    expect(segmentError("mods\\foo.jar")).toMatch(/can’t contain/);
+  });
+
+  it("rejects the dot segments", () => {
+    expect(segmentError(".")).toMatch(/can’t be/);
+    expect(segmentError("..")).toMatch(/can’t be/);
+    expect(segmentError(".hidden")).toBeNull();
   });
 });

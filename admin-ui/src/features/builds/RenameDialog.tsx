@@ -13,8 +13,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { joinPath, parentPath, type TreeEntry } from "@/features/builds/fileTree";
-import { useRenameFile } from "@/features/bundles/api";
+import {
+  joinPath,
+  parentPath,
+  segmentError,
+  type TreeEntry,
+} from "@/features/builds/fileTree";
+import { useRenameFile } from "@/features/builds/api";
 
 export function RenameDialog({
   slug,
@@ -30,6 +35,9 @@ export function RenameDialog({
   const [name, setName] = useState(entry.name);
   const rename = useRenameFile();
 
+  const trimmed = name.trim();
+  const nameError = trimmed === "" ? null : segmentError(trimmed);
+
   function handleOpenChange(next: boolean) {
     if (next) {
       setName(entry.name);
@@ -39,8 +47,7 @@ export function RenameDialog({
 
   function submit(event: React.SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed || trimmed === entry.name || !entry.artifact) {
+    if (!trimmed || trimmed === entry.name || nameError || !entry.artifact) {
       return;
     }
     const newRelativePath = joinPath(parentPath(entry.relativePath), trimmed);
@@ -67,8 +74,18 @@ export function RenameDialog({
               id="rename-name"
               value={name}
               autoFocus
+              aria-invalid={nameError !== null}
+              aria-describedby={nameError ? "rename-name-error" : undefined}
               onChange={(event) => setName(event.target.value)}
             />
+            {nameError ? (
+              <p
+                id="rename-name-error"
+                className="text-caption text-destructive"
+              >
+                {nameError}
+              </p>
+            ) : null}
           </div>
           <DialogFooter>
             <Button
@@ -82,7 +99,10 @@ export function RenameDialog({
             <Button
               type="submit"
               disabled={
-                rename.isPending || !name.trim() || name.trim() === entry.name
+                rename.isPending ||
+                !trimmed ||
+                trimmed === entry.name ||
+                nameError !== null
               }
             >
               {rename.isPending ? (

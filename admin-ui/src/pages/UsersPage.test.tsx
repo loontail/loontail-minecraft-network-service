@@ -92,4 +92,31 @@ describe("UsersPage", () => {
     expect(within(dialog).getByLabelText(/minecraft uuid/i)).toBeInTheDocument();
     expect(within(dialog).getByLabelText(/administrator/i)).toBeInTheDocument();
   });
+
+  it("validates the email field: required, format-checked, and trimmed before the format check", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<UsersPage />);
+
+    await user.click(screen.getByRole("button", { name: /create user/i }));
+    const dialog = await screen.findByRole("dialog");
+    const email = within(dialog).getByLabelText(/email/i);
+    const submit = within(dialog).getByRole("button", { name: /^create user$/i });
+
+    await user.click(submit);
+    expect(await within(dialog).findByText("Email is required")).toBeInTheDocument();
+
+    await user.type(email, "nope");
+    await user.click(submit);
+    expect(
+      await within(dialog).findByText("Enter a valid email"),
+    ).toBeInTheDocument();
+
+    await user.clear(email);
+    await user.type(email, "  padded@example.com  ");
+    await user.click(submit);
+    await waitFor(() => {
+      expect(within(dialog).queryByText("Enter a valid email")).toBeNull();
+    });
+    expect(within(dialog).queryByText("Email is required")).toBeNull();
+  });
 });

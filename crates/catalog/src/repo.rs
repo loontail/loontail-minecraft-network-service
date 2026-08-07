@@ -2,14 +2,16 @@
 //! (`published_at IS NOT NULL`), i18n locale fallback (requested locale row, else
 //! the default-locale row, else any row), and always inline relations.
 
+use sqlx::AssertSqlSafe;
 use std::collections::HashMap;
 
 use loontail_core::error::AppResult;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::dto::{BundleSummaryDto, ClientAdminDto, ClientDto, KeywordDto, MediaDto, ServerDto};
-use crate::query::CatalogQuery;
+use crate::dto::{
+    BundleSummaryDto, CatalogQuery, ClientAdminDto, ClientDto, KeywordDto, MediaDto, ServerDto,
+};
 
 /// Locale used when the requested locale is absent or unmatched.
 pub const DEFAULT_LOCALE: &str = "en";
@@ -26,36 +28,13 @@ struct ClientRow {
     bundle_id: Option<Uuid>,
 }
 
-/// A client row plus the admin-only `published` flag (no draft filter).
+/// A client row plus the admin-only `published` flag (no draft filter). Flattened
+/// rather than restated, so a new `catalog_clients` column is added once.
 #[derive(sqlx::FromRow)]
 struct ClientAdminRow {
-    id: Uuid,
-    slug: String,
-    available: bool,
-    minecraft_version: Option<String>,
-    forge_version: Option<String>,
-    fabric_version: Option<String>,
-    runtime_version: Option<String>,
-    bundle_id: Option<Uuid>,
+    #[sqlx(flatten)]
+    client: ClientRow,
     published: bool,
-}
-
-impl ClientAdminRow {
-    fn split(self) -> (ClientRow, bool) {
-        (
-            ClientRow {
-                id: self.id,
-                slug: self.slug,
-                available: self.available,
-                minecraft_version: self.minecraft_version,
-                forge_version: self.forge_version,
-                fabric_version: self.fabric_version,
-                runtime_version: self.runtime_version,
-                bundle_id: self.bundle_id,
-            },
-            self.published,
-        )
-    }
 }
 
 struct ClientLocaleRow {
@@ -75,12 +54,6 @@ struct MediaRow {
 #[derive(sqlx::FromRow)]
 struct KeywordRow {
     id: Uuid,
-}
-
-#[derive(sqlx::FromRow)]
-struct KeywordLocaleRow {
-    locale: String,
-    title: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -210,19 +183,6 @@ fn assemble_media(
     (background, poster, title_image, screenshots)
 }
 
-async fn keyword_title(pool: &PgPool, keyword_id: Uuid, requested: &str) -> AppResult<String> {
-    let rows = sqlx::query_as::<_, KeywordLocaleRow>(
-        "SELECT locale, title FROM catalog_keyword_locales WHERE keyword_id = $1",
-    )
-    .bind(keyword_id)
-    .fetch_all(pool)
-    .await?;
-    let indexed: Vec<(String, String)> = rows.into_iter().map(|r| (r.locale, r.title)).collect();
-    Ok(pick_locale(&indexed, requested)
-        .cloned()
-        .unwrap_or_default())
-}
-
 /// Per-client relation data preloaded for a whole client set in a fixed number of
 /// queries (one per relation type), so [`assemble_client_dto`] builds each DTO from
 /// memory instead of issuing per-client round-trips.
@@ -301,7 +261,8 @@ async fn load_client_relations(
     .bind(client_ids)
     .fetch_all(pool)
     .await?;
-    let keyword_titles = load_keyword_titles(pool, &keyword_rows, locale).await?;
+    let linked_keyword_ids: Vec<Uuid> = keyword_rows.iter().map(|r| r.id).collect();
+    let keyword_titles = load_keyword_titles(pool, &linked_keyword_ids, locale).await?;
     for row in keyword_rows {
         let title = keyword_titles.get(&row.id).cloned().unwrap_or_default();
         relations
@@ -341,14 +302,16 @@ async fn load_client_relations(
     Ok(relations)
 }
 
-/// Resolve the localized title for every keyword id in `keyword_rows` with a single
+/// Resolve the localized title for every id in `ids` with a single
 /// `catalog_keyword_locales` read, applying the [`pick_locale`] fallback per keyword.
+/// Shared by the per-client keyword loader and the flat keyword listings, so all three
+/// paths cost one query regardless of keyword count.
 async fn load_keyword_titles(
     pool: &PgPool,
-    keyword_rows: &[ClientKeywordBatchRow],
+    ids: &[Uuid],
     requested: &str,
 ) -> AppResult<HashMap<Uuid, String>> {
-    let mut keyword_ids: Vec<Uuid> = keyword_rows.iter().map(|r| r.id).collect();
+    let mut keyword_ids: Vec<Uuid> = ids.to_vec();
     keyword_ids.sort_unstable();
     keyword_ids.dedup();
     if keyword_ids.is_empty() {
@@ -464,10 +427,10 @@ fn assemble_client_dto(row: ClientRow, relations: &mut ClientRelations, locale: 
 }
 
 pub async fn list_clients(pool: &PgPool, query: &CatalogQuery) -> AppResult<Vec<ClientDto>> {
-    let rows = sqlx::query_as::<_, ClientRow>(&format!(
+    let rows = sqlx::query_as::<_, ClientRow>(AssertSqlSafe(format!(
         "SELECT {CLIENT_COLS} FROM catalog_clients \
          WHERE published_at IS NOT NULL ORDER BY sort_order, created_at"
-    ))
+    )))
     .fetch_all(pool)
     .await?;
 
@@ -491,37 +454,37 @@ pub async fn list_clients_admin(
     pool: &PgPool,
     query: &CatalogQuery,
 ) -> AppResult<Vec<ClientAdminDto>> {
-    let rows = sqlx::query_as::<_, ClientAdminRow>(&format!(
+    let rows = sqlx::query_as::<_, ClientAdminRow>(AssertSqlSafe(format!(
         "SELECT {CLIENT_COLS}, (published_at IS NOT NULL) AS published \
          FROM catalog_clients ORDER BY sort_order, created_at"
-    ))
+    )))
     .fetch_all(pool)
     .await?;
 
     let locale = query.locale.as_deref().unwrap_or(DEFAULT_LOCALE);
-    let split: Vec<(ClientRow, bool)> = rows.into_iter().map(ClientAdminRow::split).collect();
-    let client_ids: Vec<Uuid> = split.iter().map(|(r, _)| r.id).collect();
-    let bundle_links: Vec<(Uuid, Uuid)> = split
+    let client_ids: Vec<Uuid> = rows.iter().map(|r| r.client.id).collect();
+    let bundle_links: Vec<(Uuid, Uuid)> = rows
         .iter()
-        .filter_map(|(r, _)| r.bundle_id.map(|b| (r.id, b)))
+        .filter_map(|r| r.client.bundle_id.map(|b| (r.client.id, b)))
         .collect();
     let mut relations = load_client_relations(pool, &client_ids, &bundle_links, locale).await?;
 
-    Ok(split
+    Ok(rows
         .into_iter()
-        .map(|(client_row, published)| ClientAdminDto {
-            client: assemble_client_dto(client_row, &mut relations, locale),
-            published,
+        .map(|row| ClientAdminDto {
+            client: assemble_client_dto(row.client, &mut relations, locale),
+            published: row.published,
         })
         .collect())
 }
 
-pub async fn get_client(
+pub async fn load_client(
     pool: &PgPool,
     ident: &str,
     query: &CatalogQuery,
 ) -> AppResult<Option<ClientDto>> {
-    let row = fetch_client_row(pool, ident).await?;
+    let row: Option<ClientRow> =
+        load_published_by_ident(pool, "catalog_clients", CLIENT_COLS, ident).await?;
     match row {
         Some(row) => {
             // Single-client path reuses the batch loader with a one-element set so the
@@ -537,31 +500,30 @@ pub async fn get_client(
     }
 }
 
-async fn fetch_client_row(pool: &PgPool, ident: &str) -> AppResult<Option<ClientRow>> {
-    if let Ok(id) = parse_id(ident) {
-        let row = sqlx::query_as::<_, ClientRow>(&format!(
-            "SELECT {CLIENT_COLS} FROM catalog_clients \
-             WHERE id = $1 AND published_at IS NOT NULL"
-        ))
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    let row = sqlx::query_as::<_, ClientRow>(&format!(
-        "SELECT {CLIENT_COLS} FROM catalog_clients \
-         WHERE slug = $1 AND published_at IS NOT NULL"
-    ))
+/// A published row addressed by either its id or its slug, in ONE round-trip.
+///
+/// `ident` is parsed as a UUID up front and bound separately rather than compared as
+/// `id::text`: the wire form of an id is undashed hex (see [`id_hex`]), which never
+/// equals Postgres's dashed `uuid::text` rendering. The ORDER BY keeps the id match
+/// winning, which is the precedence the three hand-written copies had.
+async fn load_published_by_ident<R>(
+    pool: &PgPool,
+    table: &'static str,
+    cols: &'static str,
+    ident: &str,
+) -> AppResult<Option<R>>
+where
+    R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+{
+    Ok(sqlx::query_as::<_, R>(AssertSqlSafe(format!(
+        "SELECT {cols} FROM {table} \
+         WHERE published_at IS NOT NULL AND (id = $1 OR slug = $2) \
+         ORDER BY (id = $1) DESC LIMIT 1"
+    )))
+    .bind(Uuid::parse_str(ident).ok())
     .bind(ident)
     .fetch_optional(pool)
-    .await?;
-    Ok(row)
-}
-
-fn parse_id(ident: &str) -> Result<Uuid, uuid::Error> {
-    Uuid::parse_str(ident)
+    .await?)
 }
 
 pub async fn list_keywords(pool: &PgPool, locale: &str) -> AppResult<Vec<KeywordDto>> {
@@ -571,55 +533,37 @@ pub async fn list_keywords(pool: &PgPool, locale: &str) -> AppResult<Vec<Keyword
     )
     .fetch_all(pool)
     .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let title = keyword_title(pool, row.id, locale).await?;
-        out.push(KeywordDto {
-            id: id_hex(row.id),
-            title,
-        });
-    }
-    Ok(out)
+
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let titles = load_keyword_titles(pool, &ids, locale).await?;
+    Ok(ids
+        .into_iter()
+        .map(|id| KeywordDto {
+            id: id_hex(id),
+            title: titles.get(&id).cloned().unwrap_or_default(),
+        })
+        .collect())
 }
 
-pub async fn get_keyword(
+pub async fn load_keyword(
     pool: &PgPool,
     ident: &str,
     locale: &str,
 ) -> AppResult<Option<KeywordDto>> {
-    let row = fetch_keyword_row(pool, ident).await?;
+    let row: Option<KeywordRow> =
+        load_published_by_ident(pool, "catalog_keywords", "id", ident).await?;
     match row {
         Some(row) => {
-            let title = keyword_title(pool, row.id, locale).await?;
+            // Single-row path routes through the batch loader with a one-element slice
+            // so the locale fallback is resolved by exactly one code path.
+            let titles = load_keyword_titles(pool, &[row.id], locale).await?;
             Ok(Some(KeywordDto {
                 id: id_hex(row.id),
-                title,
+                title: titles.get(&row.id).cloned().unwrap_or_default(),
             }))
         }
         None => Ok(None),
     }
-}
-
-async fn fetch_keyword_row(pool: &PgPool, ident: &str) -> AppResult<Option<KeywordRow>> {
-    const COLS: &str = "id";
-    if let Ok(id) = parse_id(ident) {
-        let row = sqlx::query_as::<_, KeywordRow>(&format!(
-            "SELECT {COLS} FROM catalog_keywords WHERE id = $1 AND published_at IS NOT NULL"
-        ))
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    let row = sqlx::query_as::<_, KeywordRow>(&format!(
-        "SELECT {COLS} FROM catalog_keywords WHERE slug = $1 AND published_at IS NOT NULL"
-    ))
-    .bind(ident)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row)
 }
 
 pub async fn list_servers(pool: &PgPool) -> AppResult<Vec<ServerDto>> {
@@ -632,8 +576,9 @@ pub async fn list_servers(pool: &PgPool) -> AppResult<Vec<ServerDto>> {
     Ok(rows.into_iter().map(server_dto).collect())
 }
 
-pub async fn get_server(pool: &PgPool, ident: &str) -> AppResult<Option<ServerDto>> {
-    let row = fetch_server_row(pool, ident).await?;
+pub async fn load_server(pool: &PgPool, ident: &str) -> AppResult<Option<ServerDto>> {
+    let row: Option<ServerRow> =
+        load_published_by_ident(pool, "catalog_servers", "id, name, address", ident).await?;
     Ok(row.map(server_dto))
 }
 
@@ -643,26 +588,4 @@ fn server_dto(r: ServerRow) -> ServerDto {
         name: r.name,
         address: r.address,
     }
-}
-
-async fn fetch_server_row(pool: &PgPool, ident: &str) -> AppResult<Option<ServerRow>> {
-    const COLS: &str = "id, name, address";
-    if let Ok(id) = parse_id(ident) {
-        let row = sqlx::query_as::<_, ServerRow>(&format!(
-            "SELECT {COLS} FROM catalog_servers WHERE id = $1 AND published_at IS NOT NULL"
-        ))
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    let row = sqlx::query_as::<_, ServerRow>(&format!(
-        "SELECT {COLS} FROM catalog_servers WHERE slug = $1 AND published_at IS NOT NULL"
-    ))
-    .bind(ident)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row)
 }

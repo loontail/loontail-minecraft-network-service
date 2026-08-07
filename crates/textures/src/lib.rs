@@ -1,12 +1,12 @@
-//! Textures domain: the skin/cape registry. Reads/writes the `skins` and `capes`
-//! tables (one row per user, keyed by `user_id`), validates uploads as Minecraft
-//! PNGs via `yggdrasil-protocol`, stores the bytes under
+//! Textures domain: the skin/cape registry. Reads/writes the `user_textures` table
+//! (one row per user per kind, keyed by `(user_id, kind)`), validates uploads as
+//! Minecraft PNGs via `yggdrasil-protocol`, stores the bytes under
 //! `config.textures.storage_root`, and serves them back from its own GET handlers.
 //! Mounted by the server crate at `/textures`.
 
 mod admin;
-mod handlers;
-mod store;
+mod public;
+mod storage;
 
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
@@ -14,14 +14,14 @@ use axum::Router;
 
 use loontail_core::{AppState, Config};
 
-pub use store::Kind;
+pub use storage::TextureKind;
 
 /// Cap an uploaded texture at 256 KiB. A valid 64x64 RGBA skin PNG is a few KiB;
 /// this leaves generous headroom while bounding multipart buffering.
 pub const MAX_UPLOAD_BYTES: usize = 256 * 1024;
 
-fn relative_texture_url(profile_uuid: &str, kind: Kind) -> String {
-    format!("/textures/{profile_uuid}/{}", kind.slug())
+fn relative_texture_url(profile_uuid: &str, kind: &str) -> String {
+    format!("/textures/{profile_uuid}/{kind}")
 }
 
 /// Absolutize a server-relative texture URL against the configured public origin
@@ -51,11 +51,11 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/{segment}",
-            get(handlers::lookup)
-                .put(handlers::upload)
-                .delete(handlers::delete),
+            get(public::lookup)
+                .put(public::upload)
+                .delete(public::delete),
         )
-        .route("/{segment}/{kind}", get(handlers::read_png))
+        .route("/{segment}/{kind}", get(public::read_png))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
 }
 
@@ -74,7 +74,7 @@ pub fn admin_routes() -> Router<AppState> {
 /// Create the on-disk storage directories (`{storage_root}/{skins,capes}`) so
 /// uploads never race directory creation. Call once at server startup.
 pub async fn init(config: &Config) -> std::io::Result<()> {
-    store::ensure_dirs(&config.textures.storage_root).await
+    storage::ensure_dirs(&config.textures.storage_root).await
 }
 
 #[cfg(test)]
@@ -107,11 +107,17 @@ mod url_tests {
     #[test]
     fn relative_url_shape() {
         assert_eq!(
-            relative_texture_url("f84c6a790a4e45e0879f0e478de5cb7e", Kind::Skin),
+            relative_texture_url(
+                "f84c6a790a4e45e0879f0e478de5cb7e",
+                TextureKind::Skin.as_str()
+            ),
             "/textures/f84c6a790a4e45e0879f0e478de5cb7e/skin"
         );
         assert_eq!(
-            relative_texture_url("f84c6a790a4e45e0879f0e478de5cb7e", Kind::Cape),
+            relative_texture_url(
+                "f84c6a790a4e45e0879f0e478de5cb7e",
+                TextureKind::Cape.as_str()
+            ),
             "/textures/f84c6a790a4e45e0879f0e478de5cb7e/cape"
         );
     }

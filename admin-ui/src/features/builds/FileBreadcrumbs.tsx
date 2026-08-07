@@ -1,30 +1,18 @@
 import { ChevronRight } from "lucide-react";
-import {
-  DropZone,
-  isFileDropItem,
-  isTextDropItem,
-} from "react-aria-components";
+import { DropZone, isFileDropItem } from "react-aria-components";
 
-import { DRAG_TYPE } from "@/features/builds/dndHooks";
 import { breadcrumbs } from "@/features/builds/fileTree";
 import { cn } from "@/shared/lib/cn";
 
-interface DragPayload {
-  ids: string[];
-  paths: string[];
-}
-
-// The Root crumb is also a drop target: dropped cards move to the build root,
-// dropped OS files upload to the root.
+// The Root crumb doubles as an upload drop target: OS files dropped on it upload
+// to the build root.
 export function FileBreadcrumbs({
   currentPath,
   onNavigate,
-  onMoveToRoot,
   onUploadToRoot,
 }: {
   currentPath: string;
   onNavigate: (path: string) => void;
-  onMoveToRoot: (ids: string[]) => void;
   onUploadToRoot: (files: File[]) => void;
 }) {
   const crumbs = breadcrumbs(currentPath);
@@ -56,37 +44,23 @@ export function FileBreadcrumbs({
             ) : null}
             {isRoot ? (
               <DropZone
-                aria-label="Build root (drop to move here)"
+                aria-label="Build root (drop files to upload here)"
                 getDropOperation={(types) =>
-                  types.has(DRAG_TYPE) || types.has("file") ? "move" : "cancel"
+                  types.has("file") ? "move" : "cancel"
                 }
                 onDrop={async (e) => {
                   // react-aria's DropZone doesn't catch async onDrop errors, so a
-                  // malformed payload / getFile rejection would surface unhandled.
+                  // getFile() rejection would surface unhandled.
                   try {
                     const fileItems = e.items.filter(isFileDropItem);
-                    if (fileItems.length > 0) {
-                      const files = await Promise.all(
-                        fileItems.map((item) => item.getFile()),
-                      );
-                      onUploadToRoot(files);
+                    if (fileItems.length === 0) {
                       return;
                     }
-                    const textItem = e.items.find(
-                      (item) =>
-                        isTextDropItem(item) && item.types.has(DRAG_TYPE),
+                    const files = await Promise.all(
+                      fileItems.map((item) => item.getFile()),
                     );
-                    if (!textItem || !isTextDropItem(textItem)) {
-                      return;
-                    }
-                    const payload = JSON.parse(
-                      await textItem.getText(DRAG_TYPE),
-                    ) as DragPayload;
-                    if (Array.isArray(payload.ids) && payload.ids.length > 0) {
-                      onMoveToRoot(payload.ids);
-                    }
-                  } catch {
-                  }
+                    onUploadToRoot(files);
+                  } catch {}
                 }}
                 className={cn(
                   "rounded-sm outline-none transition-colors",

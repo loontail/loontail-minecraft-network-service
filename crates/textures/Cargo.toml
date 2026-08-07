@@ -15,12 +15,9 @@ tokio = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
-tracing = { workspace = true }
-hex = { workspace = true }
-rand = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
+tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"

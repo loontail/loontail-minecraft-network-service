@@ -8,20 +8,20 @@ use uuid::Uuid;
 
 use loontail_core::auth::AuthUser;
 use loontail_core::error::{AppError, AppResult};
-use loontail_core::models::{UserDto, UserStatus};
+use loontail_core::models::{PresenceStatus, UserDto};
 use loontail_core::AppState;
 use loontail_core::Metrics;
 use loontail_core::ServerEvent;
 
 /// Collapse a stored status to `offline` once the last heartbeat exceeds the timeout.
 pub fn effective_status(
-    stored: UserStatus,
+    stored: PresenceStatus,
     last_heartbeat: DateTime<Utc>,
     timeout: StdDuration,
-) -> UserStatus {
+) -> PresenceStatus {
     let timeout = Duration::from_std(timeout).unwrap_or_else(|_| Duration::seconds(60));
     if Utc::now().signed_duration_since(last_heartbeat) > timeout {
-        UserStatus::Offline
+        PresenceStatus::Offline
     } else {
         stored
     }
@@ -31,12 +31,12 @@ pub fn effective_status(
 /// in-world pointing at that world, so the viewer can ask to join. Host-only
 /// worlds never pass a `guest_world_id` here, so the guest stays plain online.
 fn derive_friend_status(
-    base: UserStatus,
+    base: PresenceStatus,
     guest_world_id: Option<Uuid>,
     current_world_session_id: Option<Uuid>,
-) -> (UserStatus, Option<Uuid>) {
+) -> (PresenceStatus, Option<Uuid>) {
     match guest_world_id {
-        Some(world) if base != UserStatus::Offline => (UserStatus::InWorld, Some(world)),
+        Some(world) if base != PresenceStatus::Offline => (PresenceStatus::InWorld, Some(world)),
         _ if base.is_in_world() => (base, current_world_session_id),
         _ => (base, None),
     }
@@ -48,7 +48,7 @@ struct PresenceRow {
     last_heartbeat_at: DateTime<Utc>,
 }
 
-pub async fn effective_status_for(state: &AppState, user_id: Uuid) -> AppResult<UserStatus> {
+pub async fn effective_status_for(state: &AppState, user_id: Uuid) -> AppResult<PresenceStatus> {
     let row = sqlx::query_as::<_, PresenceRow>(
         "SELECT status, last_heartbeat_at FROM presence WHERE user_id = $1",
     )
@@ -58,18 +58,18 @@ pub async fn effective_status_for(state: &AppState, user_id: Uuid) -> AppResult<
 
     Ok(match row {
         Some(row) => effective_status(
-            UserStatus::from_db(&row.status),
+            PresenceStatus::from_db(&row.status),
             row.last_heartbeat_at,
             state.config.heartbeat_timeout,
         ),
-        None => UserStatus::Offline,
+        None => PresenceStatus::Offline,
     })
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusResponse {
-    pub status: UserStatus,
+    pub status: PresenceStatus,
 }
 
 /// `POST /presence/heartbeat` — refresh liveness. Returns the effective status.
@@ -163,7 +163,7 @@ pub async fn set_status(
     auth: AuthUser,
     Json(body): Json<SetStatusRequest>,
 ) -> AppResult<Json<StatusResponse>> {
-    let status = UserStatus::from_client(&body.status)
+    let status = PresenceStatus::from_client(&body.status)
         .ok_or_else(|| AppError::BadRequest("status must be online, inWorld or joinable".into()))?;
 
     // Entering a world requires it to be an open world owned by this user.
@@ -224,8 +224,6 @@ struct FriendPresenceRow {
     id: Uuid,
     minecraft_uuid: Option<String>,
     username: String,
-    avatar_url: Option<String>,
-    skin_hash: Option<String>,
     status: Option<String>,
     last_heartbeat_at: Option<DateTime<Utc>>,
     current_world_session_id: Option<Uuid>,
@@ -243,7 +241,7 @@ struct FriendPresenceRow {
 pub struct FriendPresence {
     #[serde(flatten)]
     pub user: UserDto,
-    pub status: UserStatus,
+    pub status: PresenceStatus,
     pub current_world_session_id: Option<Uuid>,
     /// The friend's reported Minecraft version + loader; both must match the
     /// viewer's own to allow joins/invites. Null until the friend bootstraps.
@@ -261,8 +259,6 @@ pub async fn friends_with_presence(
             u.id,
             u.minecraft_uuid,
             u.username,
-            u.avatar_url,
-            u.skin_hash,
             p.status,
             p.last_heartbeat_at,
             p.current_world_session_id,
@@ -298,9 +294,9 @@ pub async fn friends_with_presence(
         .map(|row| {
             let base = match (row.status, row.last_heartbeat_at) {
                 (Some(status), Some(heartbeat)) => {
-                    effective_status(UserStatus::from_db(&status), heartbeat, timeout)
+                    effective_status(PresenceStatus::from_db(&status), heartbeat, timeout)
                 }
-                _ => UserStatus::Offline,
+                _ => PresenceStatus::Offline,
             };
             let (status, current_world_session_id) =
                 derive_friend_status(base, row.guest_world_id, row.current_world_session_id);
@@ -309,8 +305,6 @@ pub async fn friends_with_presence(
                     id: row.id,
                     minecraft_uuid: row.minecraft_uuid,
                     username: row.username,
-                    avatar_url: row.avatar_url,
-                    skin_hash: row.skin_hash,
                 },
                 status,
                 current_world_session_id,
@@ -336,7 +330,7 @@ pub async fn friends_presence(
 mod tests {
     use super::{derive_friend_status, effective_status};
     use chrono::{Duration, Utc};
-    use loontail_core::models::UserStatus;
+    use loontail_core::models::PresenceStatus;
     use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
@@ -345,8 +339,8 @@ mod tests {
         let timeout = StdDuration::from_secs(60);
         let fresh = Utc::now() - Duration::seconds(30);
         assert_eq!(
-            effective_status(UserStatus::Joinable, fresh, timeout),
-            UserStatus::Joinable
+            effective_status(PresenceStatus::Joinable, fresh, timeout),
+            PresenceStatus::Joinable
         );
     }
 
@@ -355,8 +349,8 @@ mod tests {
         let timeout = StdDuration::from_secs(60);
         let stale = Utc::now() - Duration::seconds(120);
         assert_eq!(
-            effective_status(UserStatus::InWorld, stale, timeout),
-            UserStatus::Offline
+            effective_status(PresenceStatus::InWorld, stale, timeout),
+            PresenceStatus::Offline
         );
     }
 
@@ -366,8 +360,8 @@ mod tests {
         let timeout = StdDuration::from_secs(60);
         let boundary = Utc::now() - Duration::seconds(59);
         assert_eq!(
-            effective_status(UserStatus::Online, boundary, timeout),
-            UserStatus::Online
+            effective_status(PresenceStatus::Online, boundary, timeout),
+            PresenceStatus::Online
         );
     }
 
@@ -378,8 +372,8 @@ mod tests {
         // pointing at the guest world (not their own current_world_session_id).
         let other = Uuid::new_v4();
         assert_eq!(
-            derive_friend_status(UserStatus::Online, Some(world), Some(other)),
-            (UserStatus::InWorld, Some(world))
+            derive_friend_status(PresenceStatus::Online, Some(world), Some(other)),
+            (PresenceStatus::InWorld, Some(world))
         );
     }
 
@@ -388,8 +382,8 @@ mod tests {
         let world = Uuid::new_v4();
         // An offline friend never surfaces a joinable world even if a stale guest row exists.
         assert_eq!(
-            derive_friend_status(UserStatus::Offline, Some(world), None),
-            (UserStatus::Offline, None)
+            derive_friend_status(PresenceStatus::Offline, Some(world), None),
+            (PresenceStatus::Offline, None)
         );
     }
 
@@ -397,16 +391,16 @@ mod tests {
     fn derive_friend_status_in_world_without_guest_keeps_own_world() {
         let own = Uuid::new_v4();
         assert_eq!(
-            derive_friend_status(UserStatus::InWorld, None, Some(own)),
-            (UserStatus::InWorld, Some(own))
+            derive_friend_status(PresenceStatus::InWorld, None, Some(own)),
+            (PresenceStatus::InWorld, Some(own))
         );
     }
 
     #[test]
     fn derive_friend_status_online_without_guest_has_no_world() {
         assert_eq!(
-            derive_friend_status(UserStatus::Online, None, None),
-            (UserStatus::Online, None)
+            derive_friend_status(PresenceStatus::Online, None, None),
+            (PresenceStatus::Online, None)
         );
     }
 }

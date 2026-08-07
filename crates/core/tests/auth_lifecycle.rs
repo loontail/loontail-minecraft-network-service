@@ -172,7 +172,7 @@ async fn yggdrasil_cleanup_removes_only_expired(pool: PgPool) {
         .unwrap();
     // Insert an already-expired pair directly.
     sqlx::query(
-        "INSERT INTO yggdrasil_tokens (user_id, access_token, client_token, expires_at)
+        "INSERT INTO yggdrasil_tokens (user_id, access_token_hash, client_token, expires_at)
          VALUES ($1, $2, $3, now() - interval '1 hour')",
     )
     .bind(uid)

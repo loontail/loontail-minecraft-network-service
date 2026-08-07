@@ -1,23 +1,21 @@
 //! Admin catalog CRUD (`AdminUser`-guarded): create/update/delete clients,
 //! keywords, and servers; publish/unpublish; and media management.
 
-use axum::body::Bytes;
-use axum::extract::{Multipart, OriginalUri, Path, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::AssertSqlSafe;
 use uuid::Uuid;
 
 use loontail_core::auth::AdminUser;
-use loontail_core::error::{
-    is_foreign_key_violation, is_unique_violation as unique_violation, AppError, AppResult,
-};
+use loontail_core::error::{found, is_foreign_key_violation, slug_conflict, AppError, AppResult};
+use loontail_core::storage::read_capped_upload;
 use loontail_core::AppState;
 
-use crate::dto::ClientAdminList;
-use crate::query::CatalogQuery;
-use crate::store;
+use crate::dto::{CatalogQuery, ClientAdminList};
+use crate::storage;
 use crate::{repo, MAX_MEDIA_UPLOAD_BYTES};
 
 #[derive(Debug, Deserialize)]
@@ -30,15 +28,42 @@ pub struct UpsertClient {
     pub forge_version: Option<String>,
     pub fabric_version: Option<String>,
     pub runtime_version: Option<String>,
-    pub bundle_slug: Option<String>,
+    /// The bundle to own. ABSENT means "keep whatever this build is already linked
+    /// to" (a pure slug rename must not retarget); an explicit value (including
+    /// `null`) re-resolves the link. See [`update_client`].
+    #[serde(default, deserialize_with = "double_option")]
+    pub bundle_slug: Option<Option<String>>,
+    /// Absent leaves the existing display order untouched — the column is only ever
+    /// set deliberately, so a save that omits it must not silently reset it to 0.
     #[serde(default)]
-    pub sort_order: i32,
+    pub sort_order: Option<i32>,
     /// When `Some(true)`, publish on create; absent/`false` leaves a draft. Only
     /// consulted by [`create_client`].
     #[serde(default)]
     pub publish: Option<bool>,
     #[serde(default)]
     pub locales: Vec<ClientLocaleInput>,
+    /// Opt in to making `locales` the complete set: locales absent from the payload
+    /// are deleted. Default `false` upserts only what was sent, so a single-locale
+    /// save cannot destroy the other translations.
+    #[serde(default)]
+    pub replace_locales: bool,
+    /// Opt in to destroying a bundle that this update strands. Default `false` leaves
+    /// an unreferenced bundle (and its uploaded files) in place, reported back as
+    /// `orphanedBundleSlug`.
+    #[serde(default)]
+    pub delete_orphaned_bundle: bool,
+}
+
+/// Distinguish "field absent" from "field present and null" — `Option<Option<T>>`
+/// where the outer layer is presence. serde's `#[serde(default)]` alone collapses
+/// both to `None`.
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,9 +80,8 @@ pub struct ClientLocaleInput {
 pub async fn list_clients(
     State(state): State<AppState>,
     _admin: AdminUser,
-    OriginalUri(uri): OriginalUri,
+    query: CatalogQuery,
 ) -> AppResult<Json<ClientAdminList>> {
-    let query = CatalogQuery::parse(uri.query().unwrap_or(""));
     let clients = repo::list_clients_admin(&state.pool, &query).await?;
     Ok(Json(ClientAdminList { clients }))
 }
@@ -77,37 +101,35 @@ pub async fn create_client(
     };
 
     let mut tx = state.pool.begin().await?;
-    let id = sqlx::query_scalar::<_, Uuid>(&format!(
+    // `bundle_slug` is deliberately absent here: `link_owned_bundle` below is its only
+    // writer, so binding it twice would just be a dead write.
+    let id = sqlx::query_scalar::<_, Uuid>(AssertSqlSafe(format!(
         "INSERT INTO catalog_clients \
          (slug, available, minecraft_version, forge_version, fabric_version, \
-          runtime_version, bundle_slug, sort_order, published_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,{published_setter}) RETURNING id"
-    ))
+          runtime_version, sort_order, published_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7, 0),{published_setter}) RETURNING id"
+    )))
     .bind(&body.slug)
     .bind(body.available)
     .bind(&body.minecraft_version)
     .bind(&body.forge_version)
     .bind(&body.fabric_version)
     .bind(&body.runtime_version)
-    .bind(&body.bundle_slug)
     .bind(body.sort_order)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| {
-        if unique_violation(&e) {
-            AppError::Conflict("client slug already exists".into())
-        } else {
-            e.into()
-        }
-    })?;
+    .map_err(slug_conflict("client"))?;
 
     write_client_locales(&mut tx, id, &body.locales).await?;
 
+    let owned_slug = requested_bundle_slug(&body)
+        .unwrap_or_else(|| body.slug.trim())
+        .to_string();
     let LinkedBundle {
         bundle_id: _,
         effective_slug,
         provisioned,
-    } = link_owned_bundle(&mut tx, id, &body).await?;
+    } = link_owned_bundle(&mut tx, id, &owned_slug, &body.locales).await?;
 
     tx.commit().await?;
 
@@ -133,31 +155,35 @@ struct LinkedBundle {
     provisioned: bool,
 }
 
-/// Find-or-create the client's owned bundle (1:1) and link it, inside the caller's
-/// tx so a provision failure rolls the whole upsert back. The effective slug
-/// defaults to the client slug; an explicit non-empty `bundle_slug` overrides it
-/// (and may reuse a pre-existing bundle). `bundle_id` is re-resolved from the
-/// effective slug on every call. The caller creates the on-disk dir after commit
-/// when `provisioned` is true.
+/// The bundle slug this payload explicitly asks for: `None` when the field is absent
+/// OR present-but-null/blank. Callers distinguish those two cases via
+/// `body.bundle_slug.is_some()`.
+fn requested_bundle_slug(body: &UpsertClient) -> Option<&str> {
+    body.bundle_slug
+        .as_ref()
+        .and_then(|inner| inner.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Find-or-create the bundle at `effective_slug` (1:1 with the client) and link it,
+/// inside the caller's tx so a provision failure rolls the whole upsert back.
+/// `locales` only supplies a display name for a freshly provisioned bundle. This is
+/// the single writer of `catalog_clients.bundle_id`/`bundle_slug`. The caller creates
+/// the on-disk dir after commit when `provisioned` is true.
 async fn link_owned_bundle(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: Uuid,
-    body: &UpsertClient,
+    effective_slug: &str,
+    locales: &[ClientLocaleInput],
 ) -> AppResult<LinkedBundle> {
-    let effective_slug = body
-        .bundle_slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| body.slug.trim())
-        .to_string();
+    let effective_slug = effective_slug.to_string();
 
     let (bundle_id, provisioned) =
         match loontail_bundles::find_bundle_id_by_slug(&mut **tx, &effective_slug).await? {
             Some(existing) => (existing, false),
             None => {
-                let name = body
-                    .locales
+                let name = locales
                     .first()
                     .map(|l| l.title.clone())
                     .unwrap_or_else(|| effective_slug.clone());
@@ -180,6 +206,17 @@ async fn link_owned_bundle(
     })
 }
 
+/// Full-column replace of a build's own fields, with three deliberately
+/// non-destructive defaults:
+/// - `bundleSlug` ABSENT keeps the current bundle link (only an explicit value
+///   retargets), so renaming a build never strands its uploaded files;
+/// - `sortOrder` absent keeps the stored order;
+/// - `locales` upserts what was sent and keeps the rest unless `replaceLocales` is
+///   `true`.
+///
+/// A retarget that strands the previous bundle deletes it only when nothing references
+/// it AND (it holds no artifacts OR `deleteOrphanedBundle` is `true`); otherwise the
+/// bundle survives and its slug comes back as `orphanedBundleSlug`.
 pub async fn update_client(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -201,8 +238,8 @@ pub async fn update_client(
 
     sqlx::query(
         "UPDATE catalog_clients SET slug=$2, available=$3, minecraft_version=$4, \
-         forge_version=$5, fabric_version=$6, runtime_version=$7, bundle_slug=$8, \
-         sort_order=$9, updated_at=now() WHERE id=$1",
+         forge_version=$5, fabric_version=$6, runtime_version=$7, \
+         sort_order=COALESCE($8, sort_order), updated_at=now() WHERE id=$1",
     )
     .bind(id)
     .bind(&body.slug)
@@ -211,53 +248,35 @@ pub async fn update_client(
     .bind(&body.forge_version)
     .bind(&body.fabric_version)
     .bind(&body.runtime_version)
-    .bind(&body.bundle_slug)
     .bind(body.sort_order)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        if unique_violation(&e) {
-            AppError::Conflict("client slug already exists".into())
-        } else {
-            e.into()
-        }
-    })?;
-    if !body.locales.is_empty() {
-        sqlx::query("DELETE FROM catalog_client_locales WHERE client_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        write_client_locales(&mut tx, id, &body.locales).await?;
+    .map_err(slug_conflict("client"))?;
+
+    write_client_locales(&mut tx, id, &body.locales).await?;
+    if body.replace_locales {
+        let submitted: Vec<&str> = body.locales.iter().map(|l| l.locale.as_str()).collect();
+        sqlx::query(
+            "DELETE FROM catalog_client_locales WHERE client_id = $1 AND locale <> ALL($2::text[])",
+        )
+        .bind(id)
+        .bind(&submitted)
+        .execute(&mut *tx)
+        .await?;
     }
 
-    // Re-resolve and link the owned bundle as create does: gives a null-bundle build a
-    // bundle and re-points `bundle_id` from the effective slug whenever the slug changed.
+    let owned_slug = resolve_owned_bundle_slug(&mut tx, &body, old_bundle_id).await?;
     let LinkedBundle {
         bundle_id: new_bundle_id,
         effective_slug,
         provisioned,
-    } = link_owned_bundle(&mut tx, id, &body).await?;
+    } = link_owned_bundle(&mut tx, id, &owned_slug, &body.locales).await?;
 
-    // When the slug change re-pointed to a different bundle, the old bundle is stranded
-    // by the `ON DELETE SET NULL` FK. Tear it down in the same tx (row + CASCADE
-    // artifacts), but only when nothing else still links to it (an explicit `bundleSlug`
-    // can be shared across builds). The on-disk dir is removed best-effort after commit.
-    let orphaned_slug = match old_bundle_id {
+    let stranded = match old_bundle_id {
         Some(old) if old != new_bundle_id => {
-            let still_referenced: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM catalog_clients WHERE bundle_id = $1")
-                    .bind(old)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if still_referenced == 0 {
-                let slug = loontail_bundles::bundle_slug_by_id(&mut *tx, old).await?;
-                loontail_bundles::delete_bundle_row(&mut *tx, old).await?;
-                slug
-            } else {
-                None
-            }
+            strand_old_bundle(&mut tx, old, body.delete_orphaned_bundle).await?
         }
-        _ => None,
+        _ => Stranded::None,
     };
 
     tx.commit().await?;
@@ -266,11 +285,80 @@ pub async fn update_client(
         loontail_bundles::ensure_bundle_dir(&state.config.bundles.storage_root, &effective_slug)?;
     }
 
-    if let Some(slug) = orphaned_slug {
-        loontail_bundles::remove_bundle_dir(&state.config.bundles.storage_root, &slug);
+    let orphaned = match stranded {
+        Stranded::Deleted(slug) => {
+            loontail_bundles::remove_bundle_dir(&state.config.bundles.storage_root, &slug);
+            None
+        }
+        Stranded::Kept(slug) => Some(slug),
+        Stranded::None => None,
+    };
+
+    Ok(Json(json!({ "id": id, "orphanedBundleSlug": orphaned })))
+}
+
+/// Which bundle slug this update should own. An explicit `bundleSlug` wins; an
+/// explicit null (or blank) re-provisions from the client slug, matching create; an
+/// ABSENT field keeps whatever bundle the row is already linked to, so a pure slug
+/// rename cannot retarget and strand the build's uploaded files.
+async fn resolve_owned_bundle_slug(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    body: &UpsertClient,
+    old_bundle_id: Option<Uuid>,
+) -> AppResult<String> {
+    if let Some(explicit) = requested_bundle_slug(body) {
+        return Ok(explicit.to_string());
+    }
+    let client_slug = body.slug.trim().to_string();
+    if body.bundle_slug.is_some() {
+        return Ok(client_slug);
+    }
+    match old_bundle_id {
+        Some(old) => Ok(loontail_bundles::bundle_slug_by_id(&mut **tx, old)
+            .await?
+            .unwrap_or(client_slug)),
+        None => Ok(client_slug),
+    }
+}
+
+/// Fate of a bundle a retarget left behind.
+enum Stranded {
+    /// Row deleted in the tx (CASCADE dropped its artifacts); caller removes the dir.
+    Deleted(String),
+    /// Left in place because it still holds artifacts and the caller did not opt in.
+    Kept(String),
+    /// Nothing was stranded (still referenced, or no link moved).
+    None,
+}
+
+/// Decide and apply what happens to the bundle a retarget just unlinked. A bundle
+/// another build still references is never touched. An unreferenced one is deleted
+/// when it is empty or when the caller explicitly opted in — otherwise it survives so
+/// gigabytes of uploads are never destroyed by an implicit slug rename.
+async fn strand_old_bundle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    old: Uuid,
+    delete_orphaned: bool,
+) -> AppResult<Stranded> {
+    let still_referenced: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM catalog_clients WHERE bundle_id = $1")
+            .bind(old)
+            .fetch_one(&mut **tx)
+            .await?;
+    if still_referenced > 0 {
+        return Ok(Stranded::None);
     }
 
-    Ok(Json(json!({ "id": id })))
+    let Some(slug) = loontail_bundles::bundle_slug_by_id(&mut **tx, old).await? else {
+        return Ok(Stranded::None);
+    };
+    let artifacts = loontail_bundles::count_artifacts(&mut **tx, old).await?;
+    if delete_orphaned || artifacts == 0 {
+        loontail_bundles::delete_bundle_row(&mut **tx, old).await?;
+        Ok(Stranded::Deleted(slug))
+    } else {
+        Ok(Stranded::Kept(slug))
+    }
 }
 
 async fn write_client_locales(
@@ -385,6 +473,15 @@ impl PublishableTable {
             PublishableTable::Servers => "catalog_servers",
         }
     }
+
+    /// The noun the 404 names, so a missing id says which kind of row was missing.
+    fn entity(self) -> &'static str {
+        match self {
+            PublishableTable::Clients => "client",
+            PublishableTable::Keywords => "keyword",
+            PublishableTable::Servers => "server",
+        }
+    }
 }
 
 async fn set_published(
@@ -393,45 +490,22 @@ async fn set_published(
     id: Uuid,
     published: bool,
 ) -> AppResult<Json<Value>> {
+    let entity = table.entity();
     let table = table.name();
     let setter = if published {
         "published_at = now()"
     } else {
         "published_at = NULL"
     };
-    let affected = sqlx::query(&format!(
+    let affected = sqlx::query(AssertSqlSafe(format!(
         "UPDATE {table} SET {setter}, updated_at = now() WHERE id = $1"
-    ))
+    )))
     .bind(id)
     .execute(&state.pool)
     .await?
     .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("not found".into()));
-    }
+    found(affected, entity)?;
     Ok(Json(json!({ "id": id, "published": published })))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AttachMedia {
-    pub role: String,
-    pub url: String,
-    pub ext: Option<String>,
-    pub name: Option<String>,
-    pub hash: Option<String>,
-    pub mime: Option<String>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-    pub size: Option<i32>,
-    #[serde(default = "default_formats")]
-    pub formats: Value,
-    #[serde(default)]
-    pub sort_order: i32,
-}
-
-fn default_formats() -> Value {
-    json!({})
 }
 
 const MEDIA_ROLES: [&str; 4] = ["poster", "background", "titleImage", "screenshot"];
@@ -439,42 +513,6 @@ const MEDIA_ROLES: [&str; 4] = ["poster", "background", "titleImage", "screensho
 /// Roles that occupy a single slot per client: a new upload replaces the existing
 /// row (and unlinks its file). `screenshot` is the only multi-row role.
 const SINGULAR_ROLES: [&str; 3] = ["poster", "background", "titleImage"];
-
-/// Register an externally-hosted media URL without uploading bytes.
-pub async fn attach_media(
-    State(state): State<AppState>,
-    _admin: AdminUser,
-    Path(client_id): Path<Uuid>,
-    Json(body): Json<AttachMedia>,
-) -> AppResult<(StatusCode, Json<Value>)> {
-    if !MEDIA_ROLES.contains(&body.role.as_str()) {
-        return Err(AppError::BadRequest(format!(
-            "invalid media role '{}'",
-            body.role
-        )));
-    }
-    require_client(&state, client_id).await?;
-    let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO catalog_media \
-         (client_id, role, url, ext, name, hash, mime, width, height, size, formats, sort_order) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id",
-    )
-    .bind(client_id)
-    .bind(&body.role)
-    .bind(&body.url)
-    .bind(&body.ext)
-    .bind(&body.name)
-    .bind(&body.hash)
-    .bind(&body.mime)
-    .bind(body.width)
-    .bind(body.height)
-    .bind(body.size)
-    .bind(&body.formats)
-    .bind(body.sort_order)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
-}
 
 async fn require_client(state: &AppState, client_id: Uuid) -> AppResult<()> {
     let exists: bool =
@@ -522,15 +560,15 @@ fn sniff_image(bytes: &[u8]) -> Option<ImageKind> {
     }
 }
 
-/// Best-effort pixel dimensions: only PNG is decoded (IHDR), other formats return
-/// `None`.
-fn image_dimensions(bytes: &[u8], ext: &str) -> (Option<i32>, Option<i32>) {
-    if ext == "png" && bytes.len() >= 24 && &bytes[12..16] == b"IHDR" {
-        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-        (Some(w as i32), Some(h as i32))
-    } else {
-        (None, None)
+/// Pixel dimensions of a PNG, `None` for every other accepted format (JPEG, WebP and
+/// GIF are stored with NULL width/height). Delegates to the workspace's tested PNG
+/// header parser, which also validates the 8-byte signature and the IHDR length — the
+/// inlined copy this replaces checked neither, so a hostile non-PNG whose 13th byte
+/// happened to spell IHDR had its "dimensions" recorded.
+fn png_dimensions(bytes: &[u8]) -> (Option<i32>, Option<i32>) {
+    match loontail_yggdrasil_protocol::png::parse_png_header(bytes) {
+        Ok((width, height)) => (Some(width as i32), Some(height as i32)),
+        Err(_) => (None, None),
     }
 }
 
@@ -545,7 +583,7 @@ pub async fn upload_media(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     require_client(&state, client_id).await?;
 
-    let UploadMediaFields { file, role } = read_media_upload(multipart).await?;
+    let (file, role) = read_capped_upload(multipart, MAX_MEDIA_UPLOAD_BYTES, "role").await?;
     let role = role.ok_or_else(|| AppError::BadRequest("missing role field".into()))?;
     if !MEDIA_ROLES.contains(&role.as_str()) {
         return Err(AppError::BadRequest(format!("invalid media role '{role}'")));
@@ -555,21 +593,21 @@ pub async fn upload_media(
     let kind = sniff_image(&file).ok_or_else(|| {
         AppError::BadRequest("unsupported image type — use PNG, JPG, WebP, or GIF".into())
     })?;
-    let (width, height) = image_dimensions(&file, kind.ext);
+    let (width, height) = png_dimensions(&file);
 
     let client_hex = client_id.simple().to_string();
-    let revision = store::revision_hex();
-    let disk_path = store::disk_path(
+    let revision = storage::revision_hex();
+    let disk_path = storage::disk_path(
         &state.config.catalog.storage_root,
         &client_hex,
         &role,
         &revision,
         kind.ext,
     );
-    let url = store::public_url(&client_hex, &role, &revision, kind.ext);
+    let url = storage::public_url(&client_hex, &role, &revision, kind.ext);
     let size = file.len() as i32;
 
-    store::write_file(&disk_path, &file)
+    storage::write_file(&disk_path, &file)
         .await
         .map_err(|err| AppError::Internal(anyhow::anyhow!("write catalog media: {err}")))?;
 
@@ -584,7 +622,7 @@ pub async fn upload_media(
         .await?;
         for old in old_urls {
             if let Some(path) = url_to_disk_path(&state.config.catalog.storage_root, &old) {
-                store::unlink_quiet(&path).await;
+                storage::unlink_quiet(&path).await;
             }
         }
     }
@@ -652,7 +690,7 @@ pub async fn delete_media(
     .await?;
     let url = url.ok_or_else(|| AppError::NotFound("media not found".into()))?;
     if let Some(path) = url_to_disk_path(&state.config.catalog.storage_root, &url) {
-        store::unlink_quiet(&path).await;
+        storage::unlink_quiet(&path).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -665,59 +703,6 @@ fn url_to_disk_path(storage_root: &str, url: &str) -> Option<std::path::PathBuf>
         return None;
     }
     Some(std::path::Path::new(storage_root).join(rel))
-}
-
-struct UploadMediaFields {
-    file: Option<Bytes>,
-    role: Option<String>,
-}
-
-/// Drain the multipart body into the `file` bytes and the `role` text. The `file`
-/// field is read chunk by chunk and aborted once it crosses
-/// [`MAX_MEDIA_UPLOAD_BYTES`], so an oversized upload is never fully buffered.
-async fn read_media_upload(mut multipart: Multipart) -> AppResult<UploadMediaFields> {
-    let mut file: Option<Bytes> = None;
-    let mut role: Option<String> = None;
-
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| AppError::BadRequest(format!("malformed multipart: {err}")))?
-    {
-        match field.name() {
-            Some("file") => {
-                let mut buf: Vec<u8> = Vec::with_capacity(MAX_MEDIA_UPLOAD_BYTES.min(64 * 1024));
-                while let Some(chunk) = field
-                    .chunk()
-                    .await
-                    .map_err(|err| AppError::BadRequest(format!("reading file: {err}")))?
-                {
-                    if buf.len() + chunk.len() > MAX_MEDIA_UPLOAD_BYTES {
-                        return Err(AppError::BadRequest(
-                            "image is too large (max 32 MB)".into(),
-                        ));
-                    }
-                    buf.extend_from_slice(&chunk);
-                }
-                file = Some(Bytes::from(buf));
-            }
-            Some("role") => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|err| AppError::BadRequest(format!("reading role: {err}")))?;
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    role = Some(trimmed.to_string());
-                }
-            }
-            _ => {
-                let _ = field.bytes().await;
-            }
-        }
-    }
-
-    Ok(UploadMediaFields { file, role })
 }
 
 #[derive(Debug, Deserialize)]
@@ -749,13 +734,7 @@ pub async fn create_keyword(
     .bind(&body.slug)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| {
-        if unique_violation(&e) {
-            AppError::Conflict("keyword slug already exists".into())
-        } else {
-            e.into()
-        }
-    })?;
+    .map_err(slug_conflict("keyword"))?;
     for l in &body.locales {
         sqlx::query(
             "INSERT INTO catalog_keyword_locales (keyword_id, locale, title) \
@@ -782,9 +761,7 @@ pub async fn delete_keyword(
         .execute(&state.pool)
         .await?
         .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("keyword not found".into()));
-    }
+    found(affected, "keyword")?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -827,13 +804,7 @@ pub async fn create_server(
     .bind(&body.address)
     .fetch_one(&state.pool)
     .await
-    .map_err(|e| {
-        if unique_violation(&e) {
-            AppError::Conflict("server slug already exists".into())
-        } else {
-            e.into()
-        }
-    })?;
+    .map_err(slug_conflict("server"))?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -852,17 +823,9 @@ pub async fn update_server(
     .bind(&body.address)
     .execute(&state.pool)
     .await
-    .map_err(|e| {
-        if unique_violation(&e) {
-            AppError::Conflict("server slug already exists".into())
-        } else {
-            e.into()
-        }
-    })?
+    .map_err(slug_conflict("server"))?
     .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("server not found".into()));
-    }
+    found(affected, "server")?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -876,9 +839,7 @@ pub async fn delete_server(
         .execute(&state.pool)
         .await?
         .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("server not found".into()));
-    }
+    found(affected, "server")?;
     Ok(StatusCode::NO_CONTENT)
 }
 

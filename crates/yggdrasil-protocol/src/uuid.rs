@@ -1,6 +1,6 @@
 //! Minecraft profile UUID conversion. `minecraft_uuid` is stored dashed canonical;
 //! `profile_uuid` is stored 32-char undashed lowercase. These helpers are the only
-//! sanctioned conversion path and mirror `@loontail/yggdrasil-core`'s `uuid.ts`.
+//! sanctioned conversion path and mirror the launcher's `src/shared/yggdrasil/uuid.ts`.
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum UuidError {

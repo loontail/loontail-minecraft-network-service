@@ -24,8 +24,8 @@ use loontail_core::AppState;
 /// provision and tear down a bundle inside its own transaction so deleting a build
 /// never orphans its bundle.
 pub use repo::{
-    bundle_slug_by_id, delete_bundle_row, ensure_bundle_dir, find_bundle_id_by_slug,
-    provision_bundle, provision_bundle_row, remove_bundle_dir,
+    bundle_slug_by_id, count_artifacts, delete_bundle_row, ensure_bundle_dir,
+    find_bundle_id_by_slug, provision_bundle, provision_bundle_row, remove_bundle_dir,
 };
 
 /// Hard cap on a single bundle upload (10 GiB). Enforced both as axum's

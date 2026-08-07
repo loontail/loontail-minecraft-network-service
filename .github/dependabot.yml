@@ -1,0 +1,34 @@
+version: 2
+
+# Actions are pinned to commit SHAs (see the `# vX.Y.Z` comments in
+# .github/workflows/). Dependabot is what keeps those SHAs from going stale: it
+# moves them through a reviewable PR instead of a tag repoint nobody sees.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /admin-ui
+    schedule:
+      interval: weekly
+    groups:
+      admin-ui:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

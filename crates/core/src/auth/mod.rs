@@ -18,13 +18,14 @@ use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::User;
+use crate::request_log::{PrincipalSlot, ResolvedPrincipal};
 use crate::state::AppState;
 
 pub mod csrf;
@@ -42,7 +43,7 @@ pub use yggdrasil::{
 /// returned to the client once; only its hash is ever persisted.
 pub fn generate_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
@@ -209,16 +210,51 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let (token, source) =
-            session_token(parts, &state.config.admin.cookie_name).ok_or(AppError::Unauthorized)?;
+        let (token, source) = match session_token(parts, &state.config.admin.cookie_name) {
+            Some(pair) => pair,
+            None => return Err(reject(parts, AppError::Unauthorized)),
+        };
         // why: a cross-site form post can ride the session cookie but cannot read it
         // to forge the double-submit header, so CSRF is required only here.
+        //
+        // why (no `reject`): the slot stays EMPTY on this branch so `request_log_capture::capture`
+        // resolves the presented cookie itself. Publishing `anon` here would log the
+        // ridden session as anonymous and destroy the one audit record that identifies
+        // the victim — and unlike the branches below, no lookup has failed yet.
         if source == TokenSource::Cookie && is_mutating(&parts.method) {
             verify_csrf(&parts.headers)?;
         }
-        let user = user_from_token(&state.pool, &token).await?;
+        let user = match user_from_token(&state.pool, &token).await {
+            Ok(user) => user,
+            Err(err) => return Err(reject(parts, err)),
+        };
+        publish_principal(
+            parts,
+            ResolvedPrincipal {
+                user_id: Some(user.id),
+                auth_kind: if user.is_admin { "admin" } else { "session" },
+            },
+        );
         Ok(AuthUser { user })
     }
+}
+
+/// Hand the resolved principal to the request-log middleware so it reuses this
+/// lookup instead of repeating the same `sessions JOIN users` query.
+fn publish_principal(parts: &Parts, principal: ResolvedPrincipal) {
+    if let Some(slot) = parts.extensions.get::<PrincipalSlot>() {
+        slot.set(principal);
+    }
+}
+
+/// Record a request that resolved to NO principal as anonymous before returning `err`,
+/// so the middleware does not re-run a lookup that just came back empty (or a lookup
+/// there is no credential for at all). Only for those two cases — a rejection that
+/// happens while the presented credential is still viable must leave the slot empty so
+/// the middleware attributes it.
+fn reject(parts: &Parts, err: AppError) -> AppError {
+    publish_principal(parts, ResolvedPrincipal::anon());
+    err
 }
 
 /// A valid [`AuthUser`] whose account carries `is_admin`.
@@ -241,6 +277,8 @@ impl FromRequestParts<AppState> for AdminUser {
     ) -> Result<Self, Self::Rejection> {
         let AuthUser { user } = AuthUser::from_request_parts(parts, state).await?;
         if !user.is_admin {
+            // The slot already carries `session` from `AuthUser`; a forbidden request is
+            // still an identified one, so attribution stays on that user.
             return Err(AppError::Forbidden);
         }
         Ok(AdminUser { user })

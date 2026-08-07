@@ -1,6 +1,6 @@
 //! The Yggdrasil textures-property payload. Field order is fixed via serde structs
 //! (never a map) because the golden-vector test asserts a byte-identical base64
-//! `value` against the reference Node output (`@loontail/yggdrasil-core`). The
+//! `value` against the reference Node output (the launcher's `src/shared/yggdrasil/`). The
 //! `value` is the base64 of this JSON; the signature (RSA-SHA1) is computed over the
 //! base64 string's bytes in the `yggdrasil` crate (this pure crate never touches rsa).
 

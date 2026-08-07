@@ -4,7 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   type FileViewProps,
+  hasSelectable,
   REVEAL,
+  SelectAllCheckbox,
   useLongPress,
 } from "@/features/builds/FileList";
 import type { TreeEntry } from "@/features/builds/fileTree";
@@ -12,26 +14,44 @@ import { cn } from "@/shared/lib/cn";
 import { formatBytes } from "@/shared/lib/format";
 
 // Compact cards have no inline download-once toggle (unlike the list's Switch
-// column); it is reached via the context menu, so `onToggleDownloadOnce` is unused.
+// column); it is reached via the context menu, hence the omitted prop.
 export function FileGrid({
   entries,
   selectedKeys,
   onToggle,
+  onToggleAll,
+  allSelected,
+  someSelected,
   onAction,
   onOpenMenu,
-}: FileViewProps) {
+}: Omit<FileViewProps, "onToggleDownloadOnce">) {
   return (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
-      {entries.map((entry) => (
-        <FileCard
-          key={entry.relativePath}
-          entry={entry}
-          selected={selectedKeys.has(entry.relativePath)}
-          onToggle={onToggle}
-          onAction={onAction}
-          onOpenMenu={onOpenMenu}
-        />
-      ))}
+    <div className="space-y-3">
+      {/* The cards carry no header row, so select-all needs its own toolbar here.
+          A folder-only listing has nothing to select, so the control is omitted
+          rather than offered in a state it can never reach. */}
+      {hasSelectable(entries) ? (
+        <div className="flex items-center gap-2 px-1">
+          <SelectAllCheckbox
+            allSelected={allSelected}
+            someSelected={someSelected}
+            onToggleAll={onToggleAll}
+          />
+          <span className="text-caption text-text-mute">Select all</span>
+        </div>
+      ) : null}
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
+        {entries.map((entry) => (
+          <FileCard
+            key={entry.relativePath}
+            entry={entry}
+            selected={selectedKeys.has(entry.relativePath)}
+            onToggle={onToggle}
+            onAction={onAction}
+            onOpenMenu={onOpenMenu}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -52,6 +72,7 @@ function FileCard({
   const longPress = useLongPress((position) => onOpenMenu(entry, position));
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: context-menu/long-press wrapper only; the keyboard-reachable control is the nested labelled button.
     <div
       className={cn(
         "group relative flex flex-col gap-2 rounded-lg border bg-surface-1 p-3 transition-colors",
@@ -100,6 +121,8 @@ function FileCard({
       {entry.artifact ? (
         <button
           type="button"
+          role="checkbox"
+          aria-checked={selected}
           aria-label={`Select ${entry.name}`}
           className={cn(
             "absolute left-2 top-2 flex items-center justify-center transition-opacity",

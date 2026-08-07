@@ -31,6 +31,12 @@ export interface FileViewProps {
   onToggleDownloadOnce: (entry: TreeEntry) => void;
 }
 
+// The single predicate behind both the per-entry checkboxes and select-all: a
+// folder-only listing has nothing to select, so select-all can never be checked.
+export function hasSelectable(entries: TreeEntry[]): boolean {
+  return entries.some((entry) => entry.artifact !== null);
+}
+
 function ShaCell({ sha256 }: { sha256: string | null }) {
   if (!sha256) {
     return <span className="text-text-faint">—</span>;
@@ -77,6 +83,42 @@ export function useLongPress(
   };
 }
 
+// Shared by the list header and the grid toolbar. The inner Checkbox is decorative
+// (aria-hidden); this button owns the role and the tri-state.
+export function SelectAllCheckbox({
+  allSelected,
+  someSelected,
+  onToggleAll,
+  disabled,
+  className,
+}: {
+  allSelected: boolean;
+  someSelected: boolean;
+  onToggleAll: (checked: boolean) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={allSelected ? true : someSelected ? "mixed" : false}
+      aria-label="Select all"
+      disabled={disabled}
+      className={cn(
+        "flex items-center justify-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+        className,
+      )}
+      onClick={() => onToggleAll(!allSelected)}
+    >
+      <Checkbox
+        checked={allSelected}
+        className={someSelected ? "opacity-60" : undefined}
+      />
+    </button>
+  );
+}
+
 export function FileList({
   entries,
   selectedKeys,
@@ -93,17 +135,12 @@ export function FileList({
       <TableHeader>
         <TableRow>
           <TableHead className="w-10">
-            <button
-              type="button"
-              aria-label="Select all"
-              className="flex items-center justify-center"
-              onClick={() => onToggleAll(!allSelected)}
-            >
-              <Checkbox
-                checked={allSelected}
-                className={someSelected ? "opacity-60" : undefined}
-              />
-            </button>
+            <SelectAllCheckbox
+              allSelected={allSelected}
+              someSelected={someSelected}
+              onToggleAll={onToggleAll}
+              disabled={!hasSelectable(entries)}
+            />
           </TableHead>
           <TableHead>Name</TableHead>
           <TableHead className="w-28 text-right">Size</TableHead>
@@ -164,6 +201,8 @@ function FileRow({
         {entry.artifact ? (
           <button
             type="button"
+            role="checkbox"
+            aria-checked={selected}
             aria-label={`Select ${entry.name}`}
             className={cn(
               "flex items-center justify-center transition-opacity",

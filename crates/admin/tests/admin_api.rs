@@ -4,6 +4,7 @@
 //! rejection. Each test runs against an isolated Postgres via `#[sqlx::test]` and
 //! drives a `Router<AppState>` through `tower::oneshot`.
 
+use sqlx::AssertSqlSafe;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -24,7 +25,11 @@ use loontail_core::AppState;
 const COOKIE_NAME: &str = "loontail_admin";
 
 fn test_state(pool: PgPool) -> AppState {
-    std::env::set_var("DATABASE_URL", "postgres://unused");
+    // why: only a placeholder when the var is absent — clobbering a real DATABASE_URL
+    // trips sqlx::test's "DATABASE_URL changed at runtime" assertion mid-run.
+    if std::env::var_os("DATABASE_URL").is_none() {
+        std::env::set_var("DATABASE_URL", "postgres://unused");
+    }
     let mut config = Config::from_env().unwrap();
     config.admin.cookie_name = COOKIE_NAME.to_string();
     config.admin.bootstrap_username = "rootadmin".to_string();
@@ -567,9 +572,9 @@ async fn analytics_overview_counts_seeded_rows(pool: PgPool) {
         } else {
             "now()"
         };
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO presence (user_id, status, last_heartbeat_at) VALUES ($1, $2, {hb})"
-        ))
+        )))
         .bind(u.id)
         .bind(status)
         .execute(&pool)

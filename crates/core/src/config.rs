@@ -27,6 +27,7 @@ pub struct Config {
     pub search_max_results: i64,
     pub rate_limit: RateLimitConfig,
     pub request_log: RequestLogConfig,
+    pub event_retention: EventRetentionConfig,
     pub yggdrasil: YggdrasilConfig,
     pub textures: TexturesConfig,
     pub catalog: CatalogConfig,
@@ -70,13 +71,32 @@ impl RequestLogConfig {
     }
 }
 
+/// Retention for the join/invite lifecycle history and `user_events`. Terminal
+/// join-request/invite rows, spent join tickets, and analytics events older than this
+/// are deleted by the hourly cleanup tick. Kept longer than the request log because
+/// these rows back the admin analytics views.
+///
+/// Env var: `EVENT_RETENTION_DAYS` (default 30).
+#[derive(Debug, Clone)]
+pub struct EventRetentionConfig {
+    pub retention_days: i64,
+}
+
+impl EventRetentionConfig {
+    fn from_env() -> Self {
+        Self {
+            retention_days: parse_env("EVENT_RETENTION_DAYS", 30),
+        }
+    }
+}
+
 /// Yggdrasil (Mojang-compatible auth) configuration.
 ///
 /// Env vars: `YGGDRASIL_PUBLIC_URL` (default `/api/yggdrasil`),
 /// `YGGDRASIL_KEY_PATH` (default `data/yggdrasil/keys/active.key.pem`),
 /// `YGGDRASIL_TOKEN_TTL_SECONDS` (default 1296000 = 15d),
 /// `YGGDRASIL_MAX_TOKENS_PER_USER` (default 10),
-/// `YGGDRASIL_SKIN_DOMAINS` (comma-separated, default `.loontail.com,localhost`).
+/// `YGGDRASIL_SKIN_DOMAINS` (comma-separated, default `.loontail.dev,localhost`).
 #[derive(Debug, Clone)]
 pub struct YggdrasilConfig {
     pub public_url: String,
@@ -162,6 +182,7 @@ impl Config {
             search_max_results: parse_env("SEARCH_MAX_RESULTS", 20),
             rate_limit: RateLimitConfig::from_env(),
             request_log: RequestLogConfig::from_env(),
+            event_retention: EventRetentionConfig::from_env(),
             yggdrasil: YggdrasilConfig::from_env(),
             textures: TexturesConfig::from_env(),
             catalog: CatalogConfig::from_env(),
@@ -171,14 +192,26 @@ impl Config {
     }
 }
 
+/// Hosts advertised to clients as allowed texture sources. A deployment overrides
+/// this with its own `NETWORK_DOMAIN` (see `scripts/deploy-remote.sh`); the default
+/// covers the project's own `*.loontail.dev` hosts plus local development.
+const DEFAULT_SKIN_DOMAINS: &str = ".loontail.dev,localhost";
+
+/// Split a comma-separated skin-domain list, trimming blanks so a trailing comma or
+/// padded entry is harmless.
+fn parse_skin_domains(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
 impl YggdrasilConfig {
     fn from_env() -> Self {
-        let skin_domains = env::var("YGGDRASIL_SKIN_DOMAINS")
-            .unwrap_or_else(|_| ".loontail.com,localhost".to_string())
-            .split(',')
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .collect();
+        let skin_domains = parse_skin_domains(
+            &env::var("YGGDRASIL_SKIN_DOMAINS")
+                .unwrap_or_else(|_| DEFAULT_SKIN_DOMAINS.to_string()),
+        );
         Self {
             public_url: env::var("YGGDRASIL_PUBLIC_URL")
                 .unwrap_or_else(|_| "/api/yggdrasil".to_string()),
@@ -307,5 +340,28 @@ mod public_url_tests {
     fn path_only_has_no_origin() {
         assert_eq!(parse_public_url("/api/yggdrasil"), (None, "/api/yggdrasil"));
         assert_eq!(parse_public_url(""), (None, ""));
+    }
+}
+
+#[cfg(test)]
+mod skin_domain_tests {
+    use super::{parse_skin_domains, DEFAULT_SKIN_DOMAINS};
+
+    /// CON-02: the default whitelist must cover the domains this project actually
+    /// deploys on (`*.loontail.dev`), or clients refuse every texture.
+    #[test]
+    fn default_skin_domains_cover_the_real_deployment() {
+        assert_eq!(
+            parse_skin_domains(DEFAULT_SKIN_DOMAINS),
+            vec![".loontail.dev".to_string(), "localhost".to_string()]
+        );
+    }
+
+    #[test]
+    fn blank_and_padded_entries_are_dropped() {
+        assert_eq!(
+            parse_skin_domains(" cms.loontail.dev , .loontail.dev ,, "),
+            vec!["cms.loontail.dev".to_string(), ".loontail.dev".to_string()]
+        );
     }
 }

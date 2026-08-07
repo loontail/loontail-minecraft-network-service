@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use loontail_core::auth::yggdrasil::{
     invalidate_yggdrasil, issue_yggdrasil_tokens, refresh_yggdrasil, validate_yggdrasil,
 };
-use loontail_core::identity::{authenticate_password, get_user};
+use loontail_core::identity::{authenticate_password, load_user};
 use loontail_core::{AppState, Config};
 use loontail_yggdrasil_protocol::uuid::undash_uuid;
 
@@ -90,7 +90,7 @@ struct AuthenticateRequest {
     agent: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileSummary {
     id: String,
@@ -119,6 +119,26 @@ fn user_block(user_id: uuid::Uuid) -> Value {
     json!({ "id": user_id.to_string(), "properties": [] })
 }
 
+/// The Mojang session document both `authenticate` and `refresh` answer with. It is a
+/// protocol contract, so it is assembled in exactly one place: two copies could
+/// diverge in the `user` block or the profile list and only one endpoint would break.
+/// A user with no `profile_uuid` has nothing to select and is refused here.
+fn session_document(
+    user: &loontail_core::models::User,
+    tokens: loontail_core::auth::yggdrasil::YggdrasilTokens,
+    request_user: bool,
+) -> YggResult<YggdrasilSession> {
+    let profile_uuid = user.profile_uuid.as_deref().ok_or(YggError::Forbidden)?;
+    let selected = profile_summary(profile_uuid, &user.username);
+    Ok(YggdrasilSession {
+        access_token: tokens.access_token,
+        client_token: tokens.client_token,
+        available_profiles: vec![selected.clone()],
+        selected_profile: selected,
+        user: request_user.then(|| user_block(user.id)),
+    })
+}
+
 /// `POST /authserver/authenticate` — verify credentials, issue an access/client
 /// token pair, and return the Mojang session document.
 async fn authenticate(
@@ -126,7 +146,11 @@ async fn authenticate(
     Json(body): Json<AuthenticateRequest>,
 ) -> YggResult<Json<YggdrasilSession>> {
     let user = authenticate_password(&state.pool, &body.username, &body.password).await?;
-    let profile_uuid = user.profile_uuid.clone().ok_or(YggError::Forbidden)?;
+    // why: refuse before minting a pair — a profile-less account cannot be selected,
+    // and issuing tokens for it would leave live rows no session document can name.
+    if user.profile_uuid.is_none() {
+        return Err(YggError::Forbidden);
+    }
 
     let tokens = issue_yggdrasil_tokens(
         &state.pool,
@@ -137,16 +161,7 @@ async fn authenticate(
     )
     .await?;
 
-    let selected = profile_summary(&profile_uuid, &user.username);
-    let available = vec![profile_summary(&profile_uuid, &user.username)];
-
-    Ok(Json(YggdrasilSession {
-        access_token: tokens.access_token,
-        client_token: tokens.client_token,
-        available_profiles: available,
-        selected_profile: selected,
-        user: body.request_user.then(|| user_block(user.id)),
-    }))
+    Ok(Json(session_document(&user, tokens, body.request_user)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,16 +200,7 @@ async fn refresh(
         }
     }
 
-    let selected = profile_summary(&profile_uuid, &user.username);
-    let available = vec![profile_summary(&profile_uuid, &user.username)];
-
-    Ok(Json(YggdrasilSession {
-        access_token: tokens.access_token,
-        client_token: tokens.client_token,
-        available_profiles: available,
-        selected_profile: selected,
-        user: body.request_user.then(|| user_block(user.id)),
-    }))
+    Ok(Json(session_document(&user, tokens, body.request_user)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,7 +305,7 @@ async fn has_joined(
         }
     }
 
-    let user = get_user(&state.pool, session.user_id).await?;
+    let user = load_user(&state.pool, session.user_id).await?;
     // The join must be for the username the server is asking about.
     if !user.username.eq_ignore_ascii_case(query.username.trim()) {
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -342,7 +348,9 @@ async fn profile_by_uuid(
         Err(_) => return Ok(StatusCode::NO_CONTENT.into_response()),
     };
 
-    let Some(user) = find_user_by_profile_uuid(&state.pool, &profile_uuid).await? else {
+    let Some(user) =
+        loontail_core::identity::find_by_profile_uuid(&state.pool, &profile_uuid).await?
+    else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
     let stored_uuid = user.profile_uuid.clone().ok_or(YggError::Forbidden)?;
@@ -372,19 +380,31 @@ async fn profiles_by_name(
     State(state): State<AppState>,
     Json(names): Json<Vec<String>>,
 ) -> YggResult<Json<Vec<ProfileSummary>>> {
-    let mut out = Vec::new();
-    for name in names.iter().take(100) {
-        let normalized = name.trim().to_lowercase();
-        if normalized.is_empty() {
-            continue;
-        }
-        if let Some(user) = find_user_by_normalized_username(&state.pool, &normalized).await? {
-            if let Some(profile_uuid) = user.profile_uuid {
-                out.push(profile_summary(&profile_uuid, &user.username));
-            }
-        }
-    }
-    Ok(Json(out))
+    // why: the endpoint's contract is bulk (a 100-name tab list), so it resolves in ONE
+    // query. Looping single-row lookups held a pooled connection for 100 sequential
+    // round-trips.
+    let mut normalized: Vec<String> = names
+        .iter()
+        .take(100)
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT username, profile_uuid FROM users \
+         WHERE normalized_username = ANY($1) AND profile_uuid IS NOT NULL",
+    )
+    .bind(&normalized)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(username, profile_uuid)| profile_summary(&profile_uuid, &username))
+            .collect(),
+    ))
 }
 
 /// `GET /` — the Yggdrasil meta document: server identity, skin domains, and the
@@ -400,34 +420,6 @@ async fn meta(State(state): State<AppState>) -> YggResult<Json<Value>> {
         "skinDomains": state.config.yggdrasil.skin_domains,
         "signaturePublickey": key.public_spki_pem(),
     })))
-}
-
-async fn find_user_by_profile_uuid(
-    pool: &sqlx::PgPool,
-    profile_uuid: &str,
-) -> Result<Option<loontail_core::models::User>, YggError> {
-    let user = sqlx::query_as::<_, loontail_core::models::User>(
-        "SELECT * FROM users WHERE profile_uuid = $1",
-    )
-    .bind(profile_uuid)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| YggError::from(loontail_core::AppError::from(e)))?;
-    Ok(user)
-}
-
-async fn find_user_by_normalized_username(
-    pool: &sqlx::PgPool,
-    normalized: &str,
-) -> Result<Option<loontail_core::models::User>, YggError> {
-    let user = sqlx::query_as::<_, loontail_core::models::User>(
-        "SELECT * FROM users WHERE normalized_username = $1",
-    )
-    .bind(normalized)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| YggError::from(loontail_core::AppError::from(e)))?;
-    Ok(user)
 }
 
 pub use account::account_routes;

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use loontail_core::auth::AdminUser;
 use loontail_core::error::AppResult;
 use loontail_core::AppState;
+use sqlx::AssertSqlSafe;
 
 use crate::dto::{AnalyticsOverview, TimeseriesPoint, TimeseriesQuery, TimeseriesResponse};
 
@@ -110,7 +111,7 @@ pub async fn timeseries(
         "#
     );
 
-    let rows = sqlx::query_as::<_, (DateTime<Utc>, i64)>(&sql)
+    let rows = sqlx::query_as::<_, (DateTime<Utc>, i64)>(AssertSqlSafe(sql))
         .bind(event_type)
         .fetch_all(&state.pool)
         .await?;

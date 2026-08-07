@@ -2,10 +2,10 @@ import { screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BuildsPage } from "@/pages/BuildsPage";
-import type { ClientAdmin } from "@/shared/types";
+import type { BuildAdmin } from "@/shared/types";
 import { renderWithProviders } from "@/test/renderWithProviders";
 
-const SAMPLE_BUILD: ClientAdmin = {
+const SAMPLE_BUILD: BuildAdmin = {
   id: "11111111111111111111111111111111",
   slug: "all-the-mods-9",
   title: "All the Mods 9",
@@ -40,7 +40,7 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-function mockApi({ clients = [] as ClientAdmin[] } = {}) {
+function mockApi({ clients = [] as BuildAdmin[] } = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
