@@ -7,7 +7,7 @@
 # Digest-pinned so "rebuild commit X" reproduces the image. Refresh with
 # `docker buildx imagetools inspect node:24-alpine`; Dependabot's docker
 # ecosystem bumps it under review.
-FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS admin-ui
+FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS admin-ui
 
 WORKDIR /app/admin-ui
 
