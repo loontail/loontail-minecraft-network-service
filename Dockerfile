@@ -23,7 +23,7 @@ RUN npm run build
 # Pinned to the multi-arch OCI index digest so the builder toolchain cannot drift
 # under the floating tag. `rust-version = "1.94"` (sqlx 0.9) is the real floor;
 # refresh the digest with `docker buildx imagetools inspect rust:1.95-slim-bookworm`.
-FROM rust:1.95-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS builder
+FROM rust:1.96-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS builder
 
 WORKDIR /app
 
