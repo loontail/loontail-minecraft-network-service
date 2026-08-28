@@ -63,7 +63,7 @@ RUN find crates -name '*.rs' -exec touch {} + \
 # Digest-pinned like the builder: the runtime CA trust store must not change
 # under a rebuild of the same commit. `apt-get` below still picks up security
 # updates for the packages it installs.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
